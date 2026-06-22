@@ -154,6 +154,28 @@ impl GeminiProvider {
         Ok(clean_polish_output(&raw))
     }
 
+    /// 文本重写：接收用户选中的文本，按风格 prompt 生成重写结果。
+    /// 复用 build_generate_body + send_unary 通路，与 polish/translate 共享。
+    pub async fn rewrite(
+        &self,
+        source_text: &str,
+        style_prompt: &str,
+    ) -> Result<String, LLMError> {
+        let system_prompt = crate::polish::compose_rewrite_system_prompt(style_prompt);
+        let user_prompt = crate::polish::compose_rewrite_user_prompt(source_text);
+        let contents = vec![user_content(&user_prompt)];
+        let body = self.build_generate_body(&system_prompt, contents);
+        let url = generate_content_url(&self.config.base_url, &self.config.model);
+        log::info!(
+            "[llm] POST {} provider=gemini model={} rewrite=true",
+            url,
+            self.config.model
+        );
+        let body_text = self.send_unary(&url, &body).await?;
+        let raw = extract_assistant_content(&body_text)?;
+        Ok(clean_polish_output(&raw))
+    }
+
     /// 划词语音问答的流式回答。Gemini 原生 SSE: `:streamGenerateContent?alt=sse`，
     /// 每个 `data: {...}` 帧里 `candidates[0].content.parts[0].text` 是 delta；
     /// 流结束没有 `[DONE]` sentinel，stream 自然终止。

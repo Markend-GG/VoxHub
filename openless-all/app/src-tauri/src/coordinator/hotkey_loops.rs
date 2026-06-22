@@ -795,6 +795,15 @@ pub(super) fn handle_action_hotkey_pressed(inner: &Arc<Inner>, kind: ActionHotke
                 });
             }
         }
+        ActionHotkeyKind::Rewrite => {
+            let inner_clone = Arc::clone(inner);
+            std::thread::Builder::new()
+                .name("openless-rewrite-task".into())
+                .spawn(move || {
+                    run_rewrite_flow(&inner_clone);
+                })
+                .ok();
+        }
     }
 }
 
@@ -887,6 +896,7 @@ pub(super) fn action_hotkey_slot(
     match kind {
         ActionHotkeyKind::SwitchStyle => &inner.switch_style_hotkey,
         ActionHotkeyKind::OpenApp => &inner.open_app_hotkey,
+        ActionHotkeyKind::Rewrite => &inner.rewrite_hotkey,
     }
 }
 
@@ -898,6 +908,7 @@ pub(super) fn action_hotkey_binding(
     match kind {
         ActionHotkeyKind::SwitchStyle => prefs.switch_style_hotkey,
         ActionHotkeyKind::OpenApp => prefs.open_app_hotkey,
+        ActionHotkeyKind::Rewrite => prefs.rewrite_hotkey,
     }
 }
 
@@ -915,6 +926,7 @@ pub(super) fn action_hotkey_bridge_thread_name(kind: ActionHotkeyKind) -> &'stat
     match kind {
         ActionHotkeyKind::SwitchStyle => "openless-switch-style-hotkey-bridge",
         ActionHotkeyKind::OpenApp => "openless-open-app-hotkey-bridge",
+        ActionHotkeyKind::Rewrite => "openless-rewrite-hotkey-bridge",
     }
 }
 
@@ -1066,6 +1078,15 @@ pub(super) fn reset_shortcut_held_state(inner: &Arc<Inner>) {
             if let Some(monitor) = inner.open_app_hotkey.lock().as_ref() {
                 if let Err(e) = monitor.update_binding(open_app.clone()) {
                     log::warn!("[coord] reset open-app hotkey latch failed: {e}");
+                }
+            }
+        }
+    }
+    if let Some(rewrite) = prefs.rewrite_hotkey.as_ref() {
+        if !is_modifier_only_shortcut(rewrite) {
+            if let Some(monitor) = inner.rewrite_hotkey.lock().as_ref() {
+                if let Err(e) = monitor.update_binding(rewrite.clone()) {
+                    log::warn!("[coord] reset rewrite hotkey latch failed: {e}");
                 }
             }
         }

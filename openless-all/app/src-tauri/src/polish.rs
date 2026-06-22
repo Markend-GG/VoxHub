@@ -225,6 +225,19 @@ impl ActiveLLMProvider {
         }
     }
 
+    /// 文本重写：接收用户选中的文本，按风格 prompt 生成重写结果。
+    /// 与 polish/translate 共享 LLM provider，但 prompt 独立、不涉及 ASR 语义。
+    pub async fn rewrite(
+        &self,
+        source_text: &str,
+        style_prompt: &str,
+    ) -> Result<String, LLMError> {
+        match self {
+            Self::OpenAI(provider) => provider.rewrite(source_text, style_prompt).await,
+            Self::Codex(provider) => provider.rewrite(source_text, style_prompt).await,
+        }
+    }
+
     pub async fn answer_chat_streaming<F, C>(
         &self,
         messages: &[QaChatMessage],
@@ -465,6 +478,18 @@ impl OpenAICompatibleLLMProvider {
 
         // 复用 send_and_extract 把 chat_completion 与本函数共享 HTTP / 解析路径。
         self.send_chat_request(&url, &body).await
+    }
+
+    /// 文本重写：接收用户选中的文本，按风格 prompt 生成重写结果。
+    /// 复用私有的 chat_completion 通路，仅 prompt 不同。
+    pub async fn rewrite(
+        &self,
+        source_text: &str,
+        style_prompt: &str,
+    ) -> Result<String, LLMError> {
+        let system_prompt = crate::polish::compose_rewrite_system_prompt(style_prompt);
+        let user_prompt = crate::polish::compose_rewrite_user_prompt(source_text);
+        self.chat_completion(&system_prompt, &user_prompt).await
     }
 
     async fn chat_completion(
@@ -982,6 +1007,22 @@ impl CodexOAuthLLMProvider {
         let messages = vec![
             json!({ "role": "system", "content": system_prompt }),
             json!({ "role": "user", "content": prompts::user_prompt(raw_text) }),
+        ];
+        self.codex_responses(messages, |_| {}, || false).await
+    }
+
+    /// 文本重写：接收用户选中的文本，按风格 prompt 生成重写结果。
+    /// 走 Codex Responses API，与 polish/translate 共享通路。
+    pub async fn rewrite(
+        &self,
+        source_text: &str,
+        style_prompt: &str,
+    ) -> Result<String, LLMError> {
+        let system_prompt = crate::polish::compose_rewrite_system_prompt(style_prompt);
+        let user_prompt = crate::polish::compose_rewrite_user_prompt(source_text);
+        let messages = vec![
+            json!({ "role": "system", "content": system_prompt }),
+            json!({ "role": "user", "content": user_prompt }),
         ];
         self.codex_responses(messages, |_| {}, || false).await
     }
@@ -3154,4 +3195,22 @@ mod tests {
 
         server.join().unwrap();
     }
+}
+
+/// 组装重写的 system prompt。规则：保留原意、不输出解释、保留原文语言、保持结构化文本格式。
+pub(crate) fn compose_rewrite_system_prompt(style_prompt: &str) -> String {
+    format!(
+        "你是文本重写助手。请根据给定风格要求改写用户选中的文本。\n\
+         规则：\n\
+         1. 保留原意，不新增未经原文支持的事实。\n\
+         2. 不输出解释、标题、引号或 Markdown 包裹，除非原文就是该格式。\n\
+         3. 尽量保留原文语言；如风格要求指定输出语言，以风格要求为准。\n\
+         4. 如果输入是列表、代码片段、URL、命令或结构化文本，尽量保持结构。\n\n\
+         风格要求：\n{style_prompt}"
+    )
+}
+
+/// 组装重写的 user prompt。
+pub(crate) fn compose_rewrite_user_prompt(source_text: &str) -> String {
+    format!("请重写以下文本：\n<text>\n{text}\n</text>", text = source_text)
 }

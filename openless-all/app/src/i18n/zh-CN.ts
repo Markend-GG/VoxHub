@@ -300,6 +300,10 @@ export const zhCN = {
     },
   },
   history: {
+    tabs: {
+      voice: '语音历史',
+      rewrite: '重写历史',
+    },
     kicker: 'HISTORY',
     title: '历史记录',
     desc: '本机保存的识别记录。',
@@ -806,6 +810,7 @@ export const zhCN = {
       confirm: '胶囊确认插入',
       switchStyle: '切换到上一个风格',
       openApp: '打开 OpenLess',
+      rewrite: '文本重写',
       agentPolish: '选中文本润色',
       agentPolishDesc: '选中文本 → 按键 → Claude 润色 → 替换选区。',
       agentVoice: 'Less Computer',
@@ -1262,5 +1267,18 @@ export const zhCN = {
     keep5min: '上次使用后 5 分钟（默认）',
     keep30min: '上次使用后 30 分钟',
     keepForever: '不释放（始终保留）',
-  },
+  },    rewrite: {
+      inserted: '已替换',
+      pasteSent: '已粘贴',
+      copiedFallback: '已复制',
+      failed: '失败',
+      emptyHistory: '暂无重写历史',
+      entries: '条',
+      copyResult: '复制结果',
+      copySource: '复制原文',
+      sourceText: '原文',
+      resultText: '重写结果',
+      sourceApp: '来源应用',
+    },
+
 };

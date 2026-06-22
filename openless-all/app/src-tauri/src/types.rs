@@ -107,6 +107,56 @@ pub enum InsertStatus {
     Failed,
 }
 
+/// 文本重写历史条目。与 `DictationSession` 完全隔离，不写入 `history.json`。
+/// 失败请求也写入历史，`error_code` 非 None 时表示失败原因，`rewritten_text` 可能为空。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewriteHistoryEntry {
+    pub id: String,
+    pub created_at: String,
+    pub source_text: String,
+    pub rewritten_text: String,
+    pub style_pack_id: Option<String>,
+    pub style_pack_name: Option<String>,
+    pub app_name: Option<String>,
+    pub insert_status: InsertStatus,
+    pub error_code: Option<String>,
+    pub duration_ms: Option<u64>,
+}
+
+/// `rewrite:state` 事件 payload，推送给前端浮窗展示重写进度。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewriteStatePayload {
+    pub kind: RewriteStateKind,
+    pub message: Option<String>,
+    pub source_preview: Option<String>,
+    pub result_preview: Option<String>,
+    pub insert_status: Option<InsertStatus>,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RewriteStateKind {
+    Capturing,
+    Rewriting,
+    Inserting,
+    Done,
+    Error,
+}
+
+/// 重写错误码常量，用于 `RewriteHistoryEntry.error_code` 和前端错误提示。
+pub mod rewrite_error_code {
+    pub const DICTATION_BUSY: &str = "dictationBusy";
+    pub const SELECTION_EMPTY: &str = "selectionEmpty";
+    pub const SELECTION_CAPTURE_FAILED: &str = "selectionCaptureFailed";
+    pub const LLM_NOT_CONFIGURED: &str = "llmNotConfigured";
+    pub const LLM_FAILED: &str = "llmFailed";
+    pub const FOCUS_RESTORE_FAILED: &str = "focusRestoreFailed";
+    pub const INSERT_FAILED: &str = "insertFailed";
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationSession {
@@ -629,6 +679,13 @@ pub struct UserPreferences {
     /// 「唤起 App」全局快捷键。`None` = 停用；`Some(...)` = 注册。默认 `Some(默认键)`。
     #[serde(default = "default_open_app_hotkey")]
     pub open_app_hotkey: Option<ShortcutBinding>,
+    /// 「文本重写」全局快捷键。`None` = 停用；`Some(...)` = 注册。
+    /// 默认 `Some(Ctrl/Cmd+Shift+R)`。
+    #[serde(default = "default_rewrite_hotkey")]
+    pub rewrite_hotkey: Option<ShortcutBinding>,
+    /// 是否保存重写历史。默认 true；失败请求也写入历史并包含 error_code。
+    #[serde(default = "default_true")]
+    pub rewrite_save_history: bool,
     /// Less Computer：是否启用。默认关闭，需用户在高级设置开启。
     #[serde(default)]
     pub coding_agent_enabled: bool,
@@ -894,6 +951,10 @@ struct UserPreferencesWire {
     translation_hotkey: Option<ShortcutBinding>,
     switch_style_hotkey: Option<ShortcutBinding>,
     open_app_hotkey: Option<ShortcutBinding>,
+    #[serde(default = "default_rewrite_hotkey")]
+    rewrite_hotkey: Option<ShortcutBinding>,
+    #[serde(default = "default_true")]
+    rewrite_save_history: bool,
     #[serde(default)]
     coding_agent_enabled: bool,
     #[serde(default = "default_coding_agent_provider")]
@@ -1015,6 +1076,8 @@ impl Default for UserPreferencesWire {
             // 默认携带默认键（Some），保证缺字段时仍是启用状态；None 专表「用户主动停用」。
             switch_style_hotkey: prefs.switch_style_hotkey,
             open_app_hotkey: prefs.open_app_hotkey,
+            rewrite_hotkey: prefs.rewrite_hotkey,
+            rewrite_save_history: prefs.rewrite_save_history,
             coding_agent_enabled: prefs.coding_agent_enabled,
             coding_agent_provider: prefs.coding_agent_provider,
             coding_agent_model: prefs.coding_agent_model,
@@ -1131,6 +1194,8 @@ impl<'de> Deserialize<'de> for UserPreferences {
             // 会落到 Some(默认键)，保证老用户/新用户仍是启用。
             switch_style_hotkey: wire.switch_style_hotkey,
             open_app_hotkey: wire.open_app_hotkey,
+            rewrite_hotkey: wire.rewrite_hotkey,
+            rewrite_save_history: wire.rewrite_save_history,
             local_asr_active_model: wire.local_asr_active_model,
             local_asr_mirror: wire.local_asr_mirror,
             local_asr_keep_loaded_secs: wire.local_asr_keep_loaded_secs,
@@ -1216,6 +1281,13 @@ fn default_switch_style_hotkey() -> Option<ShortcutBinding> {
 fn default_open_app_hotkey() -> Option<ShortcutBinding> {
     Some(ShortcutBinding {
         primary: "O".into(),
+        modifiers: default_app_shortcut_modifiers(),
+    })
+}
+
+fn default_rewrite_hotkey() -> Option<ShortcutBinding> {
+    Some(ShortcutBinding {
+        primary: "R".into(),
         modifiers: default_app_shortcut_modifiers(),
     })
 }
@@ -1857,6 +1929,8 @@ impl Default for UserPreferences {
             translation_hotkey: default_translation_hotkey(),
             switch_style_hotkey: default_switch_style_hotkey(),
             open_app_hotkey: default_open_app_hotkey(),
+            rewrite_hotkey: default_rewrite_hotkey(),
+            rewrite_save_history: true,
             coding_agent_enabled: false,
             coding_agent_provider: default_coding_agent_provider(),
             coding_agent_model: None,
@@ -2536,6 +2610,9 @@ pub struct CapsulePayload {
     /// 从 "thinking" 换成 "using"——告诉用户 Agent 正在操作电脑而非单纯思考。
     #[serde(default)]
     pub operating: bool,
+    /// 当前胶囊状态来自文本重写流程。前端据此隐藏取消/确认按钮（重写不需要这两个按钮）。
+    #[serde(default)]
+    pub rewrite: bool,
 }
 
 /// Snapshot of credentials read from vault — only what the UI needs to know

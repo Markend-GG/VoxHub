@@ -304,6 +304,10 @@ export const ko: typeof zhCN = {
     },
   },
   history: {
+    tabs: {
+      voice: '음성 기록',
+      rewrite: '재작성 기록',
+    },
     kicker: 'HISTORY',
     title: '기록',
     desc: '로컬에 저장된 인식 기록.',
@@ -810,6 +814,7 @@ export const ko: typeof zhCN = {
       confirm: '캡슐 입력 확정',
       switchStyle: '이전 스타일로 전환',
       openApp: 'OpenLess 열기',
+      rewrite: '텍스트 재작성',
       agentPolish: '선택 텍스트 다듬기',
       agentPolishDesc: '텍스트 선택 → 키 → Claude 다듬기 → 선택 영역 교체.',
       agentVoice: 'Less Computer',
@@ -1232,5 +1237,18 @@ export const ko: typeof zhCN = {
     keep5min: '마지막 사용 후 5분(기본)',
     keep30min: '마지막 사용 후 30분',
     keepForever: '해제하지 않음(항상 유지)',
-  },
+  },    rewrite: {
+      inserted: '대체됨',
+      pasteSent: '붙여넣기됨',
+      copiedFallback: '복사됨',
+      failed: '실패',
+      emptyHistory: '재작성 기록 없음',
+      entries: '건',
+      copyResult: '결과 복사',
+      copySource: '원문 복사',
+      sourceText: '원문',
+      resultText: '재작성 결과',
+      sourceApp: '소스 앱',
+    },
+
 };

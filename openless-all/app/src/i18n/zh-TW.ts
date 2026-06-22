@@ -302,6 +302,10 @@ export const zhTW: typeof zhCN = {
     },
   },
   history: {
+    tabs: {
+      voice: '語音歷史',
+      rewrite: '重寫歷史',
+    },
     kicker: 'HISTORY',
     title: '歷史記錄',
     desc: '本機保存的識別記錄。',
@@ -808,6 +812,7 @@ export const zhTW: typeof zhCN = {
       confirm: '膠囊確認插入',
       switchStyle: '切換到上一個風格',
       openApp: '打開 OpenLess',
+      rewrite: '文字重寫',
       agentPolish: '選取文字潤色',
       agentPolishDesc: '選取文字 → 按鍵 → Claude 潤色 → 取代選取。',
       agentVoice: 'Less Computer',
@@ -1230,5 +1235,18 @@ export const zhTW: typeof zhCN = {
     keep5min: '上次使用後 5 分鐘（默認）',
     keep30min: '上次使用後 30 分鐘',
     keepForever: '不釋放（始終保留）',
-  },
+  },    rewrite: {
+      inserted: '已替換',
+      pasteSent: '已貼上',
+      copiedFallback: '已複製',
+      failed: '失敗',
+      emptyHistory: '暫無重寫歷史',
+      entries: '條',
+      copyResult: '複製結果',
+      copySource: '複製原文',
+      sourceText: '原文',
+      resultText: '重寫結果',
+      sourceApp: '來源應用',
+    },
+
 };

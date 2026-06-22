@@ -183,11 +183,12 @@ interface PillProps {
   insertedChars: number;
   message?: string;
   operating?: boolean;
+  rewrite?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }
 
-function Pill({ os, state, level, insertedChars, message, operating, onCancel, onConfirm }: PillProps) {
+function Pill({ os, state, level, insertedChars, message, operating, rewrite, onCancel, onConfirm }: PillProps) {
   const { t } = useTranslation();
   const metrics = useMemo(() => getCapsulePillMetrics(os), [os]);
   const processingLayout = useMemo(() => getCapsuleMessageLayout(os, 'processing'), [os]);
@@ -308,11 +309,11 @@ function Pill({ os, state, level, insertedChars, message, operating, onCancel, o
         willChange: 'transform, box-shadow',
       }}
     >
-      <CircleButton variant="cancel" enabled={cancelEnabled} onClick={onCancel} />
+      {!rewrite && <CircleButton variant="cancel" enabled={cancelEnabled} onClick={onCancel} />}
       <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         {center}
       </div>
-      <CircleButton variant="confirm" enabled={confirmEnabled} onClick={onConfirm} />
+      {!rewrite && <CircleButton variant="confirm" enabled={confirmEnabled} onClick={onConfirm} />}
     </div>
   );
 }
@@ -338,6 +339,7 @@ export function Capsule() {
   const [message, setMessage] = useState<string | undefined>();
   const [translation, setTranslation] = useState<boolean>(false);
   const [operating, setOperating] = useState<boolean>(false);
+  const [rewrite, setRewrite] = useState<boolean>(false);
   // `leaving` 与 `lastVisibleState` 协同实现「退出动画」：
   // - 当 state 从非 idle 变成 idle 时，不立即卸载，而是把 leaving 置为 true 并保留
   //   最后一帧的可见 state（lastVisibleState），让胶囊用 capsule-out 动画收缩淡出。
@@ -368,6 +370,7 @@ export function Capsule() {
         if (p.insertedChars != null) setInsertedChars(p.insertedChars);
         setTranslation(p.translation === true);
         setOperating(p.operating === true);
+        setRewrite(p.rewrite === true);
       });
       if (cancelled) handle();
       else unlisten = handle;
@@ -506,6 +509,7 @@ export function Capsule() {
         insertedChars={insertedChars}
         message={message}
         operating={operating}
+        rewrite={rewrite}
         onCancel={onCancel}
         onConfirm={onConfirm}
       />

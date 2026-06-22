@@ -4,11 +4,12 @@ import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ShortcutRecorder } from '../../components/ShortcutRecorder';
-import { defaultLessComputerShortcut, defaultOpenAppShortcut, defaultQaShortcut, defaultSwitchStyleShortcut } from '../../lib/hotkey';
+import { defaultLessComputerShortcut, defaultOpenAppShortcut, defaultQaShortcut, defaultRewriteShortcut, defaultSwitchStyleShortcut } from '../../lib/hotkey';
 import {
   setDictationHotkey,
   setOpenAppHotkey,
   setQaHotkey,
+  setRewriteHotkey,
   setSwitchStyleHotkey,
   setTranslationHotkey,
 } from '../../lib/ipc';
@@ -160,6 +161,33 @@ export function ShortcutsSection() {
               const binding = defaultOpenAppShortcut();
               await setOpenAppHotkey(binding);
               await savePrefs({ ...prefs, openAppHotkey: binding });
+            }}
+            style={enableBtnStyle}
+          >
+            {t('settings.shortcuts.enable', 'Enable')}
+          </button>
+        )}
+      </SettingRow>
+      <SettingRow label={t('settings.shortcuts.rewrite', '文本重写')}>
+        {prefs.rewriteHotkey ? (
+          <ShortcutRecorder
+            value={prefs.rewriteHotkey}
+            alignRecordButton
+            onSave={async binding => {
+              await setRewriteHotkey(binding);
+              await savePrefs({ ...prefs, rewriteHotkey: binding });
+            }}
+            onDisable={async () => {
+              await setRewriteHotkey(null);
+              await savePrefs({ ...prefs, rewriteHotkey: null });
+            }}
+          />
+        ) : (
+          <button
+            onClick={async () => {
+              const binding = defaultRewriteShortcut();
+              await setRewriteHotkey(binding);
+              await savePrefs({ ...prefs, rewriteHotkey: binding });
             }}
             style={enableBtnStyle}
           >

@@ -302,6 +302,10 @@ export const en: typeof zhCN = {
     },
   },
   history: {
+    tabs: {
+      voice: 'Voice History',
+      rewrite: 'Rewrite History',
+    },
     kicker: 'HISTORY',
     title: 'History',
     desc: 'Locally stored transcripts.',
@@ -808,6 +812,7 @@ export const en: typeof zhCN = {
       confirm: 'Confirm capsule insertion',
       switchStyle: 'Switch to previous style',
       openApp: 'Open OpenLess',
+      rewrite: 'Text Rewrite',
       agentPolish: 'Polish selected text',
       agentPolishDesc: 'Select text → press → Claude polishes it → replaces the selection.',
       agentVoice: 'Less Computer',
@@ -1264,5 +1269,18 @@ export const en: typeof zhCN = {
     keep5min: '5 minutes after last use (default)',
     keep30min: '30 minutes after last use',
     keepForever: 'Never release (always loaded)',
-  },
+  },    rewrite: {
+      inserted: 'Replaced',
+      pasteSent: 'Pasted',
+      copiedFallback: 'Copied',
+      failed: 'Failed',
+      emptyHistory: 'No rewrite history yet',
+      entries: 'entries',
+      copyResult: 'Copy Result',
+      copySource: 'Copy Source',
+      sourceText: 'Source',
+      resultText: 'Rewritten',
+      sourceApp: 'Source App',
+    },
+
 };

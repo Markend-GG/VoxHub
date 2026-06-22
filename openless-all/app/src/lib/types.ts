@@ -288,6 +288,10 @@ export interface UserPreferences {
   switchStyleHotkey: ShortcutBinding | null;
   /** 打开 OpenLess 主窗口的全局快捷键。null = 用户已停用（issue #576）。 */
   openAppHotkey: ShortcutBinding | null;
+  /** 文本重写全局快捷键。null = 停用。默认 Ctrl/Cmd+Shift+R。 */
+  rewriteHotkey: ShortcutBinding | null;
+  /** 是否保存重写历史。默认 true。 */
+  rewriteSaveHistory: boolean;
   /** Less Computer：是否启用。默认关闭。 */
   codingAgentEnabled: boolean;
   /** Agent 后端：claude-code-cli（默认）/ opencode-cli。 */
@@ -508,6 +512,8 @@ export interface CapsulePayload {
   translation: boolean;
   /** 当前是否是 Less Computer 会话：处理态文案显示 "using" 而非 "thinking"。 */
   operating?: boolean;
+  /** 当前胶囊状态来自文本重写流程。隐藏取消/确认按钮。 */
+  rewrite?: boolean;
 }
 
 export interface CredentialsStatus {

@@ -392,6 +392,7 @@ pub(super) fn emit_capsule(
     let Some(app) = app_opt else { return };
     let translation = inner.translation_modifier_seen.load(Ordering::SeqCst);
     let operating = inner.state.lock().voice_agent;
+    let rewrite = inner.rewrite_in_progress.load(Ordering::SeqCst);
     let payload = CapsulePayload {
         state,
         level,
@@ -400,6 +401,7 @@ pub(super) fn emit_capsule(
         inserted_chars,
         translation,
         operating,
+        rewrite,
     };
 
     #[cfg(target_os = "android")]

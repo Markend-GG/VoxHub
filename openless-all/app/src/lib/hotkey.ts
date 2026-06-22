@@ -22,6 +22,10 @@ export function defaultOpenAppShortcut(): ShortcutBinding {
   return { primary: 'O', modifiers: defaultAppShortcutModifiers() };
 }
 
+export function defaultRewriteShortcut(): ShortcutBinding {
+  return { primary: 'R', modifiers: defaultAppShortcutModifiers() };
+}
+
 export function defaultLessComputerShortcut(): ShortcutBinding {
   return { primary: 'LeftControl', modifiers: [] };
 }

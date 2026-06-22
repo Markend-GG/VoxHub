@@ -62,6 +62,8 @@ export let mockSettings: UserPreferences = {
         modifiers: defaultAppShortcutModifiers(),
     },
     openAppHotkey: { primary: "O", modifiers: defaultAppShortcutModifiers() },
+    rewriteHotkey: { primary: "R", modifiers: defaultAppShortcutModifiers() },
+    rewriteSaveHistory: true,
     codingAgentEnabled: false,
     codingAgentProvider: "claude-code-cli",
     codingAgentModel: null,

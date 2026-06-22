@@ -304,6 +304,10 @@ export const ja: typeof zhCN = {
     },
   },
   history: {
+    tabs: {
+      voice: '音声履歴',
+      rewrite: 'リライト履歴',
+    },
     kicker: 'HISTORY',
     title: '履歴',
     desc: 'ローカルに保存された認識記録。',
@@ -810,6 +814,7 @@ export const ja: typeof zhCN = {
       confirm: 'カプセル入力を確定',
       switchStyle: '前のスタイルに切り替え',
       openApp: 'OpenLess を開く',
+      rewrite: 'テキストリライト',
       agentPolish: '選択テキストを推敲',
       agentPolishDesc: 'テキスト選択 → キー → Claude が推敲 → 選択範囲を置換。',
       agentVoice: 'Less Computer',
@@ -1232,5 +1237,18 @@ export const ja: typeof zhCN = {
     keep5min: '最終使用から 5 分（既定）',
     keep30min: '最終使用から 30 分',
     keepForever: '解放しない（常にロード）',
-  },
+  },    rewrite: {
+      inserted: '置換済み',
+      pasteSent: '貼り付け済み',
+      copiedFallback: 'コピー済み',
+      failed: '失敗',
+      emptyHistory: 'リライト履歴なし',
+      entries: '件',
+      copyResult: '結果をコピー',
+      copySource: '原文をコピー',
+      sourceText: '原文',
+      resultText: 'リライト結果',
+      sourceApp: 'ソースアプリ',
+    },
+
 };

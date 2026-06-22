@@ -40,7 +40,7 @@ use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::insertion::TextInserter;
 use crate::persistence::{
     sync_style_pack_preferences, CorrectionRuleStore, CredentialAccount, CredentialsVault,
-    DictionaryStore, HistoryStore, PreferencesStore, StylePackStore,
+    DictionaryStore, HistoryStore, PreferencesStore, RewriteHistoryStore, StylePackStore,
 };
 
 use crate::llm_gemini::{GeminiConfig, GeminiProvider};
@@ -67,6 +67,7 @@ mod capsule_focus;
 mod dictation;
 mod hotkey_loops;
 mod polish_flow;
+mod rewrite_flow;
 mod qa;
 mod qa_session;
 mod resources;
@@ -75,6 +76,7 @@ use asr_wiring::*;
 use capsule_focus::*;
 use hotkey_loops::*;
 use polish_flow::*;
+use rewrite_flow::*;
 use qa_session::*;
 
 pub(super) fn qa_event_target() -> &'static str {
@@ -285,6 +287,9 @@ struct Inner {
     translation_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
     switch_style_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
     open_app_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
+    rewrite_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
+    rewrite_history: RewriteHistoryStore,
+    rewrite_in_progress: AtomicBool,
     /// 翻译模式触发标志。每次 begin_session 重置为 false；hotkey 监听器在
     /// Listening / Starting 阶段看到 Shift down 边沿时 set true。
     /// end_session 在调 polish/translate 前读这个 flag + translation_target_language
@@ -340,6 +345,7 @@ struct Inner {
 enum ActionHotkeyKind {
     SwitchStyle,
     OpenApp,
+    Rewrite,
 }
 
 #[cfg(target_os = "windows")]
@@ -365,6 +371,10 @@ impl Coordinator {
                 log::error!("[coord] HistoryStore init failed: {e}; 降级为空历史记录");
                 HistoryStore::new_fallback()
             });
+            let rewrite_history = RewriteHistoryStore::new().unwrap_or_else(|e| {
+                log::error!("[coord] RewriteHistoryStore init failed: {e}; 降级为空重写历史");
+                RewriteHistoryStore::new_fallback()
+            });
             let prefs = PreferencesStore::new().unwrap_or_else(|e| {
                 log::error!("[coord] PreferencesStore init failed: {e}; 降级为默认偏好设置");
                 PreferencesStore::new_fallback()
@@ -386,6 +396,7 @@ impl Coordinator {
                 inner: Arc::new(Inner {
                     app: Mutex::new(None),
                     history,
+                    rewrite_history,
                     prefs,
                     style_packs,
                     vocab,
@@ -406,6 +417,7 @@ impl Coordinator {
                     translation_hotkey: Mutex::new(None),
                     switch_style_hotkey: Mutex::new(None),
                     open_app_hotkey: Mutex::new(None),
+                            rewrite_hotkey: Mutex::new(None),
                     translation_modifier_seen: AtomicBool::new(false),
                     qa_hotkey: Mutex::new(None),
                     coding_agent_modifier_hotkey: Mutex::new(None),
@@ -433,6 +445,7 @@ impl Coordinator {
                     #[cfg(not(mobile))]
                     remote_no_insert: AtomicBool::new(false),
                     less_computer_conversation: AtomicBool::new(false),
+            rewrite_in_progress: AtomicBool::new(false),
                 }),
             }
         }
@@ -455,6 +468,10 @@ impl Coordinator {
             log::error!("[coord] HistoryStore init failed: {e}; 降级为空历史记录");
             HistoryStore::new_fallback()
         });
+        let rewrite_history = RewriteHistoryStore::new().unwrap_or_else(|e| {
+            log::error!("[coord] RewriteHistoryStore init failed: {e}; 降级为空重写历史");
+            RewriteHistoryStore::new_fallback()
+        });
         let prefs = PreferencesStore::new().unwrap_or_else(|e| {
             log::error!("[coord] PreferencesStore init failed: {e}; 降级为默认偏好设置");
             PreferencesStore::new_fallback()
@@ -476,6 +493,7 @@ impl Coordinator {
             inner: Arc::new(Inner {
                 app: Mutex::new(None),
                 history,
+                rewrite_history,
                 prefs,
                 style_packs,
                 vocab,
@@ -498,6 +516,7 @@ impl Coordinator {
                 translation_hotkey: Mutex::new(None),
                 switch_style_hotkey: Mutex::new(None),
                 open_app_hotkey: Mutex::new(None),
+                rewrite_hotkey: Mutex::new(None),
                 translation_modifier_seen: AtomicBool::new(false),
                 qa_hotkey: Mutex::new(None),
                 coding_agent_modifier_hotkey: Mutex::new(None),
@@ -527,6 +546,7 @@ impl Coordinator {
                 #[cfg(not(mobile))]
                 remote_no_insert: AtomicBool::new(false),
                 less_computer_conversation: AtomicBool::new(false),
+                rewrite_in_progress: AtomicBool::new(false),
             }),
         }
     }
@@ -973,6 +993,22 @@ impl Coordinator {
         self.update_action_hotkey_binding(ActionHotkeyKind::OpenApp);
     }
 
+    pub fn update_rewrite_hotkey_binding(&self) {
+        self.update_action_hotkey_binding(ActionHotkeyKind::Rewrite);
+    }
+
+    pub fn start_rewrite_hotkey_listener(&self) {
+        let inner = Arc::clone(&self.inner);
+        std::thread::Builder::new()
+            .name("openless-rewrite-hotkey-supervisor".into())
+            .spawn(move || action_hotkey_supervisor_loop(inner, ActionHotkeyKind::Rewrite))
+            .ok();
+    }
+
+    pub fn stop_rewrite_hotkey_listener(&self) {
+        take_action_hotkey_on_main_thread(&self.inner, ActionHotkeyKind::Rewrite);
+    }
+
     fn update_action_hotkey_binding(&self, kind: ActionHotkeyKind) {
         // None = 用户主动停用：反注册全局键，立即生效。
         let Some(binding) = action_hotkey_binding(&self.inner, kind) else {
@@ -1081,6 +1117,19 @@ impl Coordinator {
     }
     pub fn style_packs(&self) -> &StylePackStore {
         &self.inner.style_packs
+    }
+    pub fn rewrite_history(&self) -> &RewriteHistoryStore {
+        &self.inner.rewrite_history
+    }
+    /// 手动触发文本重写（测试/调试用）。正常路径通过快捷键触发。
+    pub fn trigger_rewrite(&self) {
+        let inner = Arc::clone(&self.inner);
+        std::thread::Builder::new()
+            .name("openless-rewrite-task".into())
+            .spawn(move || {
+                run_rewrite_flow(&inner);
+            })
+            .ok();
     }
     pub fn vocab(&self) -> &DictionaryStore {
         &self.inner.vocab

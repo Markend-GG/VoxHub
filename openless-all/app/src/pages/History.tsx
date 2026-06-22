@@ -6,9 +6,10 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
-import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording, retranscribeRecording } from '../lib/ipc';
+import { clearHistory, clearRewriteHistory, deleteHistoryEntry, deleteRewriteHistoryEntry, listHistory, listRewriteHistory, readAudioRecording, retranscribeRecording } from '../lib/ipc';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import type { DictationSession, PolishMode } from '../lib/types';
+import type { RewriteHistoryEntry } from '../lib/ipc/rewrite';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 import { chipSelectedStyle } from './settings/shared';
@@ -39,6 +40,7 @@ export function History() {
   const os = detectOS();
   const FILTERS = useFilters();
   const MODE_LABEL = useModeLabel();
+  const [historyKind, setHistoryKind] = useState<'voice' | 'rewrite'>('voice');
   const [filter, setFilter] = useState<'all' | PolishMode>('all');
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
@@ -238,6 +240,25 @@ export function History() {
           </div>
         }
       />
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+        {(['voice', 'rewrite'] as const).map(kind => (
+          <button
+            key={kind}
+            onClick={() => setHistoryKind(kind)}
+            style={{
+              padding: '5px 14px', fontSize: 12, borderRadius: 6, border: 0,
+              fontFamily: 'inherit', cursor: 'pointer', fontWeight: 500,
+              background: historyKind === kind ? 'var(--ol-blue)' : 'var(--ol-surface-2)',
+              color: historyKind === kind ? '#fff' : 'var(--ol-ink-3)',
+            }}
+          >
+            {kind === 'voice' ? t('history.tabs.voice', '语音历史') : t('history.tabs.rewrite', '重写历史')}
+          </button>
+        ))}
+      </div>
+      {historyKind === 'rewrite' ? (
+        <RewriteHistoryView />
+      ) : (
       <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
         {( !mobile || !mobileDetailOpen) && (
         <Card padding={0} style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -414,6 +435,138 @@ export function History() {
         </Card>
         )}
       </div>
+      )}
+    </div>
+  );
+}
+
+function RewriteHistoryView() {
+  const { t } = useTranslation();
+  const [items, setItems] = useState<RewriteHistoryEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await listRewriteHistory();
+      setItems(data);
+      setSelectedId(prev => (prev && data.some(e => e.id === prev) ? prev : data[0]?.id ?? null));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const selected = items.find(e => e.id === selectedId) || items[0];
+
+  const onDelete = async (id: string) => {
+    try {
+      await deleteRewriteHistoryEntry(id);
+      setItems(prev => prev.filter(e => e.id !== id));
+    } catch (err) {
+      console.error('[rewrite-history] delete failed', err);
+    }
+  };
+
+  const onClear = async () => {
+    if (items.length === 0) return;
+    if (!confirm(t('history.confirmClear', { count: items.length }))) return;
+    try {
+      await clearRewriteHistory();
+      setItems([]);
+      setSelectedId(null);
+    } catch (err) {
+      console.error('[rewrite-history] clear failed', err);
+    }
+  };
+
+  const onCopy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (err) {
+      console.error('[rewrite-history] copy failed', err);
+    }
+  };
+
+  const insertStatusLabel = (status: string): string => {
+    switch (status) {
+      case 'inserted': return t('rewrite.inserted', '已替换');
+      case 'pasteSent': return t('rewrite.pasteSent', '已粘贴');
+      case 'copiedFallback': return t('rewrite.copiedFallback', '已复制');
+      case 'failed': return t('rewrite.failed', '失败');
+      default: return status;
+    }
+  };
+
+  if (loading) {
+    return <Card><div style={{ fontSize: 12, color: 'var(--ol-ink-4)' }}>{t('common.loading')}</div></Card>;
+  }
+  if (error) {
+    return <Card><div style={{ fontSize: 12, color: 'var(--ol-err)' }}>{t('history.loadFailed', { err: error })}</div></Card>;
+  }
+  if (items.length === 0) {
+    return <Card><div style={{ padding: 40, textAlign: 'center', fontSize: 13, color: 'var(--ol-ink-4)' }}>{t('rewrite.emptyHistory', '暂无重写历史')}</div></Card>;
+  }
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
+      <Card padding={0} style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ padding: '8px 14px', borderBottom: '0.5px solid var(--ol-line)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{items.length} {t('rewrite.entries', '条')}</span>
+          <Btn icon="trash" variant="ghost" size="sm" onClick={onClear}>{t('common.clear')}</Btn>
+        </div>
+        <div style={{ overflowY: 'auto', flex: 1 }}>
+          {items.map(entry => (
+            <button
+              key={entry.id}
+              onClick={() => setSelectedId(entry.id)}
+              style={{
+                width: '100%', textAlign: 'left', padding: '10px 14px',
+                border: 0, borderBottom: '0.5px solid var(--ol-line)',
+                background: entry.id === selected?.id ? 'var(--ol-surface-2)' : 'transparent',
+                cursor: 'pointer', fontFamily: 'inherit',
+              }}
+            >
+              <div style={{ fontSize: 12, color: 'var(--ol-ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {entry.sourceText || '(空)'}
+              </div>
+              <div style={{ display: 'flex', gap: 6, marginTop: 4, alignItems: 'center' }}>
+                <span style={{ fontSize: 10, color: 'var(--ol-ink-4)' }}>{formatTime(entry.createdAt)}</span>
+                <Pill>{insertStatusLabel(entry.insertStatus)}</Pill>
+                {entry.errorCode && (
+                  <span style={{ fontSize: 10, color: 'var(--ol-err)' }}>{entry.errorCode}</span>
+                )}
+              </div>
+            </button>
+          ))}
+        </div>
+      </Card>
+      {selected && (
+        <Card style={{ overflowY: 'auto', padding: 20 }}>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <Btn size="sm" onClick={() => void onCopy(selected.rewrittenText)}>{t('rewrite.copyResult', '复制结果')}</Btn>
+            <Btn size="sm" onClick={() => void onCopy(selected.sourceText)}>{t('rewrite.copySource', '复制原文')}</Btn>
+            <Btn size="sm" variant="ghost" onClick={() => void onDelete(selected.id)}>{t('common.delete')}</Btn>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--ol-ink-4)', marginBottom: 4 }}>{t('rewrite.sourceText', '原文')}</div>
+            <div style={{ fontSize: 13, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selected.sourceText || '(空)'}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--ol-ink-4)', marginBottom: 4 }}>{t('rewrite.resultText', '重写结果')}</div>
+            <div style={{ fontSize: 13, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selected.rewrittenText || '(空)'}</div>
+          </div>
+          {selected.appName && (
+            <div style={{ marginTop: 12, fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('rewrite.sourceApp', '来源应用')}: {selected.appName}</div>
+          )}
+        </Card>
+      )}
     </div>
   );
 }

@@ -82,6 +82,7 @@ export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, force
   const [gate, setGate] = useState<Gate>('ready');
   const [platformCaps, setPlatformCaps] = useState<PlatformCapabilities | null>(null);
   const [mobileQaOpen, setMobileQaOpen] = useState(false);
+  const [rewriteToast, setRewriteToast] = useState<string | null>(null);
   const completeOnboarding = () => {
     if (platformCaps?.platform === 'android') {
       localStorage.setItem(ANDROID_SETUP_WIZARD_COMPLETE_KEY, '1');
@@ -91,6 +92,30 @@ export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, force
   useEffect(() => {
     if (!isTauri) return;
     void getPlatformCapabilities().then(setPlatformCaps);
+  }, []);
+
+  // 监听 rewrite:state 事件，显示 toast 通知。
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    let timer: number | undefined;
+    (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen<{ kind: string; message: string | null }>('rewrite:state', (event) => {
+        const { kind, message } = event.payload;
+        if (kind === 'capturing' || kind === 'rewriting' || kind === 'inserting') {
+          setRewriteToast(message || (kind === 'rewriting' ? '正在重写...' : kind === 'inserting' ? '正在替换...' : '正在读取...'));
+        } else if (kind === 'done' || kind === 'error') {
+          setRewriteToast(message || (kind === 'done' ? '已替换' : '未能重写'));
+          if (timer) window.clearTimeout(timer);
+          timer = window.setTimeout(() => setRewriteToast(null), 3000);
+        }
+      });
+    })().catch(() => {});
+    return () => {
+      unlisten?.();
+      if (timer) window.clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -304,6 +329,15 @@ export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, force
           <FloatingShell os={os} />
         ))}
         {gate === 'ready' && platformCaps?.supportsAutoUpdate === true && <AutoUpdateGate />}
+        {rewriteToast && (
+          <div style={{
+            position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+            padding: '8px 20px', borderRadius: 8, fontSize: 13,
+            background: 'var(--ol-surface-1, #333)', color: 'var(--ol-ink-1, #fff)',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.15)', zIndex: 9999,
+            fontFamily: 'inherit', pointerEvents: 'none',
+          }}>{rewriteToast}</div>
+        )}
       </HotkeySettingsProvider>
     </Suspense>
   );

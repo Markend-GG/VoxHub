@@ -59,7 +59,7 @@ pub(crate) use crate::types::{
     builtin_style_pack_id, default_active_style_pack_id, AndroidAccessibilityStatus,
     AndroidOverlayStatus, ChineseScriptPreference, ComboBinding, CorrectionRule, CredentialsStatus,
     DictationSession, DictionaryEntry, HotkeyCapability, HotkeyStatus, OutputLanguagePreference,
-    PolishMode, ShortcutBinding, StylePack, StylePackKind, StylePackRuntimeDiagnostics,
+    PolishMode, RewriteHistoryEntry, ShortcutBinding, StylePack, StylePackKind, StylePackRuntimeDiagnostics,
     StyleSystemPrompts, UpdateChannel, UserPreferences, VocabPresetStore,
 };
 
@@ -78,6 +78,7 @@ mod misc;
 mod permissions_cmds;
 mod providers;
 mod qa;
+mod rewrite;
 #[cfg(not(mobile))]
 mod remote_input;
 mod settings;
@@ -100,6 +101,7 @@ pub use misc::*;
 pub use permissions_cmds::*;
 pub use providers::*;
 pub use qa::*;
+pub use rewrite::*;
 #[cfg(not(mobile))]
 pub use remote_input::*;
 pub use settings::*;

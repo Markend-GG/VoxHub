@@ -128,6 +128,39 @@ pub fn set_open_app_hotkey(
     Ok(())
 }
 
+/// 设置「文本重写」全局快捷键。`binding == None` = 停用。镜像 `set_open_app_hotkey`。
+#[tauri::command]
+pub fn set_rewrite_hotkey(
+    coord: CoordinatorState<'_>,
+    binding: Option<ShortcutBinding>,
+) -> Result<(), String> {
+    if let Some(binding) = binding.as_ref() {
+        crate::shortcut_binding::validate_binding(binding).map_err(|e| e.to_string())?;
+        reject_modifier_only_action_shortcut(binding)?;
+    }
+    let mut prefs = coord.prefs().get();
+    if let Some(binding) = binding.as_ref() {
+        reject_rewrite_dictation_hotkey_overlap(binding, &prefs.dictation_hotkey)?;
+        reject_rewrite_translation_hotkey_overlap(binding, &prefs.translation_hotkey)?;
+        if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
+            reject_rewrite_qa_hotkey_overlap(binding, qa_hotkey)?;
+        }
+        if let Some(switch_style) = prefs.switch_style_hotkey.as_ref() {
+            reject_rewrite_switch_style_hotkey_overlap(binding, switch_style)?;
+        }
+        if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
+            reject_rewrite_open_app_hotkey_overlap(binding, open_app)?;
+        }
+        if let Some(less_computer) = prefs.coding_agent_voice_hotkey.as_ref() {
+            reject_rewrite_less_computer_hotkey_overlap(binding, less_computer)?;
+        }
+    }
+    prefs.rewrite_hotkey = binding;
+    coord.prefs().set(prefs).map_err(|e| e.to_string())?;
+    coord.update_rewrite_hotkey_binding();
+    Ok(())
+}
+
 fn reject_modifier_only_action_shortcut(binding: &ShortcutBinding) -> Result<(), String> {
     if binding.modifiers.is_empty()
         && (binding.primary.eq_ignore_ascii_case("shift")
@@ -271,6 +304,22 @@ pub(crate) fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), St
     if let (Some(switch_style), Some(open_app)) = (switch_style, open_app) {
         reject_switch_style_open_app_hotkey_overlap(switch_style, open_app)?;
     }
+    if let Some(rewrite) = prefs.rewrite_hotkey.as_ref() {
+        reject_rewrite_dictation_hotkey_overlap(rewrite, &prefs.dictation_hotkey)?;
+        reject_rewrite_translation_hotkey_overlap(rewrite, &prefs.translation_hotkey)?;
+        if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
+            reject_rewrite_qa_hotkey_overlap(rewrite, qa_hotkey)?;
+        }
+        if let Some(switch_style) = switch_style {
+            reject_rewrite_switch_style_hotkey_overlap(rewrite, switch_style)?;
+        }
+        if let Some(open_app) = open_app {
+            reject_rewrite_open_app_hotkey_overlap(rewrite, open_app)?;
+        }
+        if let Some(less_computer) = less_computer {
+            reject_rewrite_less_computer_hotkey_overlap(rewrite, less_computer)?;
+        }
+    }
     Ok(())
 }
 
@@ -401,6 +450,52 @@ fn reject_less_computer_open_app_hotkey_overlap(
         less_computer,
         open_app,
         "Less Computer 快捷键不能和打开应用快捷键相同",
+    )
+}
+
+fn reject_rewrite_dictation_hotkey_overlap(
+    rewrite: &ShortcutBinding,
+    dictation: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(rewrite, dictation, "重写快捷键不能和听写快捷键相同")
+}
+
+fn reject_rewrite_translation_hotkey_overlap(
+    rewrite: &ShortcutBinding,
+    translation: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(rewrite, translation, "重写快捷键不能和翻译快捷键相同")
+}
+
+fn reject_rewrite_qa_hotkey_overlap(
+    rewrite: &ShortcutBinding,
+    qa: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(rewrite, qa, "重写快捷键不能和 QA 快捷键相同")
+}
+
+fn reject_rewrite_switch_style_hotkey_overlap(
+    rewrite: &ShortcutBinding,
+    switch_style: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(rewrite, switch_style, "重写快捷键不能和切换风格快捷键相同")
+}
+
+fn reject_rewrite_open_app_hotkey_overlap(
+    rewrite: &ShortcutBinding,
+    open_app: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(rewrite, open_app, "重写快捷键不能和打开应用快捷键相同")
+}
+
+fn reject_rewrite_less_computer_hotkey_overlap(
+    rewrite: &ShortcutBinding,
+    less_computer: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        rewrite,
+        less_computer,
+        "重写快捷键不能和 Less Computer 快捷键相同",
     )
 }
 

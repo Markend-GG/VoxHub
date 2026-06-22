@@ -72,6 +72,11 @@ export function setOpenAppHotkey(binding: ShortcutBinding | null): Promise<void>
     return invokeOrMock("set_open_app_hotkey", { binding }, () => undefined)
 }
 
+// binding = null 表示停用，与 set_open_app_hotkey 一致。
+export function setRewriteHotkey(binding: ShortcutBinding | null): Promise<void> {
+    return invokeOrMock("set_rewrite_hotkey", { binding }, () => undefined)
+}
+
 export function setShortcutRecordingActive(active: boolean): Promise<void> {
     return invokeOrMock(
         "set_shortcut_recording_active",

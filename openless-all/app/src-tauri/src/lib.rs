@@ -222,6 +222,11 @@ macro_rules! app_invoke_handler_desktop {
             commands::set_translation_hotkey,
             commands::set_switch_style_hotkey,
             commands::set_open_app_hotkey,
+            commands::set_rewrite_hotkey,
+            commands::list_rewrite_history,
+            commands::delete_rewrite_history_entry,
+            commands::clear_rewrite_history,
+            commands::run_rewrite_selected_text,
             commands::qa_window_dismiss,
             commands::qa_window_pin,
             commands::less_computer_window_dismiss,
@@ -684,6 +689,7 @@ fn run_desktop() {
                 coordinator.start_translation_hotkey_listener();
                 coordinator.start_switch_style_hotkey_listener();
                 coordinator.start_open_app_hotkey_listener();
+                coordinator.start_rewrite_hotkey_listener();
             }
             #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => show_main_window(app),
@@ -705,6 +711,7 @@ fn run_desktop() {
                 coordinator.stop_translation_hotkey_listener();
                 coordinator.stop_switch_style_hotkey_listener();
                 coordinator.stop_open_app_hotkey_listener();
+                coordinator.stop_rewrite_hotkey_listener();
             }
             _ => {}
         });

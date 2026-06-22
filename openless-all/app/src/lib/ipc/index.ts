@@ -103,6 +103,7 @@ export {
     setTranslationHotkey,
     setSwitchStyleHotkey,
     setOpenAppHotkey,
+    setRewriteHotkey,
     setShortcutRecordingActive,
 } from "./hotkeys"
 
@@ -196,3 +197,13 @@ export {
 
 // utils
 export { openExternal, exportErrorLog, logClientError } from "./utils"
+
+// rewrite
+export type { RewriteHistoryEntry } from "./rewrite"
+export {
+    listRewriteHistory,
+    deleteRewriteHistoryEntry,
+    clearRewriteHistory,
+    runRewriteSelectedText,
+} from "./rewrite"
+// setRewriteHotkey is exported from ./hotkeys above

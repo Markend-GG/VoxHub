@@ -30,6 +30,7 @@ mod dictionary;
 mod history;
 mod paths;
 mod preferences;
+mod rewrite_history;
 mod style_pack;
 
 pub use correction::*;
@@ -38,6 +39,7 @@ pub use dictionary::*;
 pub use history::*;
 pub use paths::*;
 pub use preferences::*;
+pub use rewrite_history::*;
 pub use style_pack::*;
 
 const HISTORY_CAP: usize = 200;
