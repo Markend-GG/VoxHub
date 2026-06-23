@@ -175,6 +175,10 @@ pub fn set_style_pack_enabled(
     if !enabled && prefs.active_style_pack_id == id {
         prefs.active_style_pack_id = default_active_style_pack_id();
     }
+    // 禁用重写激活包时重置为 None
+    if !enabled && prefs.active_rewrite_style_pack_id.as_deref() == Some(&id) {
+        prefs.active_rewrite_style_pack_id = None;
+    }
     let prefs = sync_style_pack_prefs_and_persist(&*coord, &app, prefs)?;
     coord
         .style_packs()
@@ -212,10 +216,13 @@ pub fn delete_style_pack(
         .map_err(|e| e.to_string())?;
     if prefs.active_style_pack_id == id {
         prefs.active_style_pack_id = default_active_style_pack_id();
-        let _ = sync_style_pack_prefs_and_persist(&*coord, &app, prefs)?;
-    } else {
-        refresh_tray_menu_async(&app);
     }
+    // 如果删除的是重写激活包，重置为 None（fallback 到 builtin.rewrite）
+    if prefs.active_rewrite_style_pack_id.as_deref() == Some(&id) {
+        prefs.active_rewrite_style_pack_id = None;
+    }
+    let _ = sync_style_pack_prefs_and_persist(&*coord, &app, prefs)?;
+    refresh_tray_menu_async(&app);
     Ok(())
 }
 
@@ -258,6 +265,31 @@ pub fn set_default_polish_mode(
     mode: PolishMode,
 ) -> Result<(), String> {
     activate_builtin_style_mode(&coord, &app, mode)
+}
+
+/// 设置重写风格激活包。id = None 表示恢复默认 (builtin.rewrite)。
+#[tauri::command]
+pub fn set_active_rewrite_style_pack(
+    coord: CoordinatorState<'_>,
+    app: AppHandle,
+    id: Option<String>,
+) -> Result<(), String> {
+    let mut prefs = coord.prefs().get();
+    // 如果指定了 id，验证包存在且 scope == Rewrite
+    if let Some(ref pack_id) = id {
+        let pack = coord.style_packs().get(pack_id).map_err(|e| e.to_string())?;
+        if pack.scope != crate::types::StylePackScope::Rewrite {
+            return Err(format!("pack {} is not a rewrite style pack", pack_id));
+        }
+        // 自动启用
+        if !pack.enabled {
+            coord.style_packs().set_enabled(pack_id, true).map_err(|e| e.to_string())?;
+        }
+    }
+    prefs.active_rewrite_style_pack_id = id;
+    coord.prefs().set(prefs.clone()).map_err(|e| e.to_string())?;
+    emit_prefs_changed(&app, &prefs);
+    Ok(())
 }
 
 #[tauri::command]

@@ -330,6 +330,18 @@ pub enum StylePackKind {
     Imported,
 }
 
+/// 风格包用途维度：Voice（语音听写润色）/ Rewrite（文本重写）。
+/// 旧包无此字段时 serde default 为 Voice，保证向后兼容。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StylePackScope {
+    /// 语音听写润色风格。旧包无 scope 字段时默认此值。
+    #[default]
+    Voice,
+    /// 文本重写风格。
+    Rewrite,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct StylePackExample {
@@ -363,6 +375,10 @@ pub struct StylePack {
     /// 全新本地创建的 pack 这两个字段为 None。
     pub origin_pack_id: Option<String>,
     pub origin_author_login: Option<String>,
+    /// 风格包用途：Voice 或 Rewrite。
+    /// 旧包无此字段时 serde default 为 Voice。
+    #[serde(default)]
+    pub scope: StylePackScope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -413,9 +429,16 @@ impl Default for StylePack {
             compatible_app_version: None,
             origin_pack_id: None,
             origin_author_login: None,
+            scope: StylePackScope::Voice,
         }
     }
 }
+
+pub const BUILTIN_STYLE_PACK_REWRITE_ID: &str = "builtin.rewrite";
+pub const BUILTIN_STYLE_PACK_REWRITE_RAW_ID: &str = "builtin.rewrite.raw";
+pub const BUILTIN_STYLE_PACK_REWRITE_LIGHT_ID: &str = "builtin.rewrite.light";
+pub const BUILTIN_STYLE_PACK_REWRITE_STRUCTURED_ID: &str = "builtin.rewrite.structured";
+pub const BUILTIN_STYLE_PACK_REWRITE_FORMAL_ID: &str = "builtin.rewrite.formal";
 
 pub const BUILTIN_STYLE_PACK_RAW_ID: &str = "builtin.raw";
 pub const BUILTIN_STYLE_PACK_LIGHT_ID: &str = "builtin.light";
@@ -461,6 +484,7 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
             origin_pack_id: None,
             origin_author_login: None,
+            scope: StylePackScope::Voice,
         },
         PolishMode::Light => StylePack {
             id: BUILTIN_STYLE_PACK_LIGHT_ID.into(),
@@ -498,6 +522,7 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
             origin_pack_id: None,
             origin_author_login: None,
+            scope: StylePackScope::Voice,
         },
         PolishMode::Structured => StylePack {
             id: BUILTIN_STYLE_PACK_STRUCTURED_ID.into(),
@@ -535,6 +560,7 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
             origin_pack_id: None,
             origin_author_login: None,
+            scope: StylePackScope::Voice,
         },
         PolishMode::Formal => StylePack {
             id: BUILTIN_STYLE_PACK_FORMAL_ID.into(),
@@ -572,17 +598,79 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
             origin_pack_id: None,
             origin_author_login: None,
+            scope: StylePackScope::Voice,
         },
     }
 }
 
+/// 内置重写风格包。默认使用通用重写 prompt，用户可编辑。
+pub fn builtin_rewrite_style_pack() -> StylePack {
+    StylePack {
+        id: BUILTIN_STYLE_PACK_REWRITE_ID.into(),
+        name: "智能重写".into(),
+        description: "改善表达的流畅度和清晰度，修正语法和标点错误，保持原文语气和正式程度。".into(),
+        author: Some("OpenLess".into()),
+        version: "1.0.0".into(),
+        kind: StylePackKind::Builtin,
+        base_mode: PolishMode::Light,
+        prompt: "改善表达的流畅度和清晰度，修正语法和标点错误，保持原文语气和正式程度。".into(),
+        examples: vec![],
+        tags: vec!["重写".into()],
+        icon_path: None,
+        created_at: None,
+        updated_at: None,
+        enabled: true,
+        active: false,
+        recommended_model: None,
+        compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+        origin_pack_id: None,
+        origin_author_login: None,
+        scope: StylePackScope::Rewrite,
+    }
+}
+
+/// 内置重写风格包列表：为每个语音模式创建一个对应的重写风格包。
+pub fn builtin_rewrite_packs() -> Vec<StylePack> {
+    let modes = [
+        (PolishMode::Raw, BUILTIN_STYLE_PACK_REWRITE_RAW_ID, "最小重写", "尽量保留原文，仅做必要的语法和标点修正。"),
+        (PolishMode::Light, BUILTIN_STYLE_PACK_REWRITE_LIGHT_ID, "流畅重写", "改善表达的流畅度和清晰度，修正语法和标点错误，保持原文语气。"),
+        (PolishMode::Structured, BUILTIN_STYLE_PACK_REWRITE_STRUCTURED_ID, "结构化重写", "重新组织文本结构，使其更清晰、更有条理。"),
+        (PolishMode::Formal, BUILTIN_STYLE_PACK_REWRITE_FORMAL_ID, "正式重写", "将文本转换为正式、专业的书面表达。"),
+    ];
+    modes.iter().map(|(mode, id, name, desc)| StylePack {
+        id: (*id).into(),
+        name: (*name).into(),
+        description: (*desc).into(),
+        author: Some("OpenLess".into()),
+        version: "1.0.0".into(),
+        kind: StylePackKind::Builtin,
+        base_mode: *mode,
+        prompt: format!("你是文本重写助手。请根据以下要求改写用户选中的文本：\n{}", desc),
+        examples: vec![],
+        tags: vec!["重写".into()],
+        icon_path: None,
+        created_at: None,
+        updated_at: None,
+        enabled: true,
+        active: false,
+        recommended_model: None,
+        compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+        origin_pack_id: None,
+        origin_author_login: None,
+        scope: StylePackScope::Rewrite,
+    }).collect()
+}
+
 pub fn builtin_style_packs() -> Vec<StylePack> {
-    vec![
+    let mut packs = vec![
         builtin_style_pack_for_mode(PolishMode::Raw),
         builtin_style_pack_for_mode(PolishMode::Light),
         builtin_style_pack_for_mode(PolishMode::Structured),
         builtin_style_pack_for_mode(PolishMode::Formal),
-    ]
+        builtin_rewrite_style_pack(),
+    ];
+    packs.extend(builtin_rewrite_packs());
+    packs
 }
 
 fn default_true() -> bool {
@@ -686,6 +774,10 @@ pub struct UserPreferences {
     /// 是否保存重写历史。默认 true；失败请求也写入历史并包含 error_code。
     #[serde(default = "default_true")]
     pub rewrite_save_history: bool,
+    /// 文本重写当前激活的风格包 ID。
+    /// None = 使用内置默认重写风格包 (builtin.rewrite)。
+    #[serde(default)]
+    pub active_rewrite_style_pack_id: Option<String>,
     /// Less Computer：是否启用。默认关闭，需用户在高级设置开启。
     #[serde(default)]
     pub coding_agent_enabled: bool,
@@ -956,6 +1048,8 @@ struct UserPreferencesWire {
     #[serde(default = "default_true")]
     rewrite_save_history: bool,
     #[serde(default)]
+    active_rewrite_style_pack_id: Option<String>,
+    #[serde(default)]
     coding_agent_enabled: bool,
     #[serde(default = "default_coding_agent_provider")]
     coding_agent_provider: String,
@@ -1078,6 +1172,7 @@ impl Default for UserPreferencesWire {
             open_app_hotkey: prefs.open_app_hotkey,
             rewrite_hotkey: prefs.rewrite_hotkey,
             rewrite_save_history: prefs.rewrite_save_history,
+            active_rewrite_style_pack_id: prefs.active_rewrite_style_pack_id,
             coding_agent_enabled: prefs.coding_agent_enabled,
             coding_agent_provider: prefs.coding_agent_provider,
             coding_agent_model: prefs.coding_agent_model,
@@ -1196,6 +1291,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             open_app_hotkey: wire.open_app_hotkey,
             rewrite_hotkey: wire.rewrite_hotkey,
             rewrite_save_history: wire.rewrite_save_history,
+            active_rewrite_style_pack_id: wire.active_rewrite_style_pack_id,
             local_asr_active_model: wire.local_asr_active_model,
             local_asr_mirror: wire.local_asr_mirror,
             local_asr_keep_loaded_secs: wire.local_asr_keep_loaded_secs,
@@ -1931,6 +2027,7 @@ impl Default for UserPreferences {
             open_app_hotkey: default_open_app_hotkey(),
             rewrite_hotkey: default_rewrite_hotkey(),
             rewrite_save_history: true,
+            active_rewrite_style_pack_id: None,
             coding_agent_enabled: false,
             coding_agent_provider: default_coding_agent_provider(),
             coding_agent_model: None,

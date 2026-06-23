@@ -394,6 +394,12 @@ export const en: typeof zhCN = {
       structured: { name: 'Structured', desc: 'Auto-organizes into a numbered outline when you cover several topics or steps.', sample: '1. Topic one\na. Point\nb. Point\n2. Topic two\na. Point\nb. Point' },
       formal: { name: 'Formal', desc: 'Email and workplace tone — more complete, more professional.', sample: 'Detects greetings/sign-offs in email contexts; avoids empty pleasantries.' },
     },
+    tabs: {
+      voice: 'Voice Style',
+      rewrite: 'Rewrite Style',
+      rewriteTitle: 'Rewrite Styles',
+      rewriteDesc: 'Choose a style pack for text rewriting.',
+    },
     pack: {
       kicker: 'STYLE PACKS',
       title: 'Style Packs',

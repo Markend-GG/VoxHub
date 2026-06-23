@@ -1,4 +1,4 @@
-import type { MarketplaceDetail, MarketplaceListItem, MarketplaceMyPackItem, StylePack } from "../types"
+import type { MarketplaceDetail, MarketplaceListItem, MarketplaceMyPackItem, StylePack, StylePackScope } from "../types"
 import { invokeOrMock } from "./shared"
 import { mockStylePacks } from "./mock-data"
 
@@ -35,10 +35,10 @@ export function fetchMarketplaceDetail(
     }))
 }
 
-export function installMarketplacePack(packId: string): Promise<StylePack> {
+export function installMarketplacePack(packId: string, scope?: StylePackScope | null): Promise<StylePack> {
     return invokeOrMock(
         "marketplace_install",
-        { packId },
+        { packId, scope: scope ?? null },
         () => mockStylePacks[0],
     )
 }

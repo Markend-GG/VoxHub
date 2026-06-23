@@ -1,4 +1,4 @@
-import type { PolishMode, StylePack, StylePackRuntimeDiagnostics } from "../types"
+import type { PolishMode, StylePack, StylePackRuntimeDiagnostics, StylePackScope } from "../types"
 import { invokeOrMock } from "./shared"
 import {
     cloneMockStylePacks,
@@ -64,6 +64,11 @@ export function setActiveStylePack(id: string): Promise<StylePack> {
     return invokeOrMock("set_active_style_pack", { id }, () =>
         mockSetActiveStylePack(id),
     )
+}
+
+/** 设置重写风格激活包。id = null 表示恢复默认 (builtin.rewrite)。 */
+export function setActiveRewriteStylePack(id: string | null): Promise<void> {
+    return invokeOrMock("set_active_rewrite_style_pack", { id }, () => undefined)
 }
 
 export function setStylePackEnabled(

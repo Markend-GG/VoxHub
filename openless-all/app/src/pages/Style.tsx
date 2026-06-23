@@ -12,6 +12,7 @@ import {
   resetBuiltinStylePack,
   saveStylePack,
   setActiveStylePack,
+  setActiveRewriteStylePack,
   uploadMarketplacePack,
 } from '../lib/ipc';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
@@ -142,6 +143,7 @@ export function Style() {
   const [runtimePreview, setRuntimePreview] = useState<StylePackRuntimeDiagnostics | null>(null);
   const [runtimePreviewError, setRuntimePreviewError] = useState<string | null>(null);
   const [marketplaceOpen, setMarketplaceOpen] = useState(false);
+  const [styleTab, setStyleTab] = useState<'voice' | 'rewrite'>('voice');
 
   useEffect(() => () => {
     if (statusTimer.current !== null) window.clearTimeout(statusTimer.current);
@@ -216,6 +218,14 @@ export function Style() {
     .sort((a, b) => BUILTIN_BODY_ORDER.indexOf(a.id) - BUILTIN_BODY_ORDER.indexOf(b.id));
   const importedPacks = packs.filter(pack => pack.kind === 'imported');
   const bodyPacks = [...otherBuiltinPacks, ...importedPacks];
+
+  // 按 scope 过滤：语音 Tab 只显示 Voice 包，重写 Tab 只显示 Rewrite 包
+  const voicePacks = packs.filter(p => (p.scope ?? 'voice') === 'voice');
+  const rewritePacks = packs.filter(p => (p.scope ?? 'voice') === 'rewrite');
+  const voiceRawPack = voicePacks.find(pack => pack.id === BUILTIN_RAW_ID) ?? null;
+  const voiceBodyPacks = voicePacks.filter(pack => pack.id !== BUILTIN_RAW_ID);
+  const rewriteActivePackId = marketplacePrefs?.activeRewriteStylePackId ?? 'builtin.rewrite';
+  const rewriteBodyPacks = rewritePacks;
 
   useEffect(() => {
     if (!selectedPack) {
@@ -412,6 +422,7 @@ export function Style() {
       const template: StylePack = {
         ...NEW_PACK_TEMPLATE_BASE,
         id: '',
+        scope: styleTab === 'rewrite' ? 'rewrite' : 'voice',
       };
       const created = await createStylePackFromTemplate(template);
       showSaveStatus('saved', t('style.pack.createSuccess'), true);
@@ -426,6 +437,19 @@ export function Style() {
       setEditorOpen(true);
     } catch (createError) {
       showSaveStatus('failed', t('style.pack.createFailed', { err: String(createError) }));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRewriteActivate = async (pack: StylePack) => {
+    setBusy('activating');
+    try {
+      await setActiveRewriteStylePack(pack.id);
+      showSaveStatus('saved', t('style.pack.activateSuccess', { name: pack.name }), true);
+      await loadPacks(pack.id);
+    } catch (activateError) {
+      showSaveStatus('failed', t('style.pack.activateFailed', { err: String(activateError) }));
     } finally {
       setBusy(null);
     }
@@ -541,16 +565,36 @@ export function Style() {
           淡蓝 pill 只闪现 0.8s，不长期遮挡按钮。 */}
       <SavedToast saveState={saveState} message={saveMessage} />
 
+      {/* 语音风格 / 重写风格 分段 Tab */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+        {(['voice', 'rewrite'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setStyleTab(tab)}
+            style={{
+              padding: '5px 14px', fontSize: 12, borderRadius: 6, border: 0,
+              fontFamily: 'inherit', cursor: 'pointer', fontWeight: 500,
+              background: styleTab === tab ? 'var(--ol-blue)' : 'var(--ol-surface-2)',
+              color: styleTab === tab ? '#fff' : 'var(--ol-ink-3)',
+            }}
+          >
+            {tab === 'voice' ? t('style.tabs.voice', '语音风格') : t('style.tabs.rewrite', '重写风格')}
+          </button>
+        ))}
+      </div>
+
       {marketplaceOpen && (
         <MarketplaceModal
           onClose={() => {
             setMarketplaceOpen(false);
             // 用户可能在 modal 内安装过远端 pack；关闭后刷新本地列表，避免新装的看不到。
-            void loadPacks();
+            // 保留当前 selectedId，防止选区跳到 voice active pack 导致重写风格看起来被「取消激活」。
+            void loadPacks(selectedId);
           }}
         />
       )}
 
+      {styleTab === 'voice' && (
       <Card padding={0} style={{ overflow: 'hidden', flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <div style={{ padding: 18, borderBottom: '0.5px solid var(--ol-line)', flexShrink: 0 }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
@@ -559,12 +603,12 @@ export function Style() {
                   <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.listTitle')}</div>
                   <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginTop: 4, maxWidth: 760 }}>{t('style.pack.listDesc')}</div>
                 </div>
-                {rawPack && (
+                {voiceRawPack && (
                   <button
                     type="button"
-                    onClick={() => void handleActivate(rawPack)}
-                    disabled={rawPack.active || busy === 'activating'}
-                    title={rawPack.name}
+                    onClick={() => void handleActivate(voiceRawPack)}
+                    disabled={voiceRawPack.active || busy === 'activating'}
+                    title={voiceRawPack.name}
                     style={{
                       display: 'inline-flex',
                       alignItems: 'center',
@@ -572,28 +616,28 @@ export function Style() {
                       padding: '6px 12px',
                       borderRadius: 999,
                       border: '0.5px solid',
-                      borderColor: rawPack.active ? 'var(--ol-blue)' : 'var(--ol-line-strong)',
-                      background: rawPack.active ? 'var(--ol-blue-soft)' : 'transparent',
-                      color: rawPack.active ? 'var(--ol-blue)' : 'var(--ol-ink-2)',
+                      borderColor: voiceRawPack.active ? 'var(--ol-blue)' : 'var(--ol-line-strong)',
+                      background: voiceRawPack.active ? 'var(--ol-blue-soft)' : 'transparent',
+                      color: voiceRawPack.active ? 'var(--ol-blue)' : 'var(--ol-ink-2)',
                       fontSize: 12.5,
-                      fontWeight: rawPack.active ? 600 : 500,
+                      fontWeight: voiceRawPack.active ? 600 : 500,
                       whiteSpace: 'nowrap',
-                      cursor: rawPack.active ? 'default' : 'pointer',
+                      cursor: voiceRawPack.active ? 'default' : 'pointer',
                       transition: 'border-color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick)',
                     }}
                   >
-                    <span>{rawPack.name}</span>
-                    {rawPack.active && <span style={{ fontSize: 11, opacity: 0.85 }}>·{t('style.pack.active')}</span>}
+                    <span>{voiceRawPack.name}</span>
+                    {voiceRawPack.active && <span style={{ fontSize: 11, opacity: 0.85 }}>·{t('style.pack.active')}</span>}
                   </button>
                 )}
               </div>
-              <Pill tone="outline">{t('style.pack.listCount', { count: packs.length })}</Pill>
+              <Pill tone="outline">{t('style.pack.listCount', { count: voicePacks.length })}</Pill>
             </div>
           </div>
           <div className="ol-thinscroll" style={{ padding: 18, overflow: 'auto', flex: '1 1 0', minHeight: 0 }}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
             <AnimatePresence mode="sync">
-            {bodyPacks.map(pack => {
+            {voiceBodyPacks.map(pack => {
               const isBuiltin = pack.kind === 'builtin';
               return (
                 <motion.div
@@ -601,7 +645,7 @@ export function Style() {
                   layout
                   // 仅当包列表增减时才重算 layout；切换 active（pack.active 变化）
                   // 不再触发整列卡片的 layout 重测，消除切换风格包时的卡顿。
-                  layoutDependency={bodyPacks.length}
+                  layoutDependency={voiceBodyPacks.length}
                   initial={{ opacity: 0, scale: 0.85 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.85 }}
@@ -784,6 +828,213 @@ export function Style() {
           </div>
         </div>
       </Card>
+      )}
+
+      {styleTab === 'rewrite' && (
+      <Card padding={0} style={{ overflow: 'hidden', flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ padding: 18, borderBottom: '0.5px solid var(--ol-line)', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.tabs.rewriteTitle', '重写风格')}</div>
+                <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginTop: 4 }}>{t('style.tabs.rewriteDesc', '选择文本重写时使用的风格包')}</div>
+              </div>
+              <Pill tone="outline">{t('style.pack.listCount', { count: rewriteBodyPacks.length })}</Pill>
+            </div>
+          </div>
+          <div className="ol-thinscroll" style={{ padding: 18, overflow: 'auto', flex: '1 1 0', minHeight: 0 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+            <AnimatePresence mode="sync">
+            {rewriteBodyPacks.map(pack => {
+              const isBuiltin = pack.kind === 'builtin';
+              const isRewriteActive = pack.id === rewriteActivePackId;
+              return (
+                <motion.div
+                  key={pack.id}
+                  layout
+                  layoutDependency={rewriteBodyPacks.length}
+                  initial={{ opacity: 0, scale: 0.85 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.85 }}
+                  transition={{
+                    layout: { type: 'spring', damping: 25, stiffness: 220 },
+                    opacity: { duration: 0.2 },
+                    scale: { duration: 0.2 }
+                  }}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    textAlign: 'left',
+                    position: 'relative',
+                    border: '0.5px solid',
+                    borderColor: isRewriteActive ? 'var(--ol-style-card-border-active)' : 'var(--ol-style-card-border)',
+                    background: isRewriteActive
+                      ? 'var(--ol-style-card-bg-active)'
+                      : 'var(--ol-style-card-bg)',
+                    borderRadius: 18,
+                    padding: 16,
+                    boxShadow: isRewriteActive ? '0 0 0 3px var(--ol-blue-ring)' : 'none',
+                    cursor: 'default',
+                    minHeight: 204,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-style-card-ink)' }}>
+                          {pack.name}
+                        </div>
+                        <Pill tone={isBuiltin ? 'outline' : 'blue'} size="sm">
+                          {isBuiltin ? t('style.pack.builtin') : t('style.pack.imported')}
+                        </Pill>
+                        {pack.originAuthorLogin
+                          && pack.originAuthorLogin !== (marketplacePrefs?.marketplaceDevLogin ?? '').trim() && (
+                          <span title={t('style.pack.derivativeBadge', { login: pack.originAuthorLogin })}>
+                            <Pill tone="ok" size="sm">{t('style.pack.derivativeBadge', { login: pack.originAuthorLogin })}</Pill>
+                          </span>
+                        )}
+                        {isRewriteActive && <Pill tone="dark" size="sm">{t('style.pack.active')}</Pill>}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 12.5,
+                          color: 'var(--ol-ink-3)',
+                          lineHeight: 1.6,
+                          display: '-webkit-box',
+                          WebkitBoxOrient: 'vertical',
+                          WebkitLineClamp: 3,
+                          overflow: 'hidden',
+                          marginTop: 8,
+                          minHeight: 60,
+                        }}
+                      >
+                        {pack.description}
+                      </div>
+                    </div>
+                    {isBuiltin ? (
+                      <div
+                        aria-hidden
+                        style={{
+                          width: 36, height: 36, borderRadius: 12,
+                          display: 'grid', placeItems: 'center',
+                          background: isRewriteActive ? 'rgba(37,99,235,0.12)' : 'rgba(15,23,42,0.05)',
+                          color: isRewriteActive ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
+                          flexShrink: 0,
+                        }}
+                      >
+                        <Icon name="sparkle" size={16} />
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteImportedPack(pack)}
+                        disabled={busy === 'deleting'}
+                        aria-label={t('style.pack.deleteImported')}
+                        title={t('style.pack.deleteImported')}
+                        style={{
+                          width: 36, height: 36, borderRadius: 12,
+                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                          flexShrink: 0,
+                          border: '0.5px solid rgba(239,68,68,0.32)',
+                          background: 'rgba(254,242,242,0.6)',
+                          color: 'var(--ol-red, #ef4444)',
+                          cursor: busy === 'deleting' ? 'wait' : 'pointer',
+                          opacity: busy === 'deleting' ? 0.55 : 1,
+                          transition: 'background 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick)',
+                        }}
+                      >
+                        <Icon name="trash" size={15} />
+                      </button>
+                    )}
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minHeight: 24, marginBottom: 12 }}>
+                    <Pill tone={modeTone(pack.baseMode)} size="sm">{t(`style.modes.${pack.baseMode}.name`)}</Pill>
+                    {pack.tags.slice(0, 1).map(tag => (
+                      <Pill key={`${pack.id}-${tag}`} tone="default" size="sm">{tag}</Pill>
+                    ))}
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 'auto' }}>
+                    <Btn
+                      size="sm"
+                      variant={isRewriteActive ? 'soft' : 'ghost'}
+                      disabled={isRewriteActive || busy === 'activating'}
+                      onClick={() => void handleRewriteActivate(pack)}
+                    >
+                      {isRewriteActive ? t('style.pack.active') : t('style.pack.activate')}
+                    </Btn>
+                    <Btn
+                      size="sm"
+                      variant="ghost"
+                      icon="archive"
+                      disabled={busy === 'exporting'}
+                      onClick={() => void handleExportZip(pack)}
+                    >
+                      {t('style.pack.exportShort')}
+                    </Btn>
+                    <Btn
+                      size="sm"
+                      variant="ghost"
+                      icon="expand"
+                      disabled={isBuiltin}
+                      onClick={() => openEditorForPack(pack)}
+                    >
+                      {t('style.pack.edit')}
+                    </Btn>
+                  </div>
+                </motion.div>
+              );
+            })}
+            <motion.button
+              key="add-new-rewrite-pack-btn"
+              layout
+              initial={{ opacity: 0, scale: 0.85 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{
+                layout: { type: 'spring', damping: 25, stiffness: 220 },
+                opacity: { duration: 0.2 },
+                scale: { duration: 0.2 }
+              }}
+              type="button"
+              disabled={busy === 'creating'}
+              aria-label={t('style.pack.addPackTileTitle')}
+              onClick={() => void handleCreateFromTemplate()}
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                textAlign: 'center',
+                border: '0.5px dashed var(--ol-line-strong)',
+                borderRadius: 18,
+                padding: 16,
+                background: 'transparent',
+                color: 'var(--ol-ink-3)',
+                cursor: busy === 'creating' ? 'wait' : 'pointer',
+                opacity: busy === 'creating' ? 0.55 : 1,
+                minHeight: 204,
+                transition: 'border-color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick)',
+              }}
+            >
+              <div
+                style={{
+                  width: 44, height: 44, borderRadius: 999,
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  background: 'rgba(15,23,42,0.04)',
+                  color: 'var(--ol-ink-2)',
+                }}
+              >
+                <Icon name="plus" size={22} />
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink-2)' }}>{t('style.pack.addPackTileTitle')}</div>
+              <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', lineHeight: 1.55, maxWidth: 220 }}>{t('style.pack.addPackTileHint')}</div>
+            </motion.button>
+            </AnimatePresence>
+          </div>
+        </div>
+      </Card>
+      )}
 
       <AnimatePresence>
       {editorOpen && (
@@ -897,12 +1148,30 @@ export function Style() {
                         </Btn>
                       </span>
                       <Btn
-                        variant={draft.active ? 'soft' : 'blue'}
+                        variant={
+                          (draft.scope ?? 'voice') === 'rewrite'
+                            ? (draft.id === rewriteActivePackId ? 'soft' : 'blue')
+                            : (draft.active ? 'soft' : 'blue')
+                        }
                         icon="check"
-                        disabled={draft.active || busy === 'activating'}
-                        onClick={() => void handleActivate(draft)}
+                        disabled={
+                          (draft.scope ?? 'voice') === 'rewrite'
+                            ? (draft.id === rewriteActivePackId || busy === 'activating')
+                            : (draft.active || busy === 'activating')
+                        }
+                        onClick={() => {
+                          if ((draft.scope ?? 'voice') === 'rewrite') {
+                            void handleRewriteActivate(draft);
+                          } else {
+                            void handleActivate(draft);
+                          }
+                        }}
                       >
-                        {draft.active ? t('style.pack.active') : t('style.pack.activate')}
+                        {((draft.scope ?? 'voice') === 'rewrite'
+                          ? draft.id === rewriteActivePackId
+                          : draft.active)
+                          ? t('style.pack.active')
+                          : t('style.pack.activate')}
                       </Btn>
                     </div>
                   </div>

@@ -396,6 +396,12 @@ export const ja: typeof zhCN = {
       structured: { name: '明確な構造', desc: '複数のトピックや手順がある場合は、自動的に箇条書きに整理します。', sample: '1. トピック 1\na. ポイント\nb. ポイント\n2. トピック 2\na. ポイント\nb. ポイント' },
       formal: { name: '正式な表現', desc: '業務コミュニケーションやメール用途向け。よりプロフェッショナルで完成度の高い文体。', sample: 'メール用途では挨拶 / 結びを自動認識します。空疎な定型句は持ち込みません。' },
     },
+    tabs: {
+      voice: '音声スタイル',
+      rewrite: 'リライトスタイル',
+      rewriteTitle: 'リライトスタイル',
+      rewriteDesc: 'テキストリライトに使用するスタイルパックを選択。',
+    },
     pack: {
       kicker: 'STYLE PACKS',
       title: 'スタイルパック',

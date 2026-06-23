@@ -396,6 +396,12 @@ export const ko: typeof zhCN = {
       structured: { name: '명확한 구조', desc: '여러 주제나 단계가 있을 때 자동으로 항목별 목록으로 정리합니다.', sample: '1. 주제 1\na. 포인트\nb. 포인트\n2. 주제 2\na. 포인트\nb. 포인트' },
       formal: { name: '정식 표현', desc: '업무 커뮤니케이션과 메일에 적합. 더 전문적이고 완성도 높은 문체.', sample: '메일 시나리오에서 인사말과 맺음말을 자동 인식. 공허한 상투어는 추가하지 않습니다.' },
     },
+    tabs: {
+      voice: '음성 스타일',
+      rewrite: '재작성 스타일',
+      rewriteTitle: '재작성 스타일',
+      rewriteDesc: '텍스트 재작성에 사용할 스타일 팩을 선택하세요.',
+    },
     pack: {
       kicker: 'STYLE PACKS',
       title: '스타일 팩',

@@ -446,6 +446,11 @@ function RewriteHistoryView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const mobile = useMobileLayout();
+  const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -463,12 +468,41 @@ function RewriteHistoryView() {
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  const selected = items.find(e => e.id === selectedId) || items[0];
+  // 搜索词防抖 300ms
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebouncedQuery(query), 300);
+    return () => window.clearTimeout(id);
+  }, [query]);
+
+  // ⌘K / Ctrl+K 聚焦搜索框
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = debouncedQuery.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter(e =>
+      e.sourceText.toLowerCase().includes(q) ||
+      e.rewrittenText.toLowerCase().includes(q) ||
+      (e.stylePackName ?? '').toLowerCase().includes(q),
+    );
+  }, [items, debouncedQuery]);
+
+  const selected = filtered.find(e => e.id === selectedId) || filtered[0];
 
   const onDelete = async (id: string) => {
     try {
       await deleteRewriteHistoryEntry(id);
       setItems(prev => prev.filter(e => e.id !== id));
+      setSelectedId(current => (current === id ? null : current));
     } catch (err) {
       console.error('[rewrite-history] delete failed', err);
     }
@@ -515,30 +549,71 @@ function RewriteHistoryView() {
   }
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
+      {(!mobile || !mobileDetailOpen) && (
       <Card padding={0} style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ padding: '8px 14px', borderBottom: '0.5px solid var(--ol-line)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{items.length} {t('rewrite.entries', '条')}</span>
-          <Btn icon="trash" variant="ghost" size="sm" onClick={onClear}>{t('common.clear')}</Btn>
+        <div style={{ padding: '12px 14px', borderBottom: '0.5px solid var(--ol-line)' }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '6px 10px', fontSize: 12,
+            border: '0.5px solid var(--ol-line-strong)', borderRadius: 8,
+            background: 'var(--ol-surface-2)', color: 'var(--ol-ink-3)',
+          }}>
+            <Icon name="search" size={12} />
+            <input
+              ref={searchInputRef}
+              type="search"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder={t('history.searchPlaceholder', { shortcut: '⌘K' })}
+              aria-label={t('history.searchPlaceholder', { shortcut: '⌘K' })}
+              style={{
+                flex: 1, minWidth: 0,
+                outline: 'none', border: 0, background: 'transparent',
+                fontSize: 12, color: 'var(--ol-ink-1)', fontFamily: 'inherit',
+              }}
+            />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
+            <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
+              {t('history.summary', { total: items.length, shown: filtered.length })}
+            </span>
+            <Btn icon="trash" variant="ghost" size="sm" onClick={onClear}>{t('common.clear')}</Btn>
+          </div>
         </div>
-        <div style={{ overflowY: 'auto', flex: 1 }}>
-          {items.map(entry => (
+        <div className="ol-thinscroll" style={{ overflowY: 'auto', flex: 1 }}>
+          {filtered.length === 0 && (
+            <div style={{ padding: 16, fontSize: 12, color: 'var(--ol-ink-4)', textAlign: 'center' }}>
+              {debouncedQuery.trim()
+                ? t('history.searchNoMatch', { query: debouncedQuery.trim() })
+                : t('rewrite.emptyHistory', '暂无重写历史')}
+            </div>
+          )}
+          {filtered.map(entry => (
             <button
               key={entry.id}
-              onClick={() => setSelectedId(entry.id)}
+              onClick={() => {
+                setSelectedId(entry.id);
+                if (mobile) setMobileDetailOpen(true);
+              }}
               style={{
                 width: '100%', textAlign: 'left', padding: '10px 14px',
                 border: 0, borderBottom: '0.5px solid var(--ol-line)',
-                background: entry.id === selected?.id ? 'var(--ol-surface-2)' : 'transparent',
-                cursor: 'pointer', fontFamily: 'inherit',
+                background: entry.id === selected?.id ? 'rgba(37,99,235,0.06)' : 'transparent',
+                boxShadow: entry.id === selected?.id ? 'inset 2px 0 0 var(--ol-blue)' : 'none',
+                cursor: 'default', fontFamily: 'inherit',
+                transition: 'background 0.16s var(--ol-motion-quick), box-shadow 0.18s var(--ol-motion-soft)',
               }}
             >
               <div style={{ fontSize: 12, color: 'var(--ol-ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {entry.sourceText || '(空)'}
               </div>
-              <div style={{ display: 'flex', gap: 6, marginTop: 4, alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: 6, marginTop: 4, alignItems: 'center', flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 10, color: 'var(--ol-ink-4)' }}>{formatTime(entry.createdAt)}</span>
-                <Pill>{insertStatusLabel(entry.insertStatus)}</Pill>
+                {entry.stylePackName && (
+                  <Pill size="sm" tone="blue">{entry.stylePackName}</Pill>
+                )}
+                <Pill size="sm">{insertStatusLabel(entry.insertStatus)}</Pill>
                 {entry.errorCode && (
                   <span style={{ fontSize: 10, color: 'var(--ol-err)' }}>{entry.errorCode}</span>
                 )}
@@ -547,24 +622,59 @@ function RewriteHistoryView() {
           ))}
         </div>
       </Card>
-      {selected && (
-        <Card style={{ overflowY: 'auto', padding: 20 }}>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-            <Btn size="sm" onClick={() => void onCopy(selected.rewrittenText)}>{t('rewrite.copyResult', '复制结果')}</Btn>
-            <Btn size="sm" onClick={() => void onCopy(selected.sourceText)}>{t('rewrite.copySource', '复制原文')}</Btn>
-            <Btn size="sm" variant="ghost" onClick={() => void onDelete(selected.id)}>{t('common.delete')}</Btn>
-          </div>
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--ol-ink-4)', marginBottom: 4 }}>{t('rewrite.sourceText', '原文')}</div>
-            <div style={{ fontSize: 13, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selected.sourceText || '(空)'}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--ol-ink-4)', marginBottom: 4 }}>{t('rewrite.resultText', '重写结果')}</div>
-            <div style={{ fontSize: 13, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selected.rewrittenText || '(空)'}</div>
-          </div>
-          {selected.appName && (
-            <div style={{ marginTop: 12, fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('rewrite.sourceApp', '来源应用')}: {selected.appName}</div>
+      )}
+      {(!mobile || mobileDetailOpen) && selected && (
+        <Card className="ol-thinscroll" style={{ overflowY: 'auto', padding: 20 }}>
+          {mobile && (
+            <div style={{ marginBottom: 12 }}>
+              <Btn icon="chevLeft" variant="ghost" size="sm" onClick={() => setMobileDetailOpen(false)}>
+                {t('history.backToList')}
+              </Btn>
+            </div>
           )}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 13, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)' }}>{formatTime(selected.createdAt)}</span>
+              {selected.stylePackName && (
+                <Pill size="sm" tone="blue">{selected.stylePackName}</Pill>
+              )}
+              <Pill size="sm">{insertStatusLabel(selected.insertStatus)}</Pill>
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <Btn size="sm" icon="copy" variant="ghost" onClick={() => void onCopy(selected.rewrittenText)}>{t('rewrite.copyResult', '复制结果')}</Btn>
+              <Btn size="sm" icon="copy" variant="ghost" onClick={() => void onCopy(selected.sourceText)}>{t('rewrite.copySource', '复制原文')}</Btn>
+              <Btn size="sm" icon="trash" variant="ghost" onClick={() => void onDelete(selected.id)}>{t('common.delete')}</Btn>
+            </div>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
+              <Pill size="sm" tone="outline" style={{ marginBottom: 10 }}>{t('rewrite.sourceText', '原文')}</Pill>
+              <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                {selected.sourceText || '(空)'}
+              </p>
+            </div>
+            <div style={{ padding: 14, border: '0.5px solid var(--ol-blue)', borderRadius: 10, background: 'var(--ol-blue-soft)' }}>
+              <Pill size="sm" tone="blue" style={{ marginBottom: 10 }}>{t('rewrite.resultText', '重写结果')}</Pill>
+              <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                {selected.rewrittenText || '(空)'}
+              </p>
+            </div>
+          </div>
+          <div style={{ marginTop: 18, paddingTop: 14, borderTop: '0.5px solid var(--ol-line-soft)', display: 'flex', gap: 18, fontSize: 11, color: 'var(--ol-ink-4)', flexWrap: 'wrap' }}>
+            {selected.appName && <span>{t('rewrite.sourceApp', '来源应用')}: <b style={{ color: 'var(--ol-ink-2)' }}>{selected.appName}</b></span>}
+            {selected.stylePackName && <span>{t('rewrite.stylePack', '风格包')}: <b style={{ color: 'var(--ol-ink-2)' }}>{selected.stylePackName}</b></span>}
+            {selected.durationMs != null && selected.durationMs > 0 && (
+              <span>{t('common.durationSeconds', { value: (selected.durationMs / 1000).toFixed(1) })}</span>
+            )}
+            {selected.errorCode && <span style={{ color: 'var(--ol-err)' }}>{selected.errorCode}</span>}
+          </div>
+        </Card>
+      )}
+      {(!mobile || !mobileDetailOpen) && !selected && (
+        <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ padding: 40, textAlign: 'center', fontSize: 13, color: 'var(--ol-ink-4)' }}>
+            {t('history.selectHint')}
+          </div>
         </Card>
       )}
     </div>

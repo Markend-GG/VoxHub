@@ -17,7 +17,8 @@ use super::{atomic_write, data_dir, ensure_dir, read_or_default, PreferencesStor
 use crate::types::{
     builtin_style_pack_for_mode, builtin_style_pack_id, builtin_style_packs,
     default_active_style_pack_id, CustomStylePrompts, PolishMode, StylePack, StylePackExample,
-    StylePackKind, UserPreferences, BUILTIN_STYLE_PACK_LIGHT_ID,
+    StylePackKind, StylePackScope, UserPreferences, BUILTIN_STYLE_PACK_LIGHT_ID,
+    BUILTIN_STYLE_PACK_REWRITE_ID,
 };
 
 const STYLE_PACKS_FILE: &str = "style-packs.json";
@@ -133,6 +134,26 @@ impl StylePackStore {
             pack.active = pack.id == active_style_pack_id;
         }
         Ok(packs)
+    }
+
+    /// 列出指定 scope 的风格包。
+    /// Voice 返回 scope == Voice 的包，Rewrite 返回 scope == Rewrite 的包。
+    pub fn list_by_scope(&self, scope: StylePackScope) -> Result<Vec<StylePack>> {
+        let all = self.list()?;
+        Ok(all.into_iter().filter(|p| p.scope == scope).collect())
+    }
+
+    /// 设置指定包的 scope。
+    pub fn set_scope(&self, id: &str, scope: StylePackScope) -> Result<StylePack> {
+        let mut packs = self.state.lock();
+        let pack = packs
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| anyhow!("style pack {} not found", id))?;
+        pack.scope = scope;
+        let result = pack.clone();
+        write_style_packs_file(&self.path, &packs)?;
+        Ok(result)
     }
 
     pub fn get(&self, id: &str) -> Result<StylePack> {
@@ -302,6 +323,8 @@ impl StylePackStore {
         let removed = packs[index].clone();
         remove_style_pack_assets(&self.asset_root, &packs[index]);
         packs.remove(index);
+        // 如果删除的是重写激活包，重置为 builtin.rewrite
+        // (这里只做包列表层面的清理，prefs 重置由 command 层处理)
         if ensure_at_least_one_style_pack_enabled(&mut packs) {
             // write updated fallback state as well
         }
@@ -358,8 +381,9 @@ impl StylePackStore {
                 .and_then(|value| normalize_optional_text(Some(value))),
             origin_pack_id: normalize_optional_text(manifest.origin_pack_id),
             origin_author_login: normalize_optional_text(manifest.origin_author_login),
+            scope: StylePackScope::Voice,
         };
-        packs.insert(0, pack.clone());
+        packs.push(pack.clone());
         write_style_packs_file(&self.path, &packs)?;
         log::info!(
             "[style-pack] imported source={} installed_id={} manifest_id={} base_mode={:?} prompt_chars={} examples={} tags={} icon={}",

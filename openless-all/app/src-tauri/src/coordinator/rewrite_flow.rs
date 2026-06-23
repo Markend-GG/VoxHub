@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::selection::capture_selection;
 use crate::types::{
     rewrite_error_code, InsertStatus, RewriteHistoryEntry, RewriteStatePayload, RewriteStateKind,
+    BUILTIN_STYLE_PACK_REWRITE_ID,
 };
 
 use super::*;
@@ -143,10 +144,26 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
     let prefs = inner.prefs.get();
     let started = std::time::Instant::now();
 
+    // 读取重写风格 prompt：三级 fallback
+    // 1) 用户选择的包 -> 2) builtin.rewrite -> 3) 硬编码 DEFAULT_REWRITE_STYLE_PROMPT
+    let style_prompt = match &prefs.active_rewrite_style_pack_id {
+        Some(id) => match inner.style_packs.get(id) {
+            Ok(pack) if pack.enabled => pack.prompt.clone(),
+            _ => inner.style_packs
+                .get(BUILTIN_STYLE_PACK_REWRITE_ID)
+                .map(|p| p.prompt.clone())
+                .unwrap_or_else(|_| DEFAULT_REWRITE_STYLE_PROMPT.to_string()),
+        },
+        None => inner.style_packs
+            .get(BUILTIN_STYLE_PACK_REWRITE_ID)
+            .map(|p| p.prompt.clone())
+            .unwrap_or_else(|_| DEFAULT_REWRITE_STYLE_PROMPT.to_string()),
+    };
+
     // 7. LLM 调用
     let rewrite_result = rewrite_text(
         &selection.text,
-        DEFAULT_REWRITE_STYLE_PROMPT,
+        &style_prompt,
         prefs.llm_thinking_enabled,
     )
     .await;
@@ -225,6 +242,16 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
     };
 
     // 11. 写历史
+    let (hist_pack_id, hist_pack_name) = match &prefs.active_rewrite_style_pack_id {
+        Some(id) => match inner.style_packs.get(id) {
+            Ok(pack) => (Some(pack.id.clone()), Some(pack.name.clone())),
+            Err(_) => (None, Some("智能重写".into())),
+        },
+        None => (
+            Some(BUILTIN_STYLE_PACK_REWRITE_ID.into()),
+            Some("智能重写".into()),
+        ),
+    };
     append_rewrite_history(
         inner,
         RewriteHistoryEntry {
@@ -232,8 +259,8 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
             created_at: now_rfc3339(),
             source_text: selection.text.clone(),
             rewritten_text: rewritten_text.clone(),
-            style_pack_id: None,
-            style_pack_name: Some("默认".into()),
+            style_pack_id: hist_pack_id,
+            style_pack_name: hist_pack_name,
             app_name: selection.source_app.clone(),
             insert_status,
             error_code: error_code.clone(),

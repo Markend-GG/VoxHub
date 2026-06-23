@@ -213,7 +213,11 @@ export interface StylePack {
   /** 衍生关系：null = 本地原创（或还没首发到云端）；非空 = 这份 pack 安装自云端 originPackId。 */
   originPackId?: string | null;
   originAuthorLogin?: string | null;
+  /** 风格包用途：voice（语音）或 rewrite（重写）。旧包缺省时视为 'voice'。 */
+  scope?: StylePackScope;
 }
+
+export type StylePackScope = 'voice' | 'rewrite';
 
 export interface StylePackRuntimeDiagnostics {
   packId: string;
@@ -292,6 +296,8 @@ export interface UserPreferences {
   rewriteHotkey: ShortcutBinding | null;
   /** 是否保存重写历史。默认 true。 */
   rewriteSaveHistory: boolean;
+  /** 文本重写当前激活的风格包 ID。null = 使用内置默认 (builtin.rewrite)。 */
+  activeRewriteStylePackId?: string | null;
   /** Less Computer：是否启用。默认关闭。 */
   codingAgentEnabled: boolean;
   /** Agent 后端：claude-code-cli（默认）/ opencode-cli。 */

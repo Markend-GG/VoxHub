@@ -141,6 +141,7 @@ pub async fn marketplace_detail(
 pub async fn marketplace_install(
     coord: CoordinatorState<'_>,
     pack_id: String,
+    scope: Option<crate::types::StylePackScope>,
 ) -> Result<StylePack, String> {
     // 安全校验：pack_id 来自远端 backend，可能含路径遍历 segment。
     // 用跟 read_audio_recording 同样的 UUID-v4 白名单挡住 ../ / 绝对路径等。
@@ -195,10 +196,17 @@ pub async fn marketplace_install(
     let _ = std::fs::remove_file(&tmp);
     let imported = imported_result?;
 
+    // 设置用户选择的 scope（默认 Voice）
+    let target_scope = scope.unwrap_or(crate::types::StylePackScope::Voice);
+    let scoped_pack = coord
+        .style_packs()
+        .set_scope(&imported.id, target_scope)
+        .map_err(|e| format!("set scope failed: {e}"))?;
+
     // 绑定 origin —— 后续编辑+发布走 derivative / supersede 分支。
     coord
         .style_packs()
-        .set_origin(&imported.id, Some(pack_id), origin_author_login)
+        .set_origin(&scoped_pack.id, Some(pack_id), origin_author_login)
         .map_err(|e| format!("set origin failed: {e}"))
 }
 

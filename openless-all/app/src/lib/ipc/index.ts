@@ -73,6 +73,7 @@ export {
     createStylePackFromTemplate,
     previewStylePackRuntime,
     setActiveStylePack,
+    setActiveRewriteStylePack,
     setStylePackEnabled,
     resetBuiltinStylePack,
     deleteStylePack,

@@ -394,6 +394,12 @@ export const zhTW: typeof zhCN = {
       structured: { name: '清晰結構', desc: '多個主題或步驟時，自動組織爲分點列表。', sample: '1. 主題一\na. 要點\nb. 要點\n2. 主題二\na. 要點\nb. 要點' },
       formal: { name: '正式表達', desc: '工作溝通和郵件場景，更專業更完整。', sample: '郵件場景自動識別問候 / 落款；不引入空泛客套。' },
     },
+    tabs: {
+      voice: '語音風格',
+      rewrite: '重寫風格',
+      rewriteTitle: '重寫風格',
+      rewriteDesc: '選擇文字重寫時使用的風格包。',
+    },
     pack: {
       kicker: 'STYLE PACKS',
       title: '風格包',

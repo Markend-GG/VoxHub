@@ -392,6 +392,12 @@ export const zhCN = {
       structured: { name: '清晰结构', desc: '多个主题或步骤时，自动组织为分点列表。', sample: '1. 主题一\na. 要点\nb. 要点\n2. 主题二\na. 要点\nb. 要点' },
       formal: { name: '正式表达', desc: '工作沟通和邮件场景，更专业更完整。', sample: '邮件场景自动识别问候 / 落款；不引入空泛客套。' },
     },
+    tabs: {
+      voice: '语音风格',
+      rewrite: '重写风格',
+      rewriteTitle: '重写风格',
+      rewriteDesc: '选择文本重写时使用的风格包。',
+    },
     pack: {
       kicker: 'STYLE PACKS',
       title: '风格包',

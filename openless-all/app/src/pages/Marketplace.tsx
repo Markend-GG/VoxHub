@@ -54,6 +54,7 @@ export function Marketplace() {
   const [detail, setDetail] = useState<MarketplaceDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [actionMsg, setActionMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const [installScope, setInstallScope] = useState<'voice' | 'rewrite'>('voice');
 
   const [showUpload, setShowUpload] = useState(false);
   const [uploadOriginPackId, setUploadOriginPackId] = useState<string | null>(null);
@@ -230,7 +231,7 @@ export function Marketplace() {
   const onInstall = async () => {
     if (!detail) return;
     try {
-      await installMarketplacePack(detail.id);
+      await installMarketplacePack(detail.id, installScope);
       setActionMsg({ kind: 'ok', text: t('marketplace.installed', { name: detail.name }) });
       setSelectedId(null);
     } catch (error) {
@@ -697,9 +698,23 @@ export function Marketplace() {
                   <Btn variant="ghost" size="sm" onClick={() => setSelectedId(null)}>
                     {t('common.cancel')}
                   </Btn>
-                  <Btn variant="blue" size="sm" onClick={() => void onInstall()}>
-                    {t('marketplace.installBtn')}
-                  </Btn>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <select
+                      value={installScope}
+                      onChange={e => setInstallScope(e.target.value as 'voice' | 'rewrite')}
+                      style={{
+                        fontSize: 11, padding: '4px 8px', borderRadius: 6,
+                        border: '0.5px solid var(--ol-line-strong)', background: 'var(--ol-surface-2)',
+                        color: 'var(--ol-ink-2)', fontFamily: 'inherit',
+                      }}
+                    >
+                      <option value="voice">{t('style.tabs.voice', '语音风格')}</option>
+                      <option value="rewrite">{t('style.tabs.rewrite', '重写风格')}</option>
+                    </select>
+                    <Btn variant="blue" size="sm" onClick={() => void onInstall()}>
+                      {t('marketplace.installBtn')}
+                    </Btn>
+                  </div>
                 </div>
               </div>
             </>
