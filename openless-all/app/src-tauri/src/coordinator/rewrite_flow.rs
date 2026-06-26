@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use crate::selection::capture_selection;
 use crate::types::{
-    rewrite_error_code, InsertStatus, RewriteHistoryEntry, RewriteStatePayload, RewriteStateKind,
-    BUILTIN_STYLE_PACK_REWRITE_ID,
+    rewrite_error_code, ContextCaptureHistoryType, InsertStatus, RewriteHistoryEntry,
+    RewriteStatePayload, RewriteStateKind, BUILTIN_STYLE_PACK_REWRITE_ID,
 };
 
 use super::*;
@@ -78,6 +78,12 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
     }
 
     // 3. 记录焦点（在发送任何模拟按键之前）
+    let history_id = new_uuid();
+    Coordinator::spawn_context_capture(
+        inner,
+        ContextCaptureHistoryType::Rewrite,
+        history_id.clone(),
+    );
     let focus_target = capture_focus_target();
 
     // 4. 等待修饰键释放 — 全局快捷键 Ctrl+Shift+R 触发后，用户可能还按着
@@ -99,7 +105,7 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
             append_rewrite_history(
                 inner,
                 RewriteHistoryEntry {
-                    id: new_uuid(),
+                    id: history_id.clone(),
                     created_at: now_rfc3339(),
                     source_text: String::new(),
                     rewritten_text: String::new(),
@@ -109,6 +115,7 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
                     insert_status: InsertStatus::Failed,
                     error_code: Some(rewrite_error_code::SELECTION_EMPTY.to_string()),
                     duration_ms: None,
+                    context_capture: None,
                 },
             );
             emit_rewrite_capsule(inner, CapsuleState::Error, Some("先选中一段文字再按重写快捷键"));
@@ -176,7 +183,7 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
             append_rewrite_history(
                 inner,
                 RewriteHistoryEntry {
-                    id: new_uuid(),
+                    id: history_id.clone(),
                     created_at: now_rfc3339(),
                     source_text: selection.text.clone(),
                     rewritten_text: String::new(),
@@ -186,6 +193,7 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
                     insert_status: InsertStatus::Failed,
                     error_code: Some(rewrite_error_code::LLM_FAILED.to_string()),
                     duration_ms: Some(started.elapsed().as_millis() as u64),
+                    context_capture: None,
                 },
             );
             emit_rewrite_capsule(inner, CapsuleState::Error, Some("重写失败，请稍后重试"));
@@ -255,7 +263,7 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
     append_rewrite_history(
         inner,
         RewriteHistoryEntry {
-            id: new_uuid(),
+            id: history_id,
             created_at: now_rfc3339(),
             source_text: selection.text.clone(),
             rewritten_text: rewritten_text.clone(),
@@ -265,6 +273,7 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
             insert_status,
             error_code: error_code.clone(),
             duration_ms: Some(started.elapsed().as_millis() as u64),
+            context_capture: None,
         },
     );
 
@@ -323,8 +332,22 @@ fn append_rewrite_history(inner: &Arc<Inner>, entry: RewriteHistoryEntry) {
     if !inner.prefs.get().rewrite_save_history {
         return;
     }
+    let entry_for_analysis = entry.clone();
     if let Err(e) = inner.rewrite_history.append(entry) {
         log::warn!("[rewrite] failed to write rewrite history: {e}");
+    } else {
+        let prefs = inner.prefs.get();
+        if let Err(e) = inner
+            .context_analysis
+            .apply_retention(prefs.history_retention_days, prefs.history_max_entries)
+        {
+            log::warn!("[context-analysis] retention cleanup failed: {e}");
+        }
+        crate::context_vision_analysis::spawn_analysis_for_rewrite(
+            inner.context_capture.clone(),
+            inner.context_analysis.clone(),
+            entry_for_analysis,
+        );
     }
 }
 

@@ -38,6 +38,8 @@ export {
     deleteHistoryEntry,
     clearHistory,
     readAudioRecording,
+    readContextScreenshot,
+    reanalyzeContextHistory,
     retranscribeRecording,
 } from "./history"
 

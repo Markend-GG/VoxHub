@@ -96,6 +96,7 @@ mod tests {
             insert_status: InsertStatus::Inserted,
             error_code: None,
             duration_ms: None,
+            context_capture: None,
         }
     }
 

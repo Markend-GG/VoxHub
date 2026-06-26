@@ -37,6 +37,7 @@ subtle = "2"
 getrandom = "0.3"
 bzip2 = "0.4"
 tar = "0.4"
+image = { version = "0.25", default-features = false, features = ["bmp", "jpeg"] }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"

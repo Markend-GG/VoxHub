@@ -59,8 +59,9 @@ pub(crate) use crate::types::{
     builtin_style_pack_id, default_active_style_pack_id, AndroidAccessibilityStatus,
     AndroidOverlayStatus, ChineseScriptPreference, ComboBinding, CorrectionRule, CredentialsStatus,
     DictationSession, DictionaryEntry, HotkeyCapability, HotkeyStatus, OutputLanguagePreference,
-    PolishMode, RewriteHistoryEntry, ShortcutBinding, StylePack, StylePackKind, StylePackRuntimeDiagnostics,
-    StyleSystemPrompts, UpdateChannel, UserPreferences, VocabPresetStore,
+    PolishMode, RewriteHistoryEntry, ShortcutBinding, StylePack, StylePackKind,
+    StylePackRuntimeDiagnostics, StyleSystemPrompts, UpdateChannel, UserPreferences,
+    VocabPresetStore,
 };
 
 mod credentials;
@@ -78,9 +79,9 @@ mod misc;
 mod permissions_cmds;
 mod providers;
 mod qa;
-mod rewrite;
 #[cfg(not(mobile))]
 mod remote_input;
+mod rewrite;
 mod settings;
 #[cfg(not(mobile))]
 mod sherpa_asr;
@@ -101,9 +102,9 @@ pub use misc::*;
 pub use permissions_cmds::*;
 pub use providers::*;
 pub use qa::*;
-pub use rewrite::*;
 #[cfg(not(mobile))]
 pub use remote_input::*;
+pub use rewrite::*;
 pub use settings::*;
 // sherpa_onnx_asr_* 命令整组 `#[cfg(target_os = "windows")]`（见 lib.rs 的
 // generate_handler! 清单）。非 Windows 平台这组 glob 重导出无人引用，会触发
@@ -634,6 +635,8 @@ mod tests {
         fn refresh_open_app_hotkey(&self) {
             *self.open_app_refreshes.lock().unwrap() += 1;
         }
+
+        fn refresh_rewrite_hotkey(&self) {}
 
         fn refresh_coding_agent_hotkey(&self) {
             *self.coding_agent_refreshes.lock().unwrap() += 1;

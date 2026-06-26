@@ -1066,6 +1066,11 @@ pub(super) async fn begin_session_as(
         }
         session_id
     };
+    Coordinator::spawn_context_capture(
+        inner,
+        ContextCaptureHistoryType::Voice,
+        current_session_id.to_string(),
+    );
     #[cfg(target_os = "windows")]
     {
         let prepared = inner.windows_ime.prepare_session();
@@ -1682,6 +1687,7 @@ fn build_transcribe_failed_session(
         duration_ms: Some(duration_ms),
         dictionary_entry_count: None,
         has_audio_recording: Some(has_audio_recording),
+        context_capture: None,
     }
 }
 
@@ -1693,12 +1699,25 @@ fn write_transcribe_failed_history(inner: &Arc<Inner>, session_id: SessionId, du
         prefs.default_mode,
         inner.audio_archive_active.load(Ordering::Relaxed),
     );
+    let session_for_analysis = session.clone();
     if let Err(e) = inner.history.append_with_retention(
         session,
         prefs.history_retention_days,
         prefs.history_max_entries,
     ) {
         log::error!("[coord] transcribeFailed history append failed: {e}");
+    } else {
+        if let Err(e) = inner
+            .context_analysis
+            .apply_retention(prefs.history_retention_days, prefs.history_max_entries)
+        {
+            log::warn!("[context-analysis] retention cleanup failed: {e}");
+        }
+        crate::context_vision_analysis::spawn_analysis_for_voice(
+            inner.context_capture.clone(),
+            inner.context_analysis.clone(),
+            session_for_analysis,
+        );
     }
 }
 
@@ -2174,7 +2193,9 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             // 通过原始录音定位"是不是麦克风太小声 / ASR 模型问题"的场景。修 pr_agent
             // "Missing Audio" 反馈。
             has_audio_recording: Some(inner.audio_archive_active.load(Ordering::Relaxed)),
+            context_capture: None,
         };
+        let session_for_analysis = session.clone();
         let prefs_snapshot = inner.prefs.get();
         if let Err(e) = inner.history.append_with_retention(
             session,
@@ -2182,6 +2203,18 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             prefs_snapshot.history_max_entries,
         ) {
             log::error!("[coord] history append failed: {e}");
+        } else {
+            if let Err(e) = inner.context_analysis.apply_retention(
+                prefs_snapshot.history_retention_days,
+                prefs_snapshot.history_max_entries,
+            ) {
+                log::warn!("[context-analysis] retention cleanup failed: {e}");
+            }
+            crate::context_vision_analysis::spawn_analysis_for_voice(
+                inner.context_capture.clone(),
+                inner.context_analysis.clone(),
+                session_for_analysis,
+            );
         }
         emit_capsule(
             inner,
@@ -2536,13 +2569,27 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         // 用 begin_session 时 Recorder::start 返回的实际写盘状态，而不是 prefs 开关——
         // 开关打开但路径创建失败时这里是 false，避免前端渲染播放按钮后端 404。
         has_audio_recording: Some(inner.audio_archive_active.load(Ordering::Relaxed)),
+        context_capture: None,
     };
+    let session_for_analysis = session.clone();
     if let Err(e) = inner.history.append_with_retention(
         session,
         prefs_snapshot.history_retention_days,
         prefs_snapshot.history_max_entries,
     ) {
         log::error!("[coord] history append failed: {e}");
+    } else {
+        if let Err(e) = inner.context_analysis.apply_retention(
+            prefs_snapshot.history_retention_days,
+            prefs_snapshot.history_max_entries,
+        ) {
+            log::warn!("[context-analysis] retention cleanup failed: {e}");
+        }
+        crate::context_vision_analysis::spawn_analysis_for_voice(
+            inner.context_capture.clone(),
+            inner.context_analysis.clone(),
+            session_for_analysis,
+        );
     }
 
     // 远程输入：把本次最终文字回传给手机端。remote_server 的 WS handler 订阅了
@@ -2737,6 +2784,7 @@ mod tests {
             duration_ms: Some(1000),
             dictionary_entry_count: None,
             has_audio_recording: None,
+            context_capture: None,
             style_pack_id: style_pack_id.map(str::to_string),
             translation_active,
             polish_source: polish_source.map(str::to_string),

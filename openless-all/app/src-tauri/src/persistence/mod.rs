@@ -25,6 +25,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 mod correction;
+mod context_analysis;
+mod context_capture;
 mod credentials;
 mod dictionary;
 mod history;
@@ -34,6 +36,8 @@ mod rewrite_history;
 mod style_pack;
 
 pub use correction::*;
+pub use context_analysis::*;
+pub use context_capture::*;
 pub use credentials::*;
 pub use dictionary::*;
 pub use history::*;

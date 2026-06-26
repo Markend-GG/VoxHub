@@ -182,6 +182,8 @@ struct CredsLlmEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    contextVisionModel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     extraHeaders: Option<HashMap<String, String>>,
@@ -193,6 +195,11 @@ impl CredsLlmEntry {
             && self.apiKey.as_deref().unwrap_or("").is_empty()
             && self.baseURL.as_deref().unwrap_or("").is_empty()
             && self.model.as_deref().unwrap_or("").is_empty()
+            && self
+                .contextVisionModel
+                .as_deref()
+                .unwrap_or("")
+                .is_empty()
             && self.temperature.is_none()
             && self
                 .extraHeaders
@@ -663,6 +670,9 @@ fn lookup_account(root: &CredsRoot, account: CredentialAccount) -> Option<String
         CredentialAccount::VolcengineResourceId => asr.and_then(|e| pick(&e.resourceId)),
         CredentialAccount::ArkApiKey => llm.and_then(|e| pick(&e.apiKey)),
         CredentialAccount::ArkModelId => llm.and_then(|e| pick(&e.model)),
+        CredentialAccount::ArkContextVisionModelId => {
+            llm.and_then(|e| pick(&e.contextVisionModel))
+        }
         CredentialAccount::ArkEndpoint => llm.and_then(|e| pick(&e.baseURL)),
         CredentialAccount::AsrApiKey => asr.and_then(|e| pick(&e.apiKey)),
         CredentialAccount::AsrEndpoint => asr.and_then(|e| pick(&e.baseURL)),
@@ -696,6 +706,10 @@ fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option
             let entry = root.providers.llm.entry(llm_id).or_default();
             entry.model = normalized;
         }
+        CredentialAccount::ArkContextVisionModelId => {
+            let entry = root.providers.llm.entry(llm_id).or_default();
+            entry.contextVisionModel = normalized;
+        }
         CredentialAccount::ArkEndpoint => {
             let entry = root.providers.llm.entry(llm_id).or_default();
             entry.baseURL = normalized;
@@ -726,6 +740,7 @@ pub enum CredentialAccount {
     VolcengineResourceId,
     ArkApiKey,
     ArkModelId,
+    ArkContextVisionModelId,
     ArkEndpoint,
     /// Active ASR provider's API key (used by Whisper-compatible providers).
     AsrApiKey,
@@ -748,6 +763,7 @@ impl CredentialAccount {
             CredentialAccount::VolcengineResourceId => "volcengine.resource_id",
             CredentialAccount::ArkApiKey => "ark.api_key",
             CredentialAccount::ArkModelId => "ark.model_id",
+            CredentialAccount::ArkContextVisionModelId => "ark.context_vision_model_id",
             CredentialAccount::ArkEndpoint => "ark.endpoint",
             CredentialAccount::AsrApiKey => "asr.api_key",
             CredentialAccount::AsrEndpoint => "asr.endpoint",
@@ -763,6 +779,7 @@ impl CredentialAccount {
             CredentialAccount::VolcengineResourceId,
             CredentialAccount::ArkApiKey,
             CredentialAccount::ArkModelId,
+            CredentialAccount::ArkContextVisionModelId,
             CredentialAccount::ArkEndpoint,
             CredentialAccount::AsrApiKey,
             CredentialAccount::AsrEndpoint,
@@ -783,6 +800,7 @@ pub struct CredentialsSnapshot {
     pub asr_model: Option<String>,
     pub ark_api_key: Option<String>,
     pub ark_model_id: Option<String>,
+    pub ark_context_vision_model_id: Option<String>,
     pub ark_endpoint: Option<String>,
 }
 
@@ -853,6 +871,10 @@ impl CredentialsVault {
             asr_model: lookup_account(&root, CredentialAccount::AsrModel),
             ark_api_key: lookup_account(&root, CredentialAccount::ArkApiKey),
             ark_model_id: lookup_account(&root, CredentialAccount::ArkModelId),
+            ark_context_vision_model_id: lookup_account(
+                &root,
+                CredentialAccount::ArkContextVisionModelId,
+            ),
             ark_endpoint: lookup_account(&root, CredentialAccount::ArkEndpoint),
         }
     }

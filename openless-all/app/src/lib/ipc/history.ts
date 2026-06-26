@@ -1,4 +1,4 @@
-import type { DictationSession } from "../types"
+import type { ContextCaptureHistoryType, DictationSession } from "../types"
 import { invokeOrMock } from "./shared"
 import { mockHistory } from "./mock-data"
 
@@ -33,6 +33,29 @@ export function readAudioRecording(sessionId: string): Promise<Uint8Array> {
 /** 用当前 ASR provider 对一条「转录失败」历史条目的归档录音重新转录（issue #613）。
  *  成功时后端原地回写该条历史的 rawTranscript / finalText 并清除错误码，返回更新后的整条记录。
  *  失败时抛出错误（如「重新转录仍未识别到语音」/「recording not found」），录音保留不丢。 */
+export function readContextScreenshot(contextCaptureId: string): Promise<Uint8Array> {
+    return invokeOrMock(
+        "read_context_screenshot",
+        { contextCaptureId },
+        () => new Uint8Array(),
+    ).then((value) => {
+        if (value instanceof Uint8Array) return value
+        if (Array.isArray(value)) return new Uint8Array(value as number[])
+        return new Uint8Array(value as ArrayBuffer)
+    })
+}
+
+export function reanalyzeContextHistory(
+    historyType: ContextCaptureHistoryType,
+    historyId: string,
+): Promise<void> {
+    return invokeOrMock(
+        "reanalyze_context_history",
+        { historyType, historyId },
+        () => undefined,
+    )
+}
+
 export function retranscribeRecording(sessionId: string): Promise<DictationSession> {
     return invokeOrMock(
         "retranscribe_recording",

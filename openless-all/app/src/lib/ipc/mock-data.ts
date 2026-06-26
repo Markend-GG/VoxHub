@@ -94,6 +94,9 @@ export let mockSettings: UserPreferences = {
     historyMaxEntries: null,
     recordAudioForDebug: false,
     audioRecordingMaxEntries: null,
+    contextCaptureEnabled: true,
+    contextVisionAnalysisEnabled: false,
+    contextVisionAnalysisConsentAccepted: false,
     marketplaceBaseUrl: "https://apic.openless.top",
     marketplaceDevLogin: "",
     remoteInputEnabled: false,
@@ -449,6 +452,7 @@ export const mockHistory: DictationSession[] = OL_DATA.history.map((h, i) => ({
     durationMs: 600,
     dictionaryEntryCount: 28,
     hasAudioRecording: null,
+    contextCapture: null,
 }))
 
 export const mockVocab: DictionaryEntry[] = OL_DATA.vocab.map((v, i) => ({

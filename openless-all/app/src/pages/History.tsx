@@ -6,13 +6,157 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
-import { clearHistory, clearRewriteHistory, deleteHistoryEntry, deleteRewriteHistoryEntry, listHistory, listRewriteHistory, readAudioRecording, retranscribeRecording } from '../lib/ipc';
+import { clearHistory, clearRewriteHistory, deleteHistoryEntry, deleteRewriteHistoryEntry, listHistory, listRewriteHistory, readAudioRecording, readContextScreenshot, reanalyzeContextHistory, retranscribeRecording } from '../lib/ipc';
 import { useMobileLayout } from '../lib/useMobileLayout';
-import type { DictationSession, PolishMode } from '../lib/types';
+import type { ContextCaptureEntry, DictationSession, PolishMode } from '../lib/types';
 import type { RewriteHistoryEntry } from '../lib/ipc/rewrite';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 import { chipSelectedStyle } from './settings/shared';
+
+const CONTEXT_SCREENSHOT_CACHE_LIMIT = 24;
+const REANALYSIS_STATUS_CLEAR_MS = 4_000;
+
+type ReanalysisUiStatus = 'busy' | 'queued' | 'success' | 'failed' | 'skipped' | 'disabled';
+
+interface ReanalysisUiState {
+  status: ReanalysisUiStatus;
+  updatedAt: number;
+  errorCode?: string | null;
+  previousAnalysisId?: string | null;
+}
+
+type ReanalysisStateMap = Record<string, ReanalysisUiState>;
+type HistoryRefreshOptions = { silent?: boolean; force?: boolean };
+
+type ContextScreenshotCacheEntry =
+  | { state: 'loading'; promise: Promise<string>; lastUsed: number }
+  | { state: 'ready'; url: string; lastUsed: number; refCount: number };
+
+const contextScreenshotCache = new Map<string, ContextScreenshotCacheEntry>();
+
+function retainCachedContextScreenshotUrl(contextId: string): string | null {
+  const cached = contextScreenshotCache.get(contextId);
+  if (cached?.state !== 'ready') return null;
+  cached.lastUsed = Date.now();
+  cached.refCount += 1;
+  return cached.url;
+}
+
+function retainContextScreenshotUrl(contextId: string): Promise<string> {
+  const cached = contextScreenshotCache.get(contextId);
+  if (cached?.state === 'ready') {
+    cached.lastUsed = Date.now();
+    cached.refCount += 1;
+    return Promise.resolve(cached.url);
+  }
+  if (cached?.state === 'loading') {
+    cached.lastUsed = Date.now();
+    return cached.promise.then(url => retainReadyContextScreenshotUrl(contextId, url));
+  }
+
+  const promise = readContextScreenshot(contextId).then(bytes => {
+    if (bytes.byteLength === 0) {
+      throw new Error('empty screenshot');
+    }
+    const buffer = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(buffer).set(bytes);
+    return URL.createObjectURL(new Blob([buffer], { type: 'image/bmp' }));
+  });
+
+  contextScreenshotCache.set(contextId, { state: 'loading', promise, lastUsed: Date.now() });
+  void promise
+    .then(url => {
+      const current = contextScreenshotCache.get(contextId);
+      if (current?.state === 'loading' && current.promise === promise) {
+        contextScreenshotCache.set(contextId, { state: 'ready', url, lastUsed: Date.now(), refCount: 0 });
+      } else {
+        URL.revokeObjectURL(url);
+      }
+    })
+    .catch(() => {
+      const current = contextScreenshotCache.get(contextId);
+      if (current?.state === 'loading' && current.promise === promise) {
+        contextScreenshotCache.delete(contextId);
+      }
+    });
+
+  return promise.then(url => retainReadyContextScreenshotUrl(contextId, url));
+}
+
+function retainReadyContextScreenshotUrl(contextId: string, url: string): string {
+  const cached = contextScreenshotCache.get(contextId);
+  if (cached?.state !== 'ready' || cached.url !== url) {
+    throw new Error('context screenshot cache entry unavailable');
+  }
+  cached.lastUsed = Date.now();
+  cached.refCount += 1;
+  pruneContextScreenshotCache();
+  return url;
+}
+
+function releaseContextScreenshotUrl(contextId: string) {
+  const cached = contextScreenshotCache.get(contextId);
+  if (cached?.state !== 'ready') return;
+  cached.refCount = Math.max(0, cached.refCount - 1);
+  cached.lastUsed = Date.now();
+  pruneContextScreenshotCache();
+}
+
+function pruneContextScreenshotCache() {
+  const readyEntries = [...contextScreenshotCache.entries()]
+    .filter((entry): entry is [string, Extract<ContextScreenshotCacheEntry, { state: 'ready' }>] => entry[1].state === 'ready' && entry[1].refCount === 0)
+    .sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+
+  while (contextScreenshotCache.size > CONTEXT_SCREENSHOT_CACHE_LIMIT && readyEntries.length > 0) {
+    const [id, entry] = readyEntries.shift()!;
+    URL.revokeObjectURL(entry.url);
+    contextScreenshotCache.delete(id);
+  }
+}
+
+function reanalysisKey(
+  historyType: ContextCaptureEntry['linkedHistoryType'],
+  historyId: string,
+): string {
+  return `${historyType}:${historyId}`;
+}
+
+function reanalysisKeyForContext(context: ContextCaptureEntry): string {
+  return reanalysisKey(context.linkedHistoryType, context.linkedHistoryId);
+}
+
+function isReanalysisActive(state?: ReanalysisUiState): boolean {
+  return state?.status === 'busy' || state?.status === 'queued';
+}
+
+function contextAnalysisNeedsRefresh(
+  context: ContextCaptureEntry | null | undefined,
+  state?: ReanalysisUiState,
+): boolean {
+  return context?.analysis?.status === 'pending' || isReanalysisActive(state);
+}
+
+function isFreshReanalysisResult(
+  analysis: NonNullable<ContextCaptureEntry['analysis']>,
+  state: ReanalysisUiState,
+): boolean {
+  if (state.previousAnalysisId !== undefined) {
+    return state.previousAnalysisId == null || analysis.id !== state.previousAnalysisId;
+  }
+  const timestamp = analysis.analyzedAt ?? analysis.createdAt;
+  const time = Date.parse(timestamp);
+  if (!Number.isFinite(time)) return true;
+  return time + 1_000 >= state.updatedAt;
+}
+
+function reanalysisUiStatusFromAnalysis(
+  status: NonNullable<ContextCaptureEntry['analysis']>['status'],
+): Extract<ReanalysisUiStatus, 'success' | 'failed' | 'skipped'> {
+  if (status === 'success') return 'success';
+  if (status === 'skipped') return 'skipped';
+  return 'failed';
+}
 
 function useFilters(): Array<{ id: 'all' | PolishMode; label: string }> {
   const { t } = useTranslation();
@@ -50,6 +194,12 @@ export function History() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [justCopied, setJustCopied] = useState(false);
+  const [reanalysisStates, setReanalysisStates] = useState<ReanalysisStateMap>({});
+  const refreshSeqRef = useRef(0);
+  const loadingSeqRef = useRef(0);
+  const refreshInFlightRef = useRef<Promise<DictationSession[]> | null>(null);
+  const reanalysisClearTimersRef = useRef<Record<string, number>>({});
+  const activeReanalysisKeysRef = useRef<Set<string>>(new Set());
   // 「重新转录」进行中：禁用按钮 + 显示「转录中…」，避免重复点击发起多次 ASR。
   const [retranscribing, setRetranscribing] = useState(false);
   // 录音文件 lazily-detected missing 状态：retention / 条数 cap 清理后磁盘上 wav
@@ -70,25 +220,103 @@ export function History() {
   const mobile = useMobileLayout();
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
+  const clearReanalysisStateLater = useCallback((key: string) => {
+    const existing = reanalysisClearTimersRef.current[key];
+    if (existing != null) window.clearTimeout(existing);
+    reanalysisClearTimersRef.current[key] = window.setTimeout(() => {
+      delete reanalysisClearTimersRef.current[key];
+      setReanalysisStates(prev => {
+        if (!prev[key] || isReanalysisActive(prev[key])) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }, REANALYSIS_STATUS_CLEAR_MS);
+  }, []);
+
+  const reconcileReanalysisStates = useCallback((data: DictationSession[]) => {
+    setReanalysisStates(prev => {
+      let changed = false;
+      const next = { ...prev };
+      const existingKeys = new Set(data.map(entry => reanalysisKey('voice', entry.id)));
+
+      for (const key of Object.keys(next)) {
+        if (!existingKeys.has(key)) {
+          delete next[key];
+          changed = true;
+        }
+      }
+
+      for (const entry of data) {
+        const key = reanalysisKey('voice', entry.id);
+        const state = next[key];
+        if (!isReanalysisActive(state)) continue;
+        const analysis = entry.contextCapture?.analysis ?? null;
+        if (!analysis || analysis.status === 'pending') continue;
+        if (!isFreshReanalysisResult(analysis, state)) continue;
+        next[key] = {
+          status: reanalysisUiStatusFromAnalysis(analysis.status),
+          updatedAt: Date.now(),
+          errorCode: analysis.errorCode,
+        };
+        activeReanalysisKeysRef.current.delete(key);
+        clearReanalysisStateLater(key);
+        changed = true;
+      }
+
+      return changed ? next : prev;
+    });
+  }, [clearReanalysisStateLater]);
+
+  const refresh = useCallback(async (options?: HistoryRefreshOptions) => {
+    const silent = Boolean(options?.silent);
+    const existingRequest = options?.force ? null : refreshInFlightRef.current;
+    const request = existingRequest ?? listHistory();
+    if (!existingRequest) {
+      refreshInFlightRef.current = request;
+      refreshSeqRef.current += 1;
+    }
+    const seq = refreshSeqRef.current;
+    if (!silent) {
+      loadingSeqRef.current = seq;
+      setLoading(true);
+      setLoadError(null);
+    }
     try {
-      const data = await listHistory();
+      const data = await request;
+      if (seq !== refreshSeqRef.current) return;
       setItems(data);
-      setActionError(null);
+      reconcileReanalysisStates(data);
+      if (!silent) {
+        setActionError(null);
+      }
       setSelectedId(prev => (prev && data.some(s => s.id === prev) ? prev : data[0]?.id ?? null));
     } catch (error) {
+      if (seq !== refreshSeqRef.current) return;
       console.error('[history] failed to load history', error);
-      setLoadError(errorMessage(error));
+      if (!silent) {
+        setLoadError(errorMessage(error));
+      }
     } finally {
-      setLoading(false);
+      if (refreshInFlightRef.current === request) {
+        refreshInFlightRef.current = null;
+      }
+      if (loadingSeqRef.current === seq && !silent) {
+        loadingSeqRef.current = 0;
+        setLoading(false);
+      }
     }
-  }, []);
+  }, [reconcileReanalysisStates]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(reanalysisClearTimersRef.current).forEach(timer => window.clearTimeout(timer));
+    };
+  }, []);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchShortcut = os === 'mac' ? '⌘K' : 'Ctrl+K';
@@ -136,6 +364,21 @@ export function History() {
       await clearHistory();
       setItems([]);
       setSelectedId(null);
+      setReanalysisStates(prev => {
+        const next = { ...prev };
+        Object.keys(next)
+          .filter(key => key.startsWith('voice:'))
+          .forEach(key => {
+            delete next[key];
+            const timer = reanalysisClearTimersRef.current[key];
+            if (timer != null) {
+              window.clearTimeout(timer);
+              delete reanalysisClearTimersRef.current[key];
+            }
+            activeReanalysisKeysRef.current.delete(key);
+          });
+        return next;
+      });
     } catch (error) {
       console.error('[history] failed to clear history', error);
       setActionError(t('history.clearFailed', { err: errorMessage(error) }));
@@ -150,6 +393,19 @@ export function History() {
       await deleteHistoryEntry(deletedId);
       setItems(prev => prev.filter(s => s.id !== deletedId));
       setSelectedId(current => (current === deletedId ? null : current));
+      const key = reanalysisKey('voice', deletedId);
+      const timer = reanalysisClearTimersRef.current[key];
+      if (timer != null) {
+        window.clearTimeout(timer);
+        delete reanalysisClearTimersRef.current[key];
+      }
+      activeReanalysisKeysRef.current.delete(key);
+      setReanalysisStates(prev => {
+        if (!prev[key]) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
     } catch (error) {
       console.error('[history] failed to delete history entry', error);
       setActionError(t('history.deleteFailed', { err: errorMessage(error) }));
@@ -328,6 +584,12 @@ export function History() {
                 onClick={() => {
                   setSelectedId(s.id);
                   if (mobile) setMobileDetailOpen(true);
+                  if (contextAnalysisNeedsRefresh(
+                    s.contextCapture,
+                    s.contextCapture ? reanalysisStates[reanalysisKeyForContext(s.contextCapture)] : undefined,
+                  )) {
+                    void refresh({ silent: true });
+                  }
                 }}
                 style={{
                   width: '100%', padding: '10px 12px', textAlign: 'left',
@@ -410,6 +672,42 @@ export function History() {
                   </p>
                 </div>
               </div>
+              <ContextCapturePanel
+                context={item.contextCapture}
+                reanalysisState={item.contextCapture ? reanalysisStates[reanalysisKeyForContext(item.contextCapture)] : undefined}
+                onReanalyze={context => {
+                  const key = reanalysisKeyForContext(context);
+                  if (activeReanalysisKeysRef.current.has(key) || isReanalysisActive(reanalysisStates[key])) return;
+                  activeReanalysisKeysRef.current.add(key);
+                  const previousAnalysisId = context.analysis?.id ?? null;
+                  setReanalysisStates(prev => ({
+                    ...prev,
+                    [key]: { status: 'busy', updatedAt: Date.now(), previousAnalysisId },
+                  }));
+                  void reanalyzeContextHistory(context.linkedHistoryType, context.linkedHistoryId)
+                    .then(() => {
+                      setReanalysisStates(prev => ({
+                        ...prev,
+                        [key]: { status: 'queued', updatedAt: Date.now(), previousAnalysisId },
+                      }));
+                      void refresh({ silent: true, force: true });
+                    })
+                    .catch(error => {
+                      console.error('[history] context reanalysis failed', error);
+                      activeReanalysisKeysRef.current.delete(key);
+                      setReanalysisStates(prev => ({
+                        ...prev,
+                        [key]: {
+                          status: 'failed',
+                          updatedAt: Date.now(),
+                          errorCode: errorMessage(error),
+                          previousAnalysisId,
+                        },
+                      }));
+                      clearReanalysisStateLater(key);
+                    });
+                }}
+              />
               <div style={{ marginTop: 18, paddingTop: 14, borderTop: '0.5px solid var(--ol-line-soft)', display: 'flex', gap: 18, fontSize: 11, color: 'var(--ol-ink-4)', flexWrap: 'wrap' }}>
                 {item.appName && <span>{t('history.insertedTo')} <b style={{ color: 'var(--ol-ink-2)' }}>{item.appName}</b></span>}
                 <span>{t('history.chars', { count: item.finalText.length })}</span>
@@ -446,27 +744,109 @@ function RewriteHistoryView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [reanalysisStates, setReanalysisStates] = useState<ReanalysisStateMap>({});
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const refreshSeqRef = useRef(0);
+  const loadingSeqRef = useRef(0);
+  const refreshInFlightRef = useRef<Promise<RewriteHistoryEntry[]> | null>(null);
+  const reanalysisClearTimersRef = useRef<Record<string, number>>({});
+  const activeReanalysisKeysRef = useRef<Set<string>>(new Set());
   const mobile = useMobileLayout();
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await listRewriteHistory();
-      setItems(data);
-      setSelectedId(prev => (prev && data.some(e => e.id === prev) ? prev : data[0]?.id ?? null));
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setLoading(false);
-    }
+  const clearReanalysisStateLater = useCallback((key: string) => {
+    const existing = reanalysisClearTimersRef.current[key];
+    if (existing != null) window.clearTimeout(existing);
+    reanalysisClearTimersRef.current[key] = window.setTimeout(() => {
+      delete reanalysisClearTimersRef.current[key];
+      setReanalysisStates(prev => {
+        if (!prev[key] || isReanalysisActive(prev[key])) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }, REANALYSIS_STATUS_CLEAR_MS);
   }, []);
 
+  const reconcileReanalysisStates = useCallback((data: RewriteHistoryEntry[]) => {
+    setReanalysisStates(prev => {
+      let changed = false;
+      const next = { ...prev };
+      const existingKeys = new Set(data.map(entry => reanalysisKey('rewrite', entry.id)));
+
+      for (const key of Object.keys(next)) {
+        if (!existingKeys.has(key)) {
+          delete next[key];
+          changed = true;
+        }
+      }
+
+      for (const entry of data) {
+        const key = reanalysisKey('rewrite', entry.id);
+        const state = next[key];
+        if (!isReanalysisActive(state)) continue;
+        const analysis = entry.contextCapture?.analysis ?? null;
+        if (!analysis || analysis.status === 'pending') continue;
+        if (!isFreshReanalysisResult(analysis, state)) continue;
+        next[key] = {
+          status: reanalysisUiStatusFromAnalysis(analysis.status),
+          updatedAt: Date.now(),
+          errorCode: analysis.errorCode,
+        };
+        activeReanalysisKeysRef.current.delete(key);
+        clearReanalysisStateLater(key);
+        changed = true;
+      }
+
+      return changed ? next : prev;
+    });
+  }, [clearReanalysisStateLater]);
+
+  const refresh = useCallback(async (options?: HistoryRefreshOptions) => {
+    const silent = Boolean(options?.silent);
+    const existingRequest = options?.force ? null : refreshInFlightRef.current;
+    const request = existingRequest ?? listRewriteHistory();
+    if (!existingRequest) {
+      refreshInFlightRef.current = request;
+      refreshSeqRef.current += 1;
+    }
+    const seq = refreshSeqRef.current;
+    if (!silent) {
+      loadingSeqRef.current = seq;
+      setLoading(true);
+      setError(null);
+    }
+    try {
+      const data = await request;
+      if (seq !== refreshSeqRef.current) return;
+      setItems(data);
+      reconcileReanalysisStates(data);
+      setSelectedId(prev => (prev && data.some(e => e.id === prev) ? prev : data[0]?.id ?? null));
+    } catch (err) {
+      if (seq !== refreshSeqRef.current) return;
+      if (!silent) {
+        setError(errorMessage(err));
+      }
+    } finally {
+      if (refreshInFlightRef.current === request) {
+        refreshInFlightRef.current = null;
+      }
+      if (loadingSeqRef.current === seq && !silent) {
+        loadingSeqRef.current = 0;
+        setLoading(false);
+      }
+    }
+  }, [reconcileReanalysisStates]);
+
   useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(reanalysisClearTimersRef.current).forEach(timer => window.clearTimeout(timer));
+    };
+  }, []);
 
   // 搜索词防抖 300ms
   useEffect(() => {
@@ -503,6 +883,19 @@ function RewriteHistoryView() {
       await deleteRewriteHistoryEntry(id);
       setItems(prev => prev.filter(e => e.id !== id));
       setSelectedId(current => (current === id ? null : current));
+      const key = reanalysisKey('rewrite', id);
+      const timer = reanalysisClearTimersRef.current[key];
+      if (timer != null) {
+        window.clearTimeout(timer);
+        delete reanalysisClearTimersRef.current[key];
+      }
+      activeReanalysisKeysRef.current.delete(key);
+      setReanalysisStates(prev => {
+        if (!prev[key]) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
     } catch (err) {
       console.error('[rewrite-history] delete failed', err);
     }
@@ -515,6 +908,21 @@ function RewriteHistoryView() {
       await clearRewriteHistory();
       setItems([]);
       setSelectedId(null);
+      setReanalysisStates(prev => {
+        const next = { ...prev };
+        Object.keys(next)
+          .filter(key => key.startsWith('rewrite:'))
+          .forEach(key => {
+            delete next[key];
+            const timer = reanalysisClearTimersRef.current[key];
+            if (timer != null) {
+              window.clearTimeout(timer);
+              delete reanalysisClearTimersRef.current[key];
+            }
+            activeReanalysisKeysRef.current.delete(key);
+          });
+        return next;
+      });
     } catch (err) {
       console.error('[rewrite-history] clear failed', err);
     }
@@ -595,6 +1003,12 @@ function RewriteHistoryView() {
               onClick={() => {
                 setSelectedId(entry.id);
                 if (mobile) setMobileDetailOpen(true);
+                if (contextAnalysisNeedsRefresh(
+                  entry.contextCapture,
+                  entry.contextCapture ? reanalysisStates[reanalysisKeyForContext(entry.contextCapture)] : undefined,
+                )) {
+                  void refresh({ silent: true });
+                }
               }}
               style={{
                 width: '100%', textAlign: 'left', padding: '10px 14px',
@@ -660,6 +1074,42 @@ function RewriteHistoryView() {
               </p>
             </div>
           </div>
+          <ContextCapturePanel
+            context={selected.contextCapture ?? null}
+            reanalysisState={selected.contextCapture ? reanalysisStates[reanalysisKeyForContext(selected.contextCapture)] : undefined}
+            onReanalyze={context => {
+              const key = reanalysisKeyForContext(context);
+              if (activeReanalysisKeysRef.current.has(key) || isReanalysisActive(reanalysisStates[key])) return;
+              activeReanalysisKeysRef.current.add(key);
+              const previousAnalysisId = context.analysis?.id ?? null;
+              setReanalysisStates(prev => ({
+                ...prev,
+                [key]: { status: 'busy', updatedAt: Date.now(), previousAnalysisId },
+              }));
+              void reanalyzeContextHistory(context.linkedHistoryType, context.linkedHistoryId)
+                .then(() => {
+                  setReanalysisStates(prev => ({
+                    ...prev,
+                    [key]: { status: 'queued', updatedAt: Date.now(), previousAnalysisId },
+                  }));
+                  void refresh({ silent: true, force: true });
+                })
+                .catch(error => {
+                  console.error('[history] context reanalysis failed', error);
+                  activeReanalysisKeysRef.current.delete(key);
+                  setReanalysisStates(prev => ({
+                    ...prev,
+                    [key]: {
+                      status: 'failed',
+                      updatedAt: Date.now(),
+                      errorCode: errorMessage(error),
+                      previousAnalysisId,
+                    },
+                  }));
+                  clearReanalysisStateLater(key);
+                });
+            }}
+          />
           <div style={{ marginTop: 18, paddingTop: 14, borderTop: '0.5px solid var(--ol-line-soft)', display: 'flex', gap: 18, fontSize: 11, color: 'var(--ol-ink-4)', flexWrap: 'wrap' }}>
             {selected.appName && <span>{t('rewrite.sourceApp', '来源应用')}: <b style={{ color: 'var(--ol-ink-2)' }}>{selected.appName}</b></span>}
             {selected.stylePackName && <span>{t('rewrite.stylePack', '风格包')}: <b style={{ color: 'var(--ol-ink-2)' }}>{selected.stylePackName}</b></span>}
@@ -691,6 +1141,470 @@ function errorMessage(error: unknown): string {
  *  原生 audio controls。Blob URL 在组件 unmount 时 revoke，避免泄漏。
  *  `onMissing` 在后端返回 'recording not found'（wav 已被 prune）时触发，让父组件
  *  把按钮永久隐藏，避免用户继续点击得到同样错误。 */
+function ContextCapturePanel({
+  context,
+  reanalysisState,
+  onReanalyze,
+}: {
+  context?: ContextCaptureEntry | null;
+  reanalysisState?: ReanalysisUiState;
+  onReanalyze: (context: ContextCaptureEntry) => void;
+}) {
+  const { t } = useTranslation();
+  const { prefs } = useHotkeySettings();
+  const [url, setUrl] = useState<string | null>(null);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'missing'>('idle');
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  useEffect(() => {
+    setPreviewOpen(false);
+    if (!context?.screenshotRef) {
+      setUrl(null);
+      setStatus('missing');
+      return;
+    }
+
+    const contextId = context.id;
+    const cachedUrl = retainCachedContextScreenshotUrl(contextId);
+    if (cachedUrl) {
+      setUrl(cachedUrl);
+      setStatus('ready');
+      return () => releaseContextScreenshotUrl(contextId);
+    }
+
+    setUrl(null);
+    setStatus('loading');
+    let cancelled = false;
+    let retained = false;
+    void retainContextScreenshotUrl(contextId)
+      .then(objectUrl => {
+        retained = true;
+        if (cancelled) {
+          releaseContextScreenshotUrl(contextId);
+          return;
+        }
+        setUrl(objectUrl);
+        setStatus('ready');
+      })
+      .catch(error => {
+        console.warn('[history] context screenshot unavailable', error);
+        if (!cancelled) setStatus('missing');
+      });
+    return () => {
+      cancelled = true;
+      if (retained) releaseContextScreenshotUrl(contextId);
+    };
+  }, [context?.id, context?.screenshotRef]);
+
+  useEffect(() => {
+    if (!previewOpen) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setPreviewOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [previewOpen]);
+
+  if (!context) {
+    return null;
+  }
+
+  const reanalysisEnabled = Boolean(prefs?.contextVisionAnalysisEnabled && prefs.contextVisionAnalysisConsentAccepted);
+
+  return (
+    <div style={{ marginTop: 12, padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
+      <Pill size="sm" tone="outline" style={{ marginBottom: 10 }}>{t('history.contextCapture.title', '上下文采集')}</Pill>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 12 }}>
+        <ContextMeta label={t('history.contextCapture.app', '获取应用')} value={context.contextApp} />
+        <ContextMeta label={t('history.contextCapture.window', '对话窗口')} value={context.conversationWindow} />
+        <ContextMeta label={t('history.contextCapture.status', '采集状态')} value={contextCaptureStatusLabel(context.captureStatus, t)} />
+        <ContextMeta label={t('history.contextCapture.source', '截图来源')} value={contextCaptureSourceLabel(context.captureSource, t)} />
+      </div>
+      {context.windowTitle && (
+        <div style={{ marginBottom: 12, fontSize: 11, color: 'var(--ol-ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={context.windowTitle}>
+          {context.windowTitle}
+        </div>
+      )}
+      {status === 'ready' && url ? (
+        <>
+          <button
+            type="button"
+            onClick={() => setPreviewOpen(true)}
+            style={{
+              display: 'block',
+              width: '100%',
+              padding: 0,
+              border: 0,
+              background: 'transparent',
+              cursor: 'zoom-in',
+              fontFamily: 'inherit',
+            }}
+            aria-label={t('history.contextCapture.preview', '预览截图')}
+          >
+            <img
+              src={url}
+              alt={t('history.contextCapture.screenshotAlt', '上下文截图')}
+              style={{ display: 'block', width: '100%', maxHeight: 360, objectFit: 'contain', borderRadius: 8, border: '0.5px solid var(--ol-line)' }}
+            />
+          </button>
+          {previewOpen && (
+            <ContextScreenshotPreview
+              url={url}
+              title={context.windowTitle || t('history.contextCapture.screenshotAlt', '上下文截图')}
+              onClose={() => setPreviewOpen(false)}
+            />
+          )}
+        </>
+      ) : (
+        <div style={{ height: 92, borderRadius: 8, border: '0.5px dashed var(--ol-line-strong)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--ol-ink-4)', fontSize: 12 }}>
+          {status === 'loading'
+            ? t('common.loading')
+            : t('history.contextCapture.screenshotUnavailable', '截图不可用')}
+        </div>
+      )}
+      <ContextAnalysisPanel
+        context={context}
+        reanalysisState={reanalysisState}
+        reanalysisEnabled={reanalysisEnabled}
+        onReanalyze={() => {
+          if (reanalysisEnabled) {
+            onReanalyze(context);
+          }
+        }}
+      />
+    </div>
+  );
+}
+
+function ContextAnalysisPanel({
+  context,
+  reanalysisState,
+  reanalysisEnabled,
+  onReanalyze,
+}: {
+  context: ContextCaptureEntry;
+  reanalysisState?: ReanalysisUiState;
+  reanalysisEnabled: boolean;
+  onReanalyze: () => void;
+}) {
+  const { t } = useTranslation();
+  const analysis = context.analysis ?? null;
+  const backendAnalysisPending = analysis?.status === 'pending';
+  const reanalysisStatus = reanalysisEnabled
+    ? reanalysisState?.status ?? (backendAnalysisPending ? 'busy' : undefined)
+    : 'disabled';
+  const reanalysisBusy = reanalysisStatus === 'busy' || reanalysisStatus === 'queued' || backendAnalysisPending;
+  const analysisDuration = analysis ? formatContextAnalysisDuration(analysis) : null;
+
+  return (
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: '0.5px solid var(--ol-line-soft)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
+        <Pill size="sm" tone="blue">{t('history.contextAnalysis.title', 'AI 上下文分析')}</Pill>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {reanalysisStatus === 'busy' && (
+            <span style={{ fontSize: 11, color: 'var(--ol-ok)' }}>{t('history.contextAnalysis.statusPending', '分析中')}</span>
+          )}
+          {reanalysisStatus === 'queued' && (
+            <span style={{ fontSize: 11, color: 'var(--ol-ok)' }}>{t('history.contextAnalysis.started', '已加入分析队列')}</span>
+          )}
+          {reanalysisStatus === 'success' && (
+            <span style={{ fontSize: 11, color: 'var(--ol-ok)' }}>{t('history.contextAnalysis.finished', '分析完成')}</span>
+          )}
+          {reanalysisStatus === 'failed' && (
+            <span style={{ fontSize: 11, color: 'var(--ol-err)' }}>{t('common.operationFailed')}</span>
+          )}
+          {reanalysisStatus === 'skipped' && (
+            <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('history.contextAnalysis.statusSkipped', '已跳过')}</span>
+          )}
+          {reanalysisStatus === 'disabled' && (
+            <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('history.contextAnalysis.disabled', '请先在设置中开启并授权截图 AI 分析')}</span>
+          )}
+          <Btn
+            size="sm"
+            variant="ghost"
+            icon="refresh"
+            disabled={reanalysisBusy || !reanalysisEnabled}
+            onClick={onReanalyze}
+          >
+            {reanalysisBusy
+              ? t('history.contextAnalysis.reanalyzing', '分析中')
+              : t('history.contextAnalysis.reanalyze', '重新分析')}
+          </Btn>
+        </div>
+      </div>
+
+      {!analysis ? (
+        <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>
+          {t('history.contextAnalysis.none', '暂无分析结果。开启截图 AI 分析并配置支持图片输入的模型后，新历史会自动分析。')}
+        </div>
+      ) : (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 10 }}>
+            <ContextMeta label={t('history.contextAnalysis.status', '分析状态')} value={contextAnalysisStatusLabel(analysis.status, analysis.errorCode, t)} />
+            <ContextMeta label={t('history.contextAnalysis.conversationName', '对话名称')} value={analysis.conversationName} />
+            <ContextMeta label={t('history.contextAnalysis.topic', '主题')} value={analysis.topic} />
+            <ContextMeta label={t('history.contextAnalysis.confidence', '置信度')} value={formatConfidence(analysis.confidence)} />
+            <ContextMeta label={t('history.contextAnalysis.duration', '分析耗时')} value={analysisDuration} />
+          </div>
+          {analysis.briefSummary && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 10, color: 'var(--ol-ink-4)', marginBottom: 4 }}>{t('history.contextAnalysis.briefSummary', '简要摘要')}</div>
+              <div style={{ fontSize: 12, color: 'var(--ol-ink-2)', lineHeight: 1.6 }}>{analysis.briefSummary}</div>
+            </div>
+          )}
+          <details style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>
+            <summary style={{ cursor: 'default', color: 'var(--ol-ink-3)', marginBottom: 8 }}>
+              {t('history.contextAnalysis.details', '完整分析')}
+            </summary>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, lineHeight: 1.6 }}>
+              {analysis.fullSummary && <AnalysisBlock label={t('history.contextAnalysis.fullSummary', '完整摘要')} value={analysis.fullSummary} />}
+              {analysis.userIntent && <AnalysisBlock label={t('history.contextAnalysis.userIntent', '用户意图')} value={analysis.userIntent} />}
+              {analysis.decision && <AnalysisBlock label={t('history.contextAnalysis.decision', '决策/结论')} value={analysis.decision} />}
+              {analysis.actionItems.length > 0 && (
+                <AnalysisBlock
+                  label={t('history.contextAnalysis.actionItems', '待办事项')}
+                  value={analysis.actionItems.map(item => `${item.text}${item.owner ? `（${item.owner}）` : ''}`).join('\n')}
+                />
+              )}
+              {analysis.relatedPeople.length > 0 && <AnalysisBlock label={t('history.contextAnalysis.relatedPeople', '相关人员')} value={analysis.relatedPeople.join('、')} />}
+              {analysis.projectOrDomain && <AnalysisBlock label={t('history.contextAnalysis.projectOrDomain', '项目/领域')} value={analysis.projectOrDomain} />}
+              {analysis.visualEvidence.length > 0 && <AnalysisBlock label={t('history.contextAnalysis.visualEvidence', '视觉依据')} value={analysis.visualEvidence.join('\n')} />}
+              <AnalysisBlock label={t('history.contextAnalysis.contextType', '上下文类型')} value={analysis.detectedContextType} />
+              <AnalysisBlock label={t('history.contextAnalysis.activityType', '活动类型')} value={analysis.activityType} />
+              <AnalysisBlock label={t('history.contextAnalysis.sensitive', '敏感信息')} value={analysis.sensitiveContentVisible ? t('common.yes', '是') : t('common.no', '否')} />
+              {analysis.uncertaintyReason && <AnalysisBlock label={t('history.contextAnalysis.uncertaintyReason', '不确定原因')} value={analysis.uncertaintyReason} />}
+              {analysis.errorCode && <AnalysisBlock label={t('history.contextAnalysis.errorCode', '错误原因')} value={analysis.errorCode} />}
+              {analysis.model && <AnalysisBlock label={t('history.contextAnalysis.model', '模型')} value={analysis.model} />}
+              {analysis.imageBytes != null && (
+                <AnalysisBlock
+                  label={t('history.contextAnalysis.imageInfo', '图片请求')}
+                  value={`${analysis.imageMimeType ?? 'image/jpeg'} · ${analysis.imageWidth ?? '?'}x${analysis.imageHeight ?? '?'} · ${formatBytes(analysis.imageBytes)}`}
+                />
+              )}
+              <AnalysisBlock label={t('history.contextAnalysis.promptVersion', '提示词版本')} value={analysis.promptVersion} />
+            </div>
+          </details>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AnalysisBlock({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: 'var(--ol-ink-4)', marginBottom: 3 }}>{label}</div>
+      <div style={{ whiteSpace: 'pre-wrap', color: 'var(--ol-ink-2)' }}>{value}</div>
+    </div>
+  );
+}
+
+function ContextMeta({ label, value }: { label: string; value?: string | null }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ fontSize: 10, color: 'var(--ol-ink-4)', marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 12, color: 'var(--ol-ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={value || undefined}>
+        {value || '未识别'}
+      </div>
+    </div>
+  );
+}
+
+function ContextScreenshotPreview({
+  url,
+  title,
+  onClose,
+}: {
+  url: string;
+  title: string;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={t('history.contextCapture.preview', '预览截图')}
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 2000,
+        display: 'grid',
+        gridTemplateRows: 'auto minmax(0, 1fr)',
+        gap: 12,
+        padding: 24,
+        background: 'rgba(9, 12, 18, 0.72)',
+        backdropFilter: 'blur(8px)',
+      }}
+    >
+      <div
+        onClick={event => event.stopPropagation()}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12,
+          color: '#fff',
+          minWidth: 0,
+        }}
+      >
+        <div style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={title}>
+          {title}
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label={t('common.close')}
+          style={{
+            width: 34,
+            height: 34,
+            borderRadius: 8,
+            border: '0.5px solid rgba(255,255,255,0.28)',
+            background: 'rgba(255,255,255,0.12)',
+            color: '#fff',
+            display: 'inline-grid',
+            placeItems: 'center',
+            cursor: 'default',
+          }}
+        >
+          <Icon name="x" size={16} />
+        </button>
+      </div>
+      <div
+        onClick={event => event.stopPropagation()}
+        style={{
+          minHeight: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <img
+          src={url}
+          alt={title}
+          style={{
+            maxWidth: '100%',
+            maxHeight: '100%',
+            objectFit: 'contain',
+            borderRadius: 8,
+            boxShadow: '0 24px 80px rgba(0,0,0,0.42)',
+            background: '#111',
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function contextCaptureStatusLabel(
+  status: ContextCaptureEntry['captureStatus'],
+  t: ReturnType<typeof useTranslation>['t'],
+) {
+  switch (status) {
+    case 'success':
+      return t('history.contextCapture.statusSuccess', '成功');
+    case 'activeWindowFailedFullScreenSuccess':
+      return t('history.contextCapture.statusFullScreenFallback', '活动窗口失败，已回退全屏');
+    case 'failed':
+      return t('history.contextCapture.statusFailed', '失败');
+    case 'unsupported':
+      return t('history.contextCapture.statusUnsupported', '当前平台不支持');
+    default:
+      return status;
+  }
+}
+
+function contextCaptureSourceLabel(
+  source: ContextCaptureEntry['captureSource'],
+  t: ReturnType<typeof useTranslation>['t'],
+) {
+  switch (source) {
+    case 'activeWindow':
+      return t('history.contextCapture.sourceActiveWindow', '活动窗口');
+    case 'fullScreen':
+      return t('history.contextCapture.sourceFullScreen', '全屏');
+    default:
+      return null;
+  }
+}
+
+function contextAnalysisStatusLabel(
+  status: NonNullable<ContextCaptureEntry['analysis']>['status'],
+  errorCode: string | null,
+  t: ReturnType<typeof useTranslation>['t'],
+) {
+  if (status === 'pending') return t('history.contextAnalysis.statusPending', '分析中');
+  if (status === 'success') return t('history.contextAnalysis.statusSuccess', '成功');
+  if (status === 'skipped') {
+    if (errorCode === 'skipped:modelNotConfigured') {
+      return t('history.contextAnalysis.modelNotConfigured', '未配置截图分析模型');
+    }
+    if (errorCode === 'skipped:screenshotUnavailable') {
+      return t('history.contextAnalysis.screenshotUnavailable', '截图不可用，未分析');
+    }
+    if (errorCode === 'skipped:unsupportedProvider') {
+      return t('history.contextAnalysis.unsupportedProvider', '当前 LLM 服务暂不支持');
+    }
+    if (errorCode === 'skipped:providerNotConfigured') {
+      return t('history.contextAnalysis.providerNotConfigured', '未配置 LLM 服务地址');
+    }
+    return t('history.contextAnalysis.statusSkipped', '已跳过');
+  }
+  if (status === 'failed') {
+    if (errorCode === 'failed:modelNotVisionCapable') {
+      return t('history.contextAnalysis.modelNotVisionCapable', '模型可能不支持图片输入');
+    }
+    if (errorCode === 'failed:imagePrepareFailed') {
+      return t('history.contextAnalysis.imagePrepareFailed', '图片处理失败');
+    }
+    if (errorCode === 'failed:visionRequestTimeout') {
+      return t('history.contextAnalysis.visionRequestTimeout', '截图分析请求超时，请稍后重试');
+    }
+    if (errorCode === 'failed:visionRequestFailed') {
+      return t('history.contextAnalysis.visionRequestFailed', '截图分析请求失败，请稍后重试');
+    }
+    return t('history.contextAnalysis.statusFailed', '失败');
+  }
+  return status;
+}
+
+function formatConfidence(confidence: number | null | undefined): string | null {
+  if (confidence == null || Number.isNaN(confidence)) return null;
+  return `${Math.round(Math.max(0, Math.min(1, confidence)) * 100)}%`;
+}
+
+function formatContextAnalysisDuration(
+  analysis: NonNullable<ContextCaptureEntry['analysis']>,
+): string | null {
+  const start = Date.parse(analysis.createdAt);
+  if (!Number.isFinite(start)) return null;
+  const end = analysis.analyzedAt ? Date.parse(analysis.analyzedAt) : Date.now();
+  if (!Number.isFinite(end) || end < start) return null;
+  return formatPlainDuration(end - start);
+}
+
+function formatPlainDuration(ms: number): string {
+  const seconds = Math.max(0, ms / 1000);
+  if (seconds < 60) return `${seconds.toFixed(1)} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.round(seconds % 60);
+  if (minutes < 60) return `${minutes} 分 ${remainingSeconds} 秒`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours} 小时 ${remainingMinutes} 分`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
 function AudioRecordingPlayer({
   sessionId,
   onMissing,

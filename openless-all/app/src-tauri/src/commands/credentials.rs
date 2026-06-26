@@ -255,6 +255,7 @@ fn parse_account(s: &str) -> Result<CredentialAccount, String> {
         "volcengine.resource_id" => Ok(CredentialAccount::VolcengineResourceId),
         "ark.api_key" => Ok(CredentialAccount::ArkApiKey),
         "ark.model_id" => Ok(CredentialAccount::ArkModelId),
+        "ark.context_vision_model_id" => Ok(CredentialAccount::ArkContextVisionModelId),
         "ark.endpoint" => Ok(CredentialAccount::ArkEndpoint),
         "asr.api_key" => Ok(CredentialAccount::AsrApiKey),
         "asr.endpoint" => Ok(CredentialAccount::AsrEndpoint),

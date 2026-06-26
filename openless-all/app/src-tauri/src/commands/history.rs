@@ -1,18 +1,118 @@
 use super::*;
+use crate::types::ContextCaptureHistoryType;
 
 #[tauri::command]
 pub fn list_history(coord: CoordinatorState<'_>) -> Result<Vec<DictationSession>, String> {
-    coord.history().list().map_err(|e| e.to_string())
+    let mut sessions = coord.history().list().map_err(|e| e.to_string())?;
+    match (coord.context_capture().list(), coord.context_analysis().list()) {
+        (Ok(mut context_entries), Ok(analysis_entries)) => {
+            crate::persistence::enrich_context_entries_with_analysis(
+                &mut context_entries,
+                &analysis_entries,
+            );
+            crate::persistence::enrich_voice_history_with_context(&mut sessions, &context_entries);
+        }
+        (Ok(context_entries), Err(error)) => {
+            log::warn!("[context-analysis] failed to enrich voice history: {error}");
+            crate::persistence::enrich_voice_history_with_context(&mut sessions, &context_entries);
+        }
+        (Err(error), _) => {
+            log::warn!("[context-capture] failed to enrich voice history: {error}");
+        }
+    }
+    Ok(sessions)
 }
 
 #[tauri::command]
 pub fn delete_history_entry(coord: CoordinatorState<'_>, id: String) -> Result<(), String> {
-    coord.history().delete(&id).map_err(|e| e.to_string())
+    coord.history().delete(&id).map_err(|e| e.to_string())?;
+    if let Err(error) = coord
+        .context_capture()
+        .delete_for_history(ContextCaptureHistoryType::Voice, &id)
+    {
+        log::warn!("[context-capture] failed to delete voice context for {id}: {error}");
+    }
+    if let Err(error) = coord
+        .context_analysis()
+        .delete_for_history(ContextCaptureHistoryType::Voice, &id)
+    {
+        log::warn!("[context-analysis] failed to delete voice analysis for {id}: {error}");
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub fn clear_history(coord: CoordinatorState<'_>) -> Result<(), String> {
-    coord.history().clear().map_err(|e| e.to_string())
+    coord.history().clear().map_err(|e| e.to_string())?;
+    if let Err(error) = coord
+        .context_capture()
+        .clear_for_history_type(ContextCaptureHistoryType::Voice)
+    {
+        log::warn!("[context-capture] failed to clear voice contexts: {error}");
+    }
+    if let Err(error) = coord
+        .context_analysis()
+        .clear_for_history_type(ContextCaptureHistoryType::Voice)
+    {
+        log::warn!("[context-analysis] failed to clear voice analysis: {error}");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reanalyze_context_history(
+    coord: CoordinatorState<'_>,
+    history_type: ContextCaptureHistoryType,
+    history_id: String,
+) -> Result<(), String> {
+    if !is_valid_session_id(&history_id) {
+        return Err("invalid history id".into());
+    }
+
+    match history_type {
+        ContextCaptureHistoryType::Voice => {
+            let session = coord
+                .history()
+                .list()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|entry| entry.id == history_id)
+                .ok_or_else(|| "history entry not found".to_string())?;
+            crate::context_vision_analysis::spawn_reanalysis(
+                coord.context_capture().clone(),
+                coord.context_analysis().clone(),
+                ContextCaptureHistoryType::Voice,
+                session.id,
+                crate::context_vision_analysis::ContextAnalysisTextInput {
+                    raw_input_text: session.raw_transcript,
+                    final_text: Some(session.final_text),
+                    rewritten_text: None,
+                },
+            );
+        }
+        ContextCaptureHistoryType::Rewrite => {
+            let entry = coord
+                .rewrite_history()
+                .list()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|entry| entry.id == history_id)
+                .ok_or_else(|| "rewrite history entry not found".to_string())?;
+            crate::context_vision_analysis::spawn_reanalysis(
+                coord.context_capture().clone(),
+                coord.context_analysis().clone(),
+                ContextCaptureHistoryType::Rewrite,
+                entry.id,
+                crate::context_vision_analysis::ContextAnalysisTextInput {
+                    raw_input_text: entry.source_text,
+                    final_text: None,
+                    rewritten_text: Some(entry.rewritten_text),
+                },
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// 读取某次会话的原始麦克风 wav 字节流。文件存在的条件：debug 用户的任意会话，或任意
@@ -47,6 +147,27 @@ pub async fn read_audio_recording(session_id: String) -> Result<Vec<u8>, String>
             format!("read wav failed: {e}")
         }
     })
+}
+
+#[tauri::command]
+pub async fn read_context_screenshot(
+    coord: CoordinatorState<'_>,
+    context_capture_id: String,
+) -> Result<Vec<u8>, String> {
+    if !is_valid_session_id(&context_capture_id) {
+        return Err("invalid context capture id".into());
+    }
+    coord
+        .context_capture()
+        .read_screenshot(&context_capture_id)
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                "screenshot not found".into()
+            } else {
+                format!("read screenshot failed: {msg}")
+            }
+        })
 }
 
 /// 对一条「转录失败」历史条目的归档录音用**当前** ASR provider 重新转录（issue #613）。

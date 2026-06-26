@@ -1,4 +1,4 @@
-import type { ShortcutBinding } from "../types"
+import type { ContextCaptureEntry, ShortcutBinding } from "../types"
 import { invokeOrMock } from "./shared"
 
 export interface RewriteHistoryEntry {
@@ -12,6 +12,7 @@ export interface RewriteHistoryEntry {
   insertStatus: string
   errorCode?: string | null
   durationMs?: number | null
+  contextCapture?: ContextCaptureEntry | null
 }
 
 export function listRewriteHistory(): Promise<RewriteHistoryEntry[]> {

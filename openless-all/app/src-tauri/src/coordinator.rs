@@ -39,8 +39,9 @@ use crate::correction::apply_correction_rules;
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::insertion::TextInserter;
 use crate::persistence::{
-    sync_style_pack_preferences, CorrectionRuleStore, CredentialAccount, CredentialsVault,
-    DictionaryStore, HistoryStore, PreferencesStore, RewriteHistoryStore, StylePackStore,
+    sync_style_pack_preferences, ContextAnalysisStore, ContextCaptureStore, CorrectionRuleStore,
+    CredentialAccount, CredentialsVault, DictionaryStore, HistoryStore, PreferencesStore,
+    RewriteHistoryStore, StylePackStore,
 };
 
 use crate::llm_gemini::{GeminiConfig, GeminiProvider};
@@ -54,8 +55,9 @@ use crate::selection::capture_selection;
 #[cfg(target_os = "windows")]
 use crate::types::PasteShortcut;
 use crate::types::{
-    CapsulePayload, CapsuleState, ChineseScriptPreference, DictationSession, HotkeyCapability,
-    HotkeyStatus, HotkeyStatusState, InsertStatus, OutputLanguagePreference, PolishMode,
+    CapsulePayload, CapsuleState, ChineseScriptPreference, ContextCaptureHistoryType,
+    DictationSession, HotkeyCapability, HotkeyStatus, HotkeyStatusState, InsertStatus,
+    OutputLanguagePreference, PolishMode,
 };
 #[cfg(target_os = "windows")]
 use crate::windows_ime_ipc::ImeSubmitTarget;
@@ -240,6 +242,8 @@ pub struct Coordinator {
 struct Inner {
     app: Mutex<Option<AppHandle>>,
     history: HistoryStore,
+    context_capture: ContextCaptureStore,
+    context_analysis: ContextAnalysisStore,
     prefs: PreferencesStore,
     style_packs: StylePackStore,
     vocab: DictionaryStore,
@@ -375,6 +379,14 @@ impl Coordinator {
                 log::error!("[coord] RewriteHistoryStore init failed: {e}; 降级为空重写历史");
                 RewriteHistoryStore::new_fallback()
             });
+            let context_capture = ContextCaptureStore::new().unwrap_or_else(|e| {
+                log::error!("[coord] ContextCaptureStore init failed: {e}; fallback to temp storage");
+                ContextCaptureStore::new_fallback()
+            });
+            let context_analysis = ContextAnalysisStore::new().unwrap_or_else(|e| {
+                log::error!("[coord] ContextAnalysisStore init failed: {e}; fallback to temp storage");
+                ContextAnalysisStore::new_fallback()
+            });
             let prefs = PreferencesStore::new().unwrap_or_else(|e| {
                 log::error!("[coord] PreferencesStore init failed: {e}; 降级为默认偏好设置");
                 PreferencesStore::new_fallback()
@@ -396,6 +408,8 @@ impl Coordinator {
                 inner: Arc::new(Inner {
                     app: Mutex::new(None),
                     history,
+                    context_capture,
+                    context_analysis,
                     rewrite_history,
                     prefs,
                     style_packs,
@@ -472,6 +486,14 @@ impl Coordinator {
             log::error!("[coord] RewriteHistoryStore init failed: {e}; 降级为空重写历史");
             RewriteHistoryStore::new_fallback()
         });
+        let context_capture = ContextCaptureStore::new().unwrap_or_else(|e| {
+            log::error!("[coord] ContextCaptureStore init failed: {e}; fallback to temp storage");
+            ContextCaptureStore::new_fallback()
+        });
+        let context_analysis = ContextAnalysisStore::new().unwrap_or_else(|e| {
+            log::error!("[coord] ContextAnalysisStore init failed: {e}; fallback to temp storage");
+            ContextAnalysisStore::new_fallback()
+        });
         let prefs = PreferencesStore::new().unwrap_or_else(|e| {
             log::error!("[coord] PreferencesStore init failed: {e}; 降级为默认偏好设置");
             PreferencesStore::new_fallback()
@@ -493,6 +515,8 @@ impl Coordinator {
             inner: Arc::new(Inner {
                 app: Mutex::new(None),
                 history,
+                context_capture,
+                context_analysis,
                 rewrite_history,
                 prefs,
                 style_packs,
@@ -1102,6 +1126,14 @@ impl Coordinator {
         &self.inner.history
     }
 
+    pub fn context_capture(&self) -> &ContextCaptureStore {
+        &self.inner.context_capture
+    }
+
+    pub fn context_analysis(&self) -> &ContextAnalysisStore {
+        &self.inner.context_analysis
+    }
+
     pub fn prefs(&self) -> &PreferencesStore {
         &self.inner.prefs
     }
@@ -1128,6 +1160,36 @@ impl Coordinator {
             .name("openless-rewrite-task".into())
             .spawn(move || {
                 run_rewrite_flow(&inner);
+            })
+            .ok();
+    }
+    pub(super) fn spawn_context_capture(
+        inner: &Arc<Inner>,
+        history_type: ContextCaptureHistoryType,
+        history_id: String,
+    ) {
+        let prefs = inner.prefs.get();
+        if !prefs.context_capture_enabled {
+            return;
+        }
+        if history_type == ContextCaptureHistoryType::Rewrite && !prefs.rewrite_save_history {
+            return;
+        }
+        let retention_days = prefs.history_retention_days;
+        let max_entries = prefs.history_max_entries;
+        let inner = Arc::clone(inner);
+        std::thread::Builder::new()
+            .name("openless-context-capture".into())
+            .spawn(move || {
+                if let Err(error) = crate::context_capture::capture_and_store(
+                    &inner.context_capture,
+                    history_type,
+                    history_id,
+                    retention_days,
+                    max_entries,
+                ) {
+                    log::warn!("[context-capture] capture task failed: {error}");
+                }
             })
             .ok();
     }

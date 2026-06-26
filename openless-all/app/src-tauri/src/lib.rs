@@ -25,6 +25,8 @@ mod combo_hotkey;
 #[path = "mobile_stubs/combo_hotkey.rs"]
 mod combo_hotkey;
 mod commands;
+mod context_capture;
+mod context_vision_analysis;
 mod coordinator;
 mod coordinator_state;
 mod correction;
@@ -162,6 +164,8 @@ macro_rules! app_invoke_handler_desktop {
             commands::delete_history_entry,
             commands::clear_history,
             commands::read_audio_recording,
+            commands::read_context_screenshot,
+            commands::reanalyze_context_history,
             commands::retranscribe_recording,
             commands::marketplace_list,
             commands::marketplace_detail,
@@ -331,6 +335,7 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::delete_history_entry,
             $crate::commands::clear_history,
             $crate::commands::read_audio_recording,
+            $crate::commands::reanalyze_context_history,
             $crate::commands::retranscribe_recording,
             $crate::commands::marketplace_list,
             $crate::commands::marketplace_detail,

@@ -26,6 +26,100 @@ export type PolishMode = 'raw' | 'light' | 'structured' | 'formal';
 
 export type InsertStatus = 'inserted' | 'pasteSent' | 'copiedFallback' | 'failed';
 
+export type ContextCaptureStatus =
+  | 'success'
+  | 'activeWindowFailedFullScreenSuccess'
+  | 'failed'
+  | 'unsupported';
+
+export type ContextCaptureSource = 'activeWindow' | 'fullScreen';
+
+export type ContextCaptureHistoryType = 'voice' | 'rewrite';
+
+export type ContextAnalysisStatus = 'pending' | 'success' | 'failed' | 'skipped';
+
+export type ContextAnalysisContextType =
+  | 'chat'
+  | 'ai_chat'
+  | 'document'
+  | 'browser'
+  | 'editor'
+  | 'email'
+  | 'meeting'
+  | 'task'
+  | 'settings'
+  | 'unknown';
+
+export type ContextAnalysisActivityType =
+  | 'decision'
+  | 'action_request'
+  | 'question'
+  | 'discussion'
+  | 'research'
+  | 'planning'
+  | 'implementation'
+  | 'review'
+  | 'note'
+  | 'unknown';
+
+export interface ContextAnalysisActionItem {
+  text: string;
+  owner: string | null;
+  dueDate: string | null;
+  confidence: number;
+}
+
+export interface ContextAnalysisResult {
+  id: string;
+  contextCaptureId: string;
+  linkedHistoryType: ContextCaptureHistoryType;
+  linkedHistoryId: string;
+  status: ContextAnalysisStatus;
+  createdAt: string;
+  analyzedAt: string | null;
+  providerId: string | null;
+  model: string | null;
+  promptVersion: string;
+  schemaVersion: number;
+  inputMode: string;
+  imageMimeType: string | null;
+  imageWidth: number | null;
+  imageHeight: number | null;
+  imageBytes: number | null;
+  conversationName: string | null;
+  briefSummary: string | null;
+  fullSummary: string | null;
+  detectedApp: string | null;
+  detectedContextType: ContextAnalysisContextType;
+  topic: string | null;
+  userIntent: string | null;
+  activityType: ContextAnalysisActivityType;
+  decision: string | null;
+  actionItems: ContextAnalysisActionItem[];
+  relatedPeople: string[];
+  projectOrDomain: string | null;
+  visualEvidence: string[];
+  sensitiveContentVisible: boolean;
+  confidence: number;
+  uncertaintyReason: string | null;
+  errorCode: string | null;
+}
+
+export interface ContextCaptureEntry {
+  id: string;
+  createdAt: string;
+  contextApp: string | null;
+  conversationWindow: string | null;
+  windowTitle: string | null;
+  captureStatus: ContextCaptureStatus;
+  captureSource: ContextCaptureSource | null;
+  screenshotRef: string | null;
+  linkedHistoryType: ContextCaptureHistoryType;
+  linkedHistoryId: string;
+  errorCode: string | null;
+  analysis?: ContextAnalysisResult | null;
+}
+
 export interface DictationSession {
   id: string;
   createdAt: string; // ISO-8601
@@ -44,6 +138,7 @@ export interface DictationSession {
   /** 该会话是否在录音时归档了原始 wav（取决于当时 prefs.recordAudioForDebug）。
    *  true 时前端在 History 渲染播放按钮，凭 id 通过 read_audio_recording IPC 拿字节流。 */
   hasAudioRecording: boolean | null;
+  contextCapture: ContextCaptureEntry | null;
 }
 
 export interface DictionaryEntry {
@@ -370,6 +465,9 @@ export interface UserPreferences {
   /** recordings/ 里保留的最近 wav 文件数。null = 跟随 200 硬上限；1..=200 之间为用户自定义。
    *  跟 historyMaxEntries 解耦——「文本档案多但 wav 只留最近 5 条」是合法组合。 */
   audioRecordingMaxEntries: number | null;
+  contextCaptureEnabled: boolean;
+  contextVisionAnalysisEnabled: boolean;
+  contextVisionAnalysisConsentAccepted: boolean;
   /** Marketplace HTTP 基地址。空 = 本地开发默认 http://127.0.0.1:8090；生产填 https://api.<domain>。 */
   marketplaceBaseUrl: string;
   /** Marketplace dev-mode 模拟登录用户名（GitHub login 风格）。生产换 OAuth token 后此字段废弃。 */

@@ -107,6 +107,150 @@ pub enum InsertStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextCaptureStatus {
+    Success,
+    ActiveWindowFailedFullScreenSuccess,
+    Failed,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextCaptureSource {
+    ActiveWindow,
+    FullScreen,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextCaptureHistoryType {
+    Voice,
+    Rewrite,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextAnalysisStatus {
+    Pending,
+    Success,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextAnalysisContextType {
+    Chat,
+    AiChat,
+    Document,
+    Browser,
+    Editor,
+    Email,
+    Meeting,
+    Task,
+    Settings,
+    Unknown,
+}
+
+impl Default for ContextAnalysisContextType {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextAnalysisActivityType {
+    Decision,
+    ActionRequest,
+    Question,
+    Discussion,
+    Research,
+    Planning,
+    Implementation,
+    Review,
+    Note,
+    Unknown,
+}
+
+impl Default for ContextAnalysisActivityType {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextAnalysisActionItem {
+    pub text: String,
+    pub owner: Option<String>,
+    pub due_date: Option<String>,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextAnalysisResult {
+    pub id: String,
+    pub context_capture_id: String,
+    pub linked_history_type: ContextCaptureHistoryType,
+    pub linked_history_id: String,
+    pub status: ContextAnalysisStatus,
+    pub created_at: String,
+    pub analyzed_at: Option<String>,
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
+    pub prompt_version: String,
+    pub schema_version: u32,
+    pub input_mode: String,
+    pub image_mime_type: Option<String>,
+    pub image_width: Option<u32>,
+    pub image_height: Option<u32>,
+    pub image_bytes: Option<u64>,
+    pub conversation_name: Option<String>,
+    pub brief_summary: Option<String>,
+    pub full_summary: Option<String>,
+    pub detected_app: Option<String>,
+    pub detected_context_type: ContextAnalysisContextType,
+    pub topic: Option<String>,
+    pub user_intent: Option<String>,
+    pub activity_type: ContextAnalysisActivityType,
+    pub decision: Option<String>,
+    #[serde(default)]
+    pub action_items: Vec<ContextAnalysisActionItem>,
+    #[serde(default)]
+    pub related_people: Vec<String>,
+    pub project_or_domain: Option<String>,
+    #[serde(default)]
+    pub visual_evidence: Vec<String>,
+    pub sensitive_content_visible: bool,
+    pub confidence: f32,
+    pub uncertainty_reason: Option<String>,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextCaptureEntry {
+    pub id: String,
+    pub created_at: String,
+    pub context_app: Option<String>,
+    pub conversation_window: Option<String>,
+    pub window_title: Option<String>,
+    pub capture_status: ContextCaptureStatus,
+    pub capture_source: Option<ContextCaptureSource>,
+    #[serde(skip)]
+    pub screenshot_path: Option<String>,
+    pub screenshot_ref: Option<String>,
+    pub linked_history_type: ContextCaptureHistoryType,
+    pub linked_history_id: String,
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<ContextAnalysisResult>,
+}
+
 /// 文本重写历史条目。与 `DictationSession` 完全隔离，不写入 `history.json`。
 /// 失败请求也写入历史，`error_code` 非 None 时表示失败原因，`rewritten_text` 可能为空。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +266,8 @@ pub struct RewriteHistoryEntry {
     pub insert_status: InsertStatus,
     pub error_code: Option<String>,
     pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub context_capture: Option<ContextCaptureEntry>,
 }
 
 /// `rewrite:state` 事件 payload，推送给前端浮窗展示重写进度。
@@ -189,6 +335,8 @@ pub struct DictationSession {
     /// `None` / `Some(false)` 都按"无录音"处理；旧 JSON 不带这字段也兼容。
     #[serde(default)]
     pub has_audio_recording: Option<bool>,
+    #[serde(default)]
+    pub context_capture: Option<ContextCaptureEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -924,6 +1072,12 @@ pub struct UserPreferences {
     /// 这种「文本档案多 + 录音不占盘」组合下精确控制。
     #[serde(default)]
     pub audio_recording_max_entries: Option<u32>,
+    #[serde(default = "default_true")]
+    pub context_capture_enabled: bool,
+    #[serde(default)]
+    pub context_vision_analysis_enabled: bool,
+    #[serde(default)]
+    pub context_vision_analysis_consent_accepted: bool,
     /// Style Pack Marketplace HTTP 基地址。空 = 本地开发默认 http://127.0.0.1:8090；
     /// 用户在 Settings 里填生产 URL (如 https://api.openless-marketplace.com)。
     #[serde(default)]
@@ -1119,6 +1273,12 @@ struct UserPreferencesWire {
     record_audio_for_debug: bool,
     #[serde(default)]
     audio_recording_max_entries: Option<u32>,
+    #[serde(default = "default_true")]
+    context_capture_enabled: bool,
+    #[serde(default)]
+    context_vision_analysis_enabled: bool,
+    #[serde(default)]
+    context_vision_analysis_consent_accepted: bool,
     #[serde(default)]
     marketplace_base_url: String,
     #[serde(default)]
@@ -1208,6 +1368,10 @@ impl Default for UserPreferencesWire {
             history_max_entries: prefs.history_max_entries,
             record_audio_for_debug: prefs.record_audio_for_debug,
             audio_recording_max_entries: prefs.audio_recording_max_entries,
+            context_capture_enabled: prefs.context_capture_enabled,
+            context_vision_analysis_enabled: prefs.context_vision_analysis_enabled,
+            context_vision_analysis_consent_accepted: prefs
+                .context_vision_analysis_consent_accepted,
             marketplace_base_url: prefs.marketplace_base_url,
             marketplace_dev_login: prefs.marketplace_dev_login,
             android_insert_strategy: prefs.android_insert_strategy,
@@ -1318,6 +1482,10 @@ impl<'de> Deserialize<'de> for UserPreferences {
             history_max_entries: wire.history_max_entries,
             record_audio_for_debug: wire.record_audio_for_debug,
             audio_recording_max_entries: wire.audio_recording_max_entries,
+            context_capture_enabled: wire.context_capture_enabled,
+            context_vision_analysis_enabled: wire.context_vision_analysis_enabled,
+            context_vision_analysis_consent_accepted: wire
+                .context_vision_analysis_consent_accepted,
             marketplace_base_url: wire.marketplace_base_url,
             marketplace_dev_login: wire.marketplace_dev_login,
             android_insert_strategy: normalize_android_insert_strategy(
@@ -2063,6 +2231,9 @@ impl Default for UserPreferences {
             history_max_entries: None,
             record_audio_for_debug: false,
             audio_recording_max_entries: None,
+            context_capture_enabled: true,
+            context_vision_analysis_enabled: false,
+            context_vision_analysis_consent_accepted: false,
             marketplace_base_url: String::new(),
             marketplace_dev_login: String::new(),
             android_insert_strategy: default_android_insert_strategy(),

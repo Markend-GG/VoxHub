@@ -2655,6 +2655,8 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -3909,6 +3911,7 @@ dependencies = [
  "hmac",
  "hyper",
  "hyper-util",
+ "image",
  "jni 0.21.1",
  "keyring",
  "libc",
