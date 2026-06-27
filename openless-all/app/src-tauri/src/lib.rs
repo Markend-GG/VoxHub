@@ -74,6 +74,7 @@ mod shortcut_binding;
 mod shortcut_binding;
 #[cfg(not(mobile))]
 mod screenshot_record;
+mod screenshot_whitelist;
 #[cfg(not(mobile))]
 mod report_scheduler;
 mod types;
@@ -313,6 +314,11 @@ macro_rules! app_invoke_handler_desktop {
             #[cfg(target_os = "windows")]
             commands::sherpa_onnx_asr_reveal_model_dir,
             commands::export_error_log,
+            commands::list_open_window_apps,
+            commands::set_screenshot_whitelist_enabled,
+            commands::add_screenshot_whitelist_app,
+            commands::remove_screenshot_whitelist_app,
+            commands::restore_default_screenshot_whitelist_apps,
             restart_app,
             log_client_error,
             set_windows_caption_theme,
@@ -651,7 +657,9 @@ fn run_desktop() {
                     .show_menu_on_left_click(false)
                     .on_menu_event(move |app, event| match event.id.as_ref() {
                         "toggle" => show_main_window(app),
-                        "screenshot-record-toggle" => handle_screenshot_record_tray_menu_event(app),
+                        "screenshot-record-resume" | "screenshot-record-pause" => {
+                            handle_screenshot_record_tray_menu_event(app, event.id.as_ref());
+                        }
                         "quit" => app.exit(0),
                         id => {
                             if handle_style_tray_menu_event(app, id) {
@@ -812,16 +820,26 @@ fn build_tray_menu<M: Manager<tauri::Wry>>(
 ) -> tauri::Result<TrayMenu> {
     let toggle = MenuItemBuilder::with_id("toggle", "显示主窗口").build(app)?;
     let prefs = coordinator.prefs().get();
-    let screenshot_record_toggle = MenuItemBuilder::with_id(
-        "screenshot-record-toggle",
-        if prefs.screenshot_record_paused {
-            "截图记录：恢复记录"
-        } else {
-            "截图记录：暂停记录"
-        },
-    )
-    .enabled(prefs.screenshot_record_enabled)
-    .build(app)?;
+
+    // 截图记录子菜单：开启记录 / 暂停记录（选项式交互）
+    let mut sr_submenu = SubmenuBuilder::with_id(app, "screenshot-record", "截图记录")
+        .enabled(prefs.screenshot_record_enabled);
+
+    let is_recording = prefs.screenshot_record_enabled && !prefs.screenshot_record_paused;
+    let is_paused = prefs.screenshot_record_enabled && prefs.screenshot_record_paused;
+
+    let resume_item = CheckMenuItemBuilder::with_id("screenshot-record-resume", "开启记录")
+        .checked(is_recording)
+        .build(app)?;
+    sr_submenu = sr_submenu.item(&resume_item);
+
+    let pause_item = CheckMenuItemBuilder::with_id("screenshot-record-pause", "暂停记录")
+        .checked(is_paused)
+        .build(app)?;
+    sr_submenu = sr_submenu.item(&pause_item);
+
+    let sr_submenu = sr_submenu.build()?;
+
     let microphone_menu = build_microphone_tray_menu(app, coordinator)?;
     let quit = MenuItemBuilder::with_id("quit", "退出 OpenLess").build(app)?;
     let mut builder = MenuBuilder::new(app);
@@ -834,7 +852,7 @@ fn build_tray_menu<M: Manager<tauri::Wry>>(
         builder = builder.item(&style_menu.submenu);
     }
     let menu = builder
-        .items(&[&toggle, &screenshot_record_toggle, &microphone_menu.submenu, &quit])
+        .items(&[&toggle, &sr_submenu, &microphone_menu.submenu, &quit])
         .build()?;
     Ok(TrayMenu {
         menu,
@@ -1058,15 +1076,23 @@ fn handle_microphone_tray_menu_event(app: &AppHandle, id: &str) {
 }
 
 #[cfg(not(mobile))]
-fn handle_screenshot_record_tray_menu_event(app: &AppHandle) {
+fn handle_screenshot_record_tray_menu_event(app: &AppHandle, id: &str) {
     let coord = app.state::<Arc<coordinator::Coordinator>>();
     let mut prefs = coord.prefs().get();
     if !prefs.screenshot_record_enabled {
         return;
     }
-    prefs.screenshot_record_paused = !prefs.screenshot_record_paused;
+    match id {
+        "screenshot-record-resume" => {
+            prefs.screenshot_record_paused = false;
+        }
+        "screenshot-record-pause" => {
+            prefs.screenshot_record_paused = true;
+        }
+        _ => return,
+    }
     if let Err(err) = coord.prefs().set(prefs.clone()) {
-        log::warn!("[tray] save screenshot record pause state failed: {err}");
+        log::warn!("[tray] save screenshot record state failed: {err}");
         return;
     }
     let _ = app.emit("prefs:changed", &prefs);

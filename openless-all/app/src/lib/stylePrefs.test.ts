@@ -107,6 +107,9 @@ const previousPrefs: UserPreferences = {
   androidOverlayLeftSwipeAction: 'translation',
   androidOverlayCancelSwipeDirection: 'up',
   androidOverlaySizeDp: 72,
+  screenshotWhitelistEnabled: true,
+  screenshotWhitelistApps: [],
+  screenshotWhitelistDefaultsVersion: 1,
 };
 
 const nextPrefs: UserPreferences = {

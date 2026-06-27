@@ -137,12 +137,18 @@ mod tests {
     fn truncate_at_history_cap() {
         let store = RewriteHistoryStore::new_fallback();
         let _ = store.clear();
-        for i in 0..(HISTORY_CAP + 10) {
+        // 直接批量写入 HISTORY_CAP 条记录（避免逐条 append 的 O(n²) 性能问题）
+        let pre_entries: Vec<RewriteHistoryEntry> = (0..HISTORY_CAP)
+            .map(|i| entry(&format!("pre-{i}"), "text"))
+            .collect();
+        store.write_locked(&pre_entries).unwrap();
+        // 再写入 10 条，验证截断生效
+        for i in 0..10 {
             store.append(entry(&format!("id-{i}"), "text")).unwrap();
         }
         let list = store.list().unwrap();
         assert_eq!(list.len(), HISTORY_CAP);
         // newest-first → 第一条是最后写入的
-        assert_eq!(list[0].id, format!("id-{}", HISTORY_CAP + 9));
+        assert_eq!(list[0].id, "id-9");
     }
 }

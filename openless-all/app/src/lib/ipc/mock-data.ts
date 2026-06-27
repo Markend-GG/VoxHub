@@ -120,6 +120,9 @@ export let mockSettings: UserPreferences = {
     androidOverlayLeftSwipeAction: "translation",
     androidOverlayCancelSwipeDirection: "up",
     androidOverlaySizeDp: 72,
+    screenshotWhitelistEnabled: true,
+    screenshotWhitelistApps: [],
+    screenshotWhitelistDefaultsVersion: 1,
 }
 
 const mockFullStylePrompts: StyleSystemPrompts = {
@@ -461,6 +464,8 @@ export const mockHistory: DictationSession[] = OL_DATA.history.map((h, i) => ({
     insertStatus: "inserted",
     errorCode: null,
     durationMs: 600,
+    asrDurationMs: 350,
+    polishDurationMs: 1200,
     dictionaryEntryCount: 28,
     hasAudioRecording: null,
     contextCapture: null,

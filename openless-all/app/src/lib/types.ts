@@ -38,6 +38,33 @@ export type ContextCaptureHistoryType = 'voice' | 'rewrite' | 'screenshotRecord'
 
 export type ContextAnalysisStatus = 'pending' | 'success' | 'failed' | 'skipped';
 
+// ─── 截图白名单 ──────────────────────────────────────────────────
+
+export type ScreenshotWhitelistAppSource = 'default' | 'user';
+
+export interface ScreenshotWhitelistApp {
+  id: string;
+  displayName: string;
+  processName: string;
+  exePath?: string | null;
+  source: ScreenshotWhitelistAppSource;
+  createdAt: string;
+}
+
+export interface OpenWindowApp {
+  processName: string;
+  processId: number;
+  displayName: string;
+  exePath?: string | null;
+  windowTitle?: string | null;
+}
+
+export interface ScreenshotWhitelistAppInput {
+  displayName: string;
+  processName: string;
+  exePath?: string | null;
+}
+
 export type ContextAnalysisContextType =
   | 'chat'
   | 'ai_chat'
@@ -219,6 +246,10 @@ export interface DictationSession {
   insertStatus: InsertStatus;
   errorCode: string | null;
   durationMs: number | null;
+  /** ASR 识别耗时（毫秒）：从录音结束到拿到转写结果。 */
+  asrDurationMs: number | null;
+  /** LLM 润色耗时（毫秒）：润色/翻译 LLM 调用的 wall clock 时间。 */
+  polishDurationMs: number | null;
   dictionaryEntryCount: number | null;
   /** 该会话是否在录音时归档了原始 wav（取决于当时 prefs.recordAudioForDebug）。
    *  true 时前端在 History 渲染播放按钮，凭 id 通过 read_audio_recording IPC 拿字节流。 */
@@ -561,7 +592,7 @@ export interface UserPreferences {
    *  桌面：开启后自动检查，发现更新弹窗由用户确认安装。
    *  关闭后仅 Settings 手动「检查更新」按钮可用。 */
   autoUpdateCheck: boolean;
-  /** 历史记录上限（条数）。null = 走默认 200；5..=200 之间为用户自定义。 */
+  /** 历史记录上限（条数）。null = 走默认 2000；5..=10000 之间为用户自定义。 */
   historyMaxEntries: number | null;
   /** 是否为每次会话保留原始麦克风音频文件（wav），用于排查 ASR 误识别 / 麦克风灵敏度。
    *  默认 false。开启后会占磁盘空间，受 historyRetentionDays 同样的清理策略约束。 */
@@ -596,6 +627,12 @@ export interface UserPreferences {
   androidOverlayCancelSwipeDirection: AndroidOverlayCancelSwipeDirection;
   /** Android: floating overlay control diameter in dp. */
   androidOverlaySizeDp: number;
+  /** 截图白名单开关。默认 true（开启后只记录白名单应用的截图）。 */
+  screenshotWhitelistEnabled: boolean;
+  /** 截图白名单应用列表。默认包含常用工作应用。 */
+  screenshotWhitelistApps: ScreenshotWhitelistApp[];
+  /** 默认白名单版本号。升级时用于判断是否需要补充新增默认项。 */
+  screenshotWhitelistDefaultsVersion: number;
 }
 
 export interface MarketplaceListItem {

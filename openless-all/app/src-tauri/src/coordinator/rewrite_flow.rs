@@ -336,6 +336,10 @@ fn append_rewrite_history(inner: &Arc<Inner>, entry: RewriteHistoryEntry) {
     if let Err(e) = inner.rewrite_history.append(entry) {
         log::warn!("[rewrite] failed to write rewrite history: {e}");
     } else {
+        // 通知前端历史列表刷新
+        if let Some(app) = inner.app.lock().clone() {
+            let _ = app.emit("history:updated", "rewrite");
+        }
         let prefs = inner.prefs.get();
         if let Err(e) = inner
             .context_analysis

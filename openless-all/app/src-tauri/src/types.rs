@@ -464,6 +464,12 @@ pub struct DictationSession {
     pub insert_status: InsertStatus,
     pub error_code: Option<String>,
     pub duration_ms: Option<u64>,
+    /// ASR 识别耗时（毫秒）：从录音结束到拿到转写结果的时间。
+    #[serde(default)]
+    pub asr_duration_ms: Option<u64>,
+    /// LLM 润色耗时（毫秒）：润色/翻译 LLM 调用的 wall clock 时间。
+    #[serde(default)]
+    pub polish_duration_ms: Option<u64>,
     pub dictionary_entry_count: Option<u32>,
     /// 当 `prefs.record_audio_for_debug` 开启时，本次会话的原始麦克风音频被写到
     /// `recordings/<id>.wav`。前端凭这个字段决定是否在 History 渲染播放按钮。
@@ -960,6 +966,130 @@ fn default_true() -> bool {
     true
 }
 
+// ─── 截图白名单 ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ScreenshotWhitelistAppSource {
+    Default,
+    User,
+}
+
+impl Default for ScreenshotWhitelistAppSource {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ScreenshotWhitelistApp {
+    pub id: String,
+    pub display_name: String,
+    pub process_name: String,
+    pub exe_path: Option<String>,
+    pub source: ScreenshotWhitelistAppSource,
+    pub created_at: String,
+}
+
+impl Default for ScreenshotWhitelistApp {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            display_name: String::new(),
+            process_name: String::new(),
+            exe_path: None,
+            source: ScreenshotWhitelistAppSource::Default,
+            created_at: String::new(),
+        }
+    }
+}
+
+/// IPC: 可见窗口应用（用于“添加应用”弹窗）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenWindowApp {
+    pub process_name: String,
+    pub process_id: u32,
+    pub display_name: String,
+    pub exe_path: Option<String>,
+    pub window_title: Option<String>,
+}
+
+/// Windows 前台应用身份信息
+#[cfg(target_os = "windows")]
+pub(crate) struct ForegroundAppIdentity {
+    pub process_name: String,
+    pub process_id: u32,
+    pub exe_path: Option<String>,
+    pub display_name: Option<String>,
+    pub window_title: Option<String>,
+}
+
+/// 截图白名单默认应用列表常量
+pub const DEFAULT_WHITELIST_VERSION: u32 = 1;
+
+pub(crate) fn default_screenshot_whitelist_apps_list() -> Vec<ScreenshotWhitelistApp> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let entries: Vec<(&str, &str)> = vec![
+        // AI 与开发工具
+        ("Trae", "trae.exe"),
+        ("WorkBuddy", "workbuddy.exe"),
+        ("Qoder", "qoder.exe"),
+        ("Codex", "codex.exe"),
+        ("Claude Code", "claude.exe"),
+        ("Alma", "alma.exe"),
+        // 浏览器
+        ("Chrome", "chrome.exe"),
+        ("Edge", "msedge.exe"),
+        // 协作与沟通工具
+        ("企业微信", "wxwork.exe"),
+        ("飞书", "feishu.exe"),
+        ("钉钉", "dingtalk.exe"),
+        // Office
+        ("Word", "winword.exe"),
+        ("Excel", "excel.exe"),
+        ("PowerPoint", "powerpnt.exe"),
+        ("Outlook", "outlook.exe"),
+        ("OneNote", "onenote.exe"),
+        // WPS
+        ("WPS 文字", "wps.exe"),
+        ("WPS 表格", "et.exe"),
+        ("WPS 演示", "wpp.exe"),
+    ];
+    entries
+        .into_iter()
+        .map(|(display, process)| ScreenshotWhitelistApp {
+            id: uuid::Uuid::new_v4().to_string(),
+            display_name: display.to_string(),
+            process_name: process.to_string(),
+            exe_path: None,
+            source: ScreenshotWhitelistAppSource::Default,
+            created_at: now.clone(),
+        })
+        .collect()
+}
+
+fn default_screenshot_whitelist_apps() -> Vec<ScreenshotWhitelistApp> {
+    default_screenshot_whitelist_apps_list()
+}
+
+fn default_screenshot_whitelist_defaults_version() -> u32 {
+    DEFAULT_WHITELIST_VERSION
+}
+
+/// 历史条数默认值（None 时的 fallback）
+pub const HISTORY_MAX_ENTRIES_DEFAULT: u32 = 2000;
+/// 历史条数用户可配置的最大值
+pub const HISTORY_MAX_ENTRIES_UPPER: u32 = 10000;
+/// 历史条数用户可配置的最小值
+pub const HISTORY_MAX_ENTRIES_LOWER: u32 = 5;
+
+/// 将 historyMaxEntries 归一化到有效范围
+pub(crate) fn normalize_history_max_entries(value: Option<u32>) -> Option<u32> {
+    value.map(|n| n.clamp(HISTORY_MAX_ENTRIES_LOWER, HISTORY_MAX_ENTRIES_UPPER))
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UserPreferences {
@@ -1272,6 +1402,15 @@ pub struct UserPreferences {
     /// Android: floating overlay control diameter in dp.
     #[serde(default = "default_android_overlay_size_dp")]
     pub android_overlay_size_dp: u32,
+    /// 截图白名单开关。默认 true（开启后只记录白名单应用的截图）。
+    #[serde(default = "default_true")]
+    pub screenshot_whitelist_enabled: bool,
+    /// 截图白名单应用列表。默认包含常用工作应用。
+    #[serde(default = "default_screenshot_whitelist_apps")]
+    pub screenshot_whitelist_apps: Vec<ScreenshotWhitelistApp>,
+    /// 默认白名单版本号。升级时用于判断是否需要补充新增默认项。
+    #[serde(default = "default_screenshot_whitelist_defaults_version")]
+    pub screenshot_whitelist_defaults_version: u32,
 }
 
 fn default_local_asr_model() -> String {
@@ -1485,6 +1624,12 @@ struct UserPreferencesWire {
     android_overlay_cancel_swipe_direction: AndroidOverlayCancelSwipeDirection,
     #[serde(default = "default_android_overlay_size_dp")]
     android_overlay_size_dp: u32,
+    #[serde(default = "default_true")]
+    screenshot_whitelist_enabled: bool,
+    #[serde(default = "default_screenshot_whitelist_apps")]
+    screenshot_whitelist_apps: Vec<ScreenshotWhitelistApp>,
+    #[serde(default = "default_screenshot_whitelist_defaults_version")]
+    screenshot_whitelist_defaults_version: u32,
 }
 
 impl Default for UserPreferencesWire {
@@ -1582,6 +1727,9 @@ impl Default for UserPreferencesWire {
             android_overlay_left_swipe_action: prefs.android_overlay_left_swipe_action,
             android_overlay_cancel_swipe_direction: prefs.android_overlay_cancel_swipe_direction,
             android_overlay_size_dp: prefs.android_overlay_size_dp,
+            screenshot_whitelist_enabled: prefs.screenshot_whitelist_enabled,
+            screenshot_whitelist_apps: prefs.screenshot_whitelist_apps,
+            screenshot_whitelist_defaults_version: prefs.screenshot_whitelist_defaults_version,
         }
     }
 }
@@ -1714,7 +1862,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             streaming_insert_default_migrated: true,
             streaming_insert_save_clipboard: wire.streaming_insert_save_clipboard,
             auto_update_check: wire.auto_update_check,
-            history_max_entries: wire.history_max_entries,
+            history_max_entries: normalize_history_max_entries(wire.history_max_entries),
             record_audio_for_debug: wire.record_audio_for_debug,
             audio_recording_max_entries: wire.audio_recording_max_entries,
             context_capture_enabled: wire.context_capture_enabled,
@@ -1733,6 +1881,9 @@ impl<'de> Deserialize<'de> for UserPreferences {
             android_overlay_size_dp: normalize_android_overlay_size_dp(
                 wire.android_overlay_size_dp,
             ),
+            screenshot_whitelist_enabled: wire.screenshot_whitelist_enabled,
+            screenshot_whitelist_apps: wire.screenshot_whitelist_apps,
+            screenshot_whitelist_defaults_version: wire.screenshot_whitelist_defaults_version,
         })
     }
 }
@@ -2548,6 +2699,9 @@ impl Default for UserPreferences {
             android_overlay_cancel_swipe_direction: default_android_overlay_cancel_swipe_direction(
             ),
             android_overlay_size_dp: default_android_overlay_size_dp(),
+            screenshot_whitelist_enabled: true,
+            screenshot_whitelist_apps: default_screenshot_whitelist_apps_list(),
+            screenshot_whitelist_defaults_version: DEFAULT_WHITELIST_VERSION,
         }
     }
 }

@@ -87,6 +87,7 @@ mod settings;
 #[cfg(not(mobile))]
 mod sherpa_asr;
 mod style_packs;
+mod whitelist;
 
 pub use credentials::*;
 pub use dictation::*;
@@ -115,6 +116,7 @@ pub use settings::*;
 #[allow(unused_imports)]
 pub use sherpa_asr::*;
 pub use style_packs::*;
+pub use whitelist::*;
 
 pub(crate) type CoordinatorState<'a> = State<'a, Arc<Coordinator>>;
 #[cfg(not(mobile))]

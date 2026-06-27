@@ -11,6 +11,7 @@ import { ProvidersSection } from './ProvidersSection';
 import { MarketplaceSection } from './MarketplaceSection';
 import { PermissionsSection } from './PermissionsSection';
 import { DataStorageSection } from './DataStorageSection';
+import { ScreenshotWhitelistSection } from './ScreenshotWhitelistSection';
 import { LocalModelSection } from './LocalModelSection';
 import { DebugToolsSection } from './DebugToolsSection';
 import { CodingAgentSection } from './CodingAgentSection';
@@ -51,7 +52,7 @@ export function ServicesTab() {
   );
 }
 
-// 隐私：本地优先说明 + 权限管理 · 数据存储。
+// 隐私：本地优先说明 + 截图白名单 · 权限管理 · 数据存储。
 export function PrivacyTab() {
   const { t } = useTranslation();
   return (
@@ -78,6 +79,7 @@ export function PrivacyTab() {
           {t('modal.about.privacyDesc')}
         </span>
       </div>
+      <ScreenshotWhitelistSection />
       <PermissionsSection />
       <DataStorageSection />
     </>

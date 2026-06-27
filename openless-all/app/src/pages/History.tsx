@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { listen } from '@tauri-apps/api/event';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
@@ -345,6 +346,17 @@ export function History() {
     void refresh();
   }, [refresh]);
 
+  // 监听后端 history:updated 事件，新语音记录产生时自动刷新列表
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void listen<string>('history:updated', (event) => {
+      if (event.payload === 'voice') {
+        void refresh({ silent: true });
+      }
+    }).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [refresh]);
+
   useEffect(() => {
     return () => {
       Object.values(reanalysisClearTimersRef.current).forEach(timer => window.clearTimeout(timer));
@@ -670,7 +682,7 @@ export function History() {
             <>
               {mobile && (
                 <div style={{ marginBottom: 12 }}>
-                  <Btn icon="chevLeft" variant="ghost" size="sm" onClick={() => setMobileDetailOpen(false)}>
+                  <Btn icon="chevLeft" variant="ghost" size="sm" onClick={() => { setMobileDetailOpen(false); void refresh({ silent: true }); }}>
                     {t('history.backToList')}
                   </Btn>
                 </div>
@@ -679,7 +691,11 @@ export function History() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{ fontSize: 13, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)' }}>{formatTime(item.createdAt)}</span>
                   <Pill size="sm" tone="default">{MODE_LABEL[item.mode]}</Pill>
-                  <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{formatDuration(item.durationMs, t)}</span>
+                  <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
+                    {item.durationMs != null && item.durationMs > 0
+                      ? `${t('common.recordingDuration')}: ${formatDuration(item.durationMs, t)}`
+                      : formatDuration(item.durationMs, t)}
+                  </span>
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>{justCopied ? t('common.copied') : t('common.copy')}</Btn>
@@ -756,6 +772,12 @@ export function History() {
               <div style={{ marginTop: 18, paddingTop: 14, borderTop: '0.5px solid var(--ol-line-soft)', display: 'flex', gap: 18, fontSize: 11, color: 'var(--ol-ink-4)', flexWrap: 'wrap' }}>
                 {item.appName && <span>{t('history.insertedTo')} <b style={{ color: 'var(--ol-ink-2)' }}>{item.appName}</b></span>}
                 <span>{t('history.chars', { count: item.finalText.length })}</span>
+                {item.asrDurationMs != null && item.asrDurationMs > 0 && (
+                  <span>{t('common.asrDuration')}: <b style={{ color: 'var(--ol-ink-2)' }}>{formatDuration(item.asrDurationMs, t)}</b></span>
+                )}
+                {item.polishDurationMs != null && item.polishDurationMs > 0 && (
+                  <span>{t('common.polishDuration')}: <b style={{ color: 'var(--ol-ink-2)' }}>{formatDuration(item.polishDurationMs, t)}</b></span>
+                )}
                 {item.dictionaryEntryCount != null && item.dictionaryEntryCount > 0 && (
                   <span>{t('history.vocabHits', { count: item.dictionaryEntryCount })}</span>
                 )}
@@ -886,6 +908,17 @@ function RewriteHistoryView() {
   }, [reconcileReanalysisStates]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  // 监听后端 history:updated 事件，新重写记录产生时自动刷新列表
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void listen<string>('history:updated', (event) => {
+      if (event.payload === 'rewrite') {
+        void refresh({ silent: true });
+      }
+    }).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [refresh]);
 
   useEffect(() => {
     return () => {
@@ -1086,7 +1119,7 @@ function RewriteHistoryView() {
         <Card className="ol-thinscroll" style={{ overflowY: 'auto', padding: 20 }}>
           {mobile && (
             <div style={{ marginBottom: 12 }}>
-              <Btn icon="chevLeft" variant="ghost" size="sm" onClick={() => setMobileDetailOpen(false)}>
+              <Btn icon="chevLeft" variant="ghost" size="sm" onClick={() => { setMobileDetailOpen(false); void refresh({ silent: true }); }}>
                 {t('history.backToList')}
               </Btn>
             </div>
@@ -1205,6 +1238,17 @@ function ScreenshotRecordHistoryView() {
     void refresh();
   }, [refresh]);
 
+  // 监听后端 history:updated 事件，新截图记录产生时自动刷新列表
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void listen<string>('history:updated', (event) => {
+      if (event.payload === 'screenshot') {
+        void refresh();
+      }
+    }).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [refresh]);
+
   const selected = items.find(entry => entry.id === selectedId) ?? items[0] ?? null;
 
   const onClear = async () => {
@@ -1315,7 +1359,7 @@ function ScreenshotRecordHistoryView() {
         <Card className="ol-thinscroll" style={{ overflowY: 'auto', padding: 20 }}>
           {mobile && (
             <div style={{ marginBottom: 12 }}>
-              <Btn icon="chevLeft" variant="ghost" size="sm" onClick={() => setMobileDetailOpen(false)}>
+              <Btn icon="chevLeft" variant="ghost" size="sm" onClick={() => { setMobileDetailOpen(false); void refresh(); }}>
                 {t('history.backToList')}
               </Btn>
             </div>

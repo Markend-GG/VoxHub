@@ -32,8 +32,8 @@ export function DataStorageSection() {
     if (Number.isNaN(parsed)) return;
     void savePrefs({ ...prefs, polishContextWindowMinutes: clamp(parsed, 0, 60) });
   };
-  // 历史条数 200 是当前 HISTORY_CAP（persistence.rs:32），下限 5 是避免用户填 0 导致
-  // 写一条就立刻被清光；空字符串视为不限制，落回 null → 后端走 200 默认。
+  // 历史条数：默认 2000，最大 10000，最小 5。
+  // 空字符串视为不限制，落回 null → 后端走 2000 默认。
   const onHistoryMaxEntriesChange = (raw: string) => {
     const trimmed = raw.trim();
     if (trimmed === '') {
@@ -42,7 +42,7 @@ export function DataStorageSection() {
     }
     const parsed = Number.parseInt(trimmed, 10);
     if (Number.isNaN(parsed)) return;
-    void savePrefs({ ...prefs, historyMaxEntries: clamp(parsed, 5, 200) });
+    void savePrefs({ ...prefs, historyMaxEntries: clamp(parsed, 5, 10000) });
   };
 
   return (
@@ -62,8 +62,8 @@ export function DataStorageSection() {
         <input
           type="number"
           min={5}
-          max={200}
-          placeholder="200"
+          max={10000}
+          placeholder="2000"
           value={prefs.historyMaxEntries ?? ''}
           onChange={e => onHistoryMaxEntriesChange(e.target.value)}
           style={{ ...inputStyle, width: 80, textAlign: 'right' }}

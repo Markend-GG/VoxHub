@@ -35,6 +35,10 @@ pub(crate) fn handle_screenshot_record_hotkey(inner: &Arc<Inner>) {
     if !prefs.screenshot_record_enabled || prefs.screenshot_record_paused {
         return;
     }
+    // 白名单判断：在截图、压缩、LLM 分析、历史记录创建之前执行
+    if !crate::screenshot_whitelist::screenshot_allowed_by_whitelist(&prefs) {
+        return;
+    }
     if should_suppress_recent_voice_or_rewrite_duplicate(
         inner,
         VOICE_REWRITE_DUPLICATE_SUPPRESSION_WINDOW,
@@ -97,6 +101,8 @@ pub(crate) fn handle_screenshot_record_hotkey(inner: &Arc<Inner>) {
             log::warn!("[screenshot-record] create record failed: {error}");
             return;
         }
+        // 通知前端历史列表刷新
+        inner.emit_event("history:updated", "screenshot");
         schedule_finalize(Arc::clone(inner), record_id.clone(), merge_window);
     }
 
@@ -359,6 +365,8 @@ fn finalize_record(inner: Arc<Inner>, record_id: String) {
         log::warn!("[screenshot-record] finalize save failed: {error}");
         return;
     }
+    // 通知前端历史列表刷新
+    inner.emit_event("history:updated", "screenshot");
 
     crate::context_vision_analysis::spawn_analysis_for_screenshot_record(
         inner.context_capture.clone(),

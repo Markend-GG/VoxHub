@@ -279,6 +279,8 @@ mod tests {
             insert_status: crate::types::InsertStatus::Inserted,
             error_code: None,
             duration_ms: None,
+            asr_duration_ms: None,
+            polish_duration_ms: None,
             dictionary_entry_count: None,
             has_audio_recording: None,
             context_capture: None,

@@ -242,6 +242,16 @@ pub struct Coordinator {
     inner: Arc<Inner>,
 }
 
+impl Inner {
+    /// 向所有前端窗口广播事件。其他 crate 模块（如 screenshot_record）
+    /// 无法直接访问 `self.app` 私有字段，通过此方法统一转发。
+    pub(crate) fn emit_event<S: serde::Serialize + Clone>(&self, event: &str, payload: S) {
+        if let Some(app) = self.app.lock().clone() {
+            let _ = app.emit(event, payload);
+        }
+    }
+}
+
 pub(crate) struct Inner {
     app: Mutex<Option<AppHandle>>,
     history: HistoryStore,
@@ -1245,6 +1255,10 @@ impl Coordinator {
             return;
         }
         if history_type == ContextCaptureHistoryType::Rewrite && !prefs.rewrite_save_history {
+            return;
+        }
+        // 白名单判断：语音和重写上下文截图都受白名单控制
+        if !crate::screenshot_whitelist::screenshot_allowed_by_whitelist(&prefs) {
             return;
         }
         let context_capture_id = Uuid::new_v4().to_string();

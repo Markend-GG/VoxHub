@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use super::{atomic_write, data_dir, ensure_dir, read_or_default, HISTORY_CAP};
 use crate::types::{
     ContextAnalysisResult, ContextAnalysisStatus, ContextCaptureEntry, ContextCaptureHistoryType,
+    HISTORY_MAX_ENTRIES_DEFAULT,
 };
 
 const CONTEXT_ANALYSIS_FILE: &str = "context-analysis.json";
@@ -183,7 +184,7 @@ impl ContextAnalysisStore {
         }
         let cap = max_entries
             .map(|n| (n as usize).clamp(5, HISTORY_CAP))
-            .unwrap_or(HISTORY_CAP);
+            .unwrap_or(HISTORY_MAX_ENTRIES_DEFAULT as usize);
         if entries.len() > cap {
             entries.truncate(cap);
         }

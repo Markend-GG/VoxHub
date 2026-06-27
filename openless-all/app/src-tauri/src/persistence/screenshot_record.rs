@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use super::{atomic_write, data_dir, ensure_dir, read_or_default, HISTORY_CAP};
 use crate::types::{
     ContextAnalysisResult, ContextCaptureEntry, ScreenshotRecord, ScreenshotRecordStatus,
+    HISTORY_MAX_ENTRIES_DEFAULT,
 };
 
 const SCREENSHOT_RECORD_FILE: &str = "screenshot-records.json";
@@ -254,7 +255,7 @@ fn apply_record_retention(
     }
     let cap = max_entries
         .map(|n| (n as usize).clamp(5, HISTORY_CAP))
-        .unwrap_or(HISTORY_CAP);
+        .unwrap_or(HISTORY_MAX_ENTRIES_DEFAULT as usize);
     if records.len() > cap {
         records.truncate(cap);
     }

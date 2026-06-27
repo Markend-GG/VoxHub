@@ -52,7 +52,9 @@ pub use rewrite_history::*;
 pub use screenshot_record::*;
 pub use style_pack::*;
 
-const HISTORY_CAP: usize = 200;
+/// 硬上限：所有历史存储的绝对上限。
+/// 配合 HISTORY_MAX_ENTRIES_UPPER(10000) 和 HISTORY_MAX_ENTRIES_DEFAULT(2000) 使用。
+const HISTORY_CAP: usize = 10000;
 const PREFERENCES_FILE: &str = "preferences.json";
 
 fn data_dir() -> Result<PathBuf> {

@@ -1685,6 +1685,8 @@ fn build_transcribe_failed_session(
         insert_status: InsertStatus::Failed,
         error_code: Some("transcribeFailed".to_string()),
         duration_ms: Some(duration_ms),
+        asr_duration_ms: Some(duration_ms),
+        polish_duration_ms: None,
         dictionary_entry_count: None,
         has_audio_recording: Some(has_audio_recording),
         context_capture: None,
@@ -1707,6 +1709,10 @@ fn write_transcribe_failed_history(inner: &Arc<Inner>, session_id: SessionId, du
     ) {
         log::error!("[coord] transcribeFailed history append failed: {e}");
     } else {
+        // 通知前端历史列表刷新
+        if let Some(app) = inner.app.lock().clone() {
+            let _ = app.emit("history:updated", "voice");
+        }
         if let Err(e) = inner
             .context_analysis
             .apply_retention(prefs.history_retention_days, prefs.history_max_entries)
@@ -1854,6 +1860,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
     };
 
+    let asr_start = std::time::Instant::now();
     let uses_global_timeout = asr_transcribe_uses_global_timeout(&asr);
     // 每个引擎分支产出 Ok(RawTranscript) 或 Err(TranscribeFail)；失败/超时不再就地 return，
     // 而是把失败值交给 match 之后统一处理：先自动静默重试（从归档音频重转，应对网络/服务端
@@ -2118,6 +2125,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             }
         }
     };
+    let asr_duration_ms = Some(asr_start.elapsed().as_millis() as u64);
 
     // ASR 完成后 cancel 检查：用户在 transcribe 进行中按 Esc 时，这里就会命中。
     // 优先级高于 empty 检查 — 用户取消 → 静默丢弃，不写失败历史也不弹错误胶囊。
@@ -2189,6 +2197,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             error_code: Some("emptyTranscript".to_string()),
             duration_ms: Some(raw.duration_ms),
             dictionary_entry_count: Some(enabled_phrases(inner).len() as u32),
+            asr_duration_ms,
+            polish_duration_ms: None,
             // empty-transcript（ASR 没识别到任何文字）也保留 wav 标记——这是用户最想
             // 通过原始录音定位"是不是麦克风太小声 / ASR 模型问题"的场景。修 pr_agent
             // "Missing Audio" 反馈。
@@ -2204,6 +2214,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         ) {
             log::error!("[coord] history append failed: {e}");
         } else {
+            // 通知前端历史列表刷新
+            if let Some(app) = inner.app.lock().clone() {
+                let _ = app.emit("history:updated", "voice");
+            }
             if let Err(e) = inner.context_analysis.apply_retention(
                 prefs_snapshot.history_retention_days,
                 prefs_snapshot.history_max_entries,
@@ -2355,6 +2369,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     // 翻译会话润色后的源语言文本（译文前的中间产物），仅翻译路径解析成功时有值，
     // 写进 history 供后续普通润色轮复用（剔除译文、避免外语污染）。
+    let polish_start = std::time::Instant::now();
     let mut polish_source: Option<String> = None;
     let (polished, polish_error, already_streamed) = if translation_active {
         log::info!(
@@ -2409,6 +2424,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         .await;
         (p, e, false)
     };
+    let polish_duration_ms = Some(polish_start.elapsed().as_millis() as u64);
 
     let polished = finalize_polished_text(
         polished,
@@ -2563,6 +2579,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         insert_status: status,
         error_code,
         duration_ms: Some(raw.duration_ms),
+        asr_duration_ms,
+        polish_duration_ms,
         // 历史详情页的"X 个热词"显示：用本次实际命中次数（每个匹配实例算一次），
         // 比"启用词条总数"更能反映本段口述命中了多少。u64 → u32 截断对单段听写足够。
         dictionary_entry_count: Some(total_hits.min(u32::MAX as u64) as u32),
@@ -2579,6 +2597,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     ) {
         log::error!("[coord] history append failed: {e}");
     } else {
+        // 通知前端历史列表刷新
+        if let Some(app) = inner.app.lock().clone() {
+            let _ = app.emit("history:updated", "voice");
+        }
         if let Err(e) = inner.context_analysis.apply_retention(
             prefs_snapshot.history_retention_days,
             prefs_snapshot.history_max_entries,
@@ -2782,6 +2804,8 @@ mod tests {
             insert_status: InsertStatus::Inserted,
             error_code: None,
             duration_ms: Some(1000),
+            asr_duration_ms: Some(1000),
+            polish_duration_ms: None,
             dictionary_entry_count: None,
             has_audio_recording: None,
             context_capture: None,

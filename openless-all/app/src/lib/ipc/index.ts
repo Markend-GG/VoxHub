@@ -227,3 +227,12 @@ export {
     getGeneratedReport,
     deleteGeneratedReport,
 } from "./reports"
+
+// screenshot whitelist
+export {
+    listOpenWindowApps,
+    setScreenshotWhitelistEnabled,
+    addScreenshotWhitelistApp,
+    removeScreenshotWhitelistApp,
+    restoreDefaultScreenshotWhitelistApps,
+} from "./whitelist"
