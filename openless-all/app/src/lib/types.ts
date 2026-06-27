@@ -34,7 +34,7 @@ export type ContextCaptureStatus =
 
 export type ContextCaptureSource = 'activeWindow' | 'fullScreen';
 
-export type ContextCaptureHistoryType = 'voice' | 'rewrite';
+export type ContextCaptureHistoryType = 'voice' | 'rewrite' | 'screenshotRecord';
 
 export type ContextAnalysisStatus = 'pending' | 'success' | 'failed' | 'skipped';
 
@@ -62,6 +62,20 @@ export type ContextAnalysisActivityType =
   | 'note'
   | 'unknown';
 
+export type ContextAnalysisWorkStatus =
+  | 'completed'
+  | 'inProgress'
+  | 'planned'
+  | 'discussed'
+  | 'viewed'
+  | 'unknown';
+
+export type ContextAnalysisEvidenceLevel =
+  | 'explicit'
+  | 'inferred'
+  | 'weak'
+  | 'unknown';
+
 export interface ContextAnalysisActionItem {
   text: string;
   owner: string | null;
@@ -80,6 +94,8 @@ export interface ContextAnalysisResult {
   providerId: string | null;
   model: string | null;
   promptVersion: string;
+  promptHash?: string | null;
+  analysisGeneration?: string | null;
   schemaVersion: number;
   inputMode: string;
   imageMimeType: string | null;
@@ -94,6 +110,8 @@ export interface ContextAnalysisResult {
   topic: string | null;
   userIntent: string | null;
   activityType: ContextAnalysisActivityType;
+  workStatus: ContextAnalysisWorkStatus;
+  evidenceLevel: ContextAnalysisEvidenceLevel;
   decision: string | null;
   actionItems: ContextAnalysisActionItem[];
   relatedPeople: string[];
@@ -118,6 +136,73 @@ export interface ContextCaptureEntry {
   linkedHistoryId: string;
   errorCode: string | null;
   analysis?: ContextAnalysisResult | null;
+}
+
+export type ScreenshotRecordStatus =
+  | 'collecting'
+  | 'queued'
+  | 'analyzing'
+  | 'success'
+  | 'failed'
+  | 'skipped';
+
+export interface ScreenshotRecord {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  windowStartedAt: string;
+  windowEndedAt: string | null;
+  status: ScreenshotRecordStatus;
+  contextApp: string | null;
+  conversationWindow: string | null;
+  windowTitle: string | null;
+  screenshotIds: string[];
+  submittedScreenshotIds: string[];
+  triggerCount: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  analysis?: ContextAnalysisResult | null;
+}
+
+export type ReportType = 'daily' | 'weekly' | 'monthly';
+
+export interface ReportTemplate {
+  id: string;
+  reportType: ReportType;
+  name: string;
+  content: string;
+  isBuiltin: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ReportGenerationStatus = 'pending' | 'success' | 'failed' | 'skipped';
+
+export interface GeneratedReportSourceStats {
+  voiceCount: number;
+  rewriteCount: number;
+  screenshotRecordCount: number;
+  analyzedScreenshotRecordCount: number;
+}
+
+export interface GeneratedReport {
+  id: string;
+  reportType: ReportType;
+  title: string;
+  rangeStart: string;
+  rangeEnd: string;
+  templateId: string;
+  templateName: string;
+  templateContent: string;
+  userMainWork: string | null;
+  status: ReportGenerationStatus;
+  content: string | null;
+  sourceStats: GeneratedReportSourceStats;
+  errorCode: string | null;
+  errorMessage: string | null;
+  scheduleKey?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DictationSession {
@@ -389,6 +474,25 @@ export interface UserPreferences {
   openAppHotkey: ShortcutBinding | null;
   /** 文本重写全局快捷键。null = 停用。默认 Ctrl/Cmd+Shift+R。 */
   rewriteHotkey: ShortcutBinding | null;
+  /** 截图记录全局快捷键。功能默认关闭；开启后默认 Enter。 */
+  screenshotRecordHotkey: ShortcutBinding | null;
+  /** 截图记录开关。默认关闭，用户主动开启。 */
+  screenshotRecordEnabled: boolean;
+  /** 截图记录暂停状态。不同于关闭，可从托盘快速恢复。 */
+  screenshotRecordPaused: boolean;
+  /** 单条截图记录合并窗口秒数。V1 默认 60。 */
+  screenshotRecordMergeWindowSeconds: number;
+  /** 单条截图记录最多提交给分析模型的截图数。V1 默认 5。 */
+  screenshotRecordMaxImagesPerAnalysis: number;
+  /** 统一上下文分析完整摘要提示词。影响语音、重写、截图记录的完整摘要。 */
+  contextAnalysisFullSummaryPrompt: string | null;
+  /** 每日定时生成日报开关。默认关闭。 */
+  dailyReportScheduleEnabled: boolean;
+  /** 每日定时生成日报时间，格式 HH:mm。默认 18:00。 */
+  dailyReportScheduleTime: string;
+  selectedDailyReportTemplateId: string;
+  selectedWeeklyReportTemplateId: string;
+  selectedMonthlyReportTemplateId: string;
   /** 是否保存重写历史。默认 true。 */
   rewriteSaveHistory: boolean;
   /** 文本重写当前激活的风格包 ID。null = 使用内置默认 (builtin.rewrite)。 */

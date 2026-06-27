@@ -12,6 +12,7 @@ import { AudioCueListener } from "./AudioCue";
 import { SettingsModal } from './SettingsModal';
 import { Overview } from '../pages/Overview';
 import { History } from '../pages/History';
+import { Reports } from '../pages/Reports';
 import { Vocab } from '../pages/Vocab';
 import { Style } from '../pages/Style';
 import { Translation } from '../pages/Translation';
@@ -48,6 +49,7 @@ interface NavItem {
 const NAV_BASE: Array<Omit<NavItem, 'name'>> = [
   { id: 'overview', icon: 'overview', cmp: Overview },
   { id: 'history', icon: 'history', cmp: History },
+  { id: 'reports', icon: 'doc', cmp: Reports },
   { id: 'vocab', icon: 'vocab', cmp: Vocab },
   { id: 'style', icon: 'style', cmp: Style },
   { id: 'translation', icon: 'translate', cmp: Translation },

@@ -75,6 +75,7 @@ export const zhCN = {
   nav: {
     overview: '概览',
     history: '历史',
+    reports: '报告',
     vocab: '词汇表',
     style: '风格',
     marketplace: '风格市场',

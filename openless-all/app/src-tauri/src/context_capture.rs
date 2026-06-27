@@ -1,9 +1,12 @@
 //! Sidecar context capture for voice and rewrite history.
 
+use std::collections::VecDeque;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use uuid::Uuid;
 
 use crate::persistence::ContextCaptureStore;
@@ -18,6 +21,92 @@ const ERROR_FULLSCREEN_SCREENSHOT_FAILED: &str = "fullScreenScreenshotFailed";
 const ERROR_TIMEOUT: &str = "contextCaptureTimeout";
 const ERROR_WORKER_DISCONNECTED: &str = "contextCaptureWorkerDisconnected";
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+const RECENT_PRIMARY_CAPTURE_LIMIT: usize = 16;
+
+#[derive(Debug, Clone)]
+pub(crate) struct RecentPrimaryCapture {
+    pub id: String,
+    pub captured_at: Instant,
+    pub history_type: ContextCaptureHistoryType,
+    pub window_title: Option<String>,
+    pub context_app: Option<String>,
+    pub conversation_window: Option<String>,
+}
+
+static RECENT_PRIMARY_CAPTURES: OnceLock<Mutex<VecDeque<RecentPrimaryCapture>>> = OnceLock::new();
+
+fn recent_primary_captures() -> &'static Mutex<VecDeque<RecentPrimaryCapture>> {
+    RECENT_PRIMARY_CAPTURES.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WindowIdentity {
+    pub window_title: Option<String>,
+    pub context_app: Option<String>,
+    pub conversation_window: Option<String>,
+}
+
+pub(crate) fn current_window_identity() -> Option<WindowIdentity> {
+    #[cfg(target_os = "windows")]
+    {
+        let title = windows_capture::foreground_window_title().ok()?;
+        if title.trim().is_empty() {
+            return None;
+        }
+        let (context_app, conversation_window) = parse_window_title(&title);
+        Some(WindowIdentity {
+            window_title: Some(title),
+            context_app,
+            conversation_window,
+        })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+pub(crate) fn remember_recent_primary_capture(
+    history_type: ContextCaptureHistoryType,
+    id: String,
+) {
+    if !matches!(
+        history_type,
+        ContextCaptureHistoryType::Voice | ContextCaptureHistoryType::Rewrite
+    ) {
+        return;
+    }
+    let identity = current_window_identity();
+    let recent = RecentPrimaryCapture {
+        id,
+        captured_at: Instant::now(),
+        history_type,
+        window_title: identity.as_ref().and_then(|value| value.window_title.clone()),
+        context_app: identity.as_ref().and_then(|value| value.context_app.clone()),
+        conversation_window: identity.and_then(|value| value.conversation_window),
+    };
+    let mut captures = recent_primary_captures().lock();
+    captures.push_back(recent);
+    while captures.len() > RECENT_PRIMARY_CAPTURE_LIMIT {
+        captures.pop_front();
+    }
+}
+
+pub(crate) fn take_recent_primary_capture_matching<F>(
+    window: Duration,
+    mut matches_identity: F,
+) -> Option<RecentPrimaryCapture>
+where
+    F: FnMut(&RecentPrimaryCapture) -> bool,
+{
+    let mut captures = recent_primary_captures().lock();
+    captures.retain(|capture| capture.captured_at.elapsed() <= window);
+    let index = captures
+        .iter()
+        .position(|capture| matches_identity(capture))?;
+    captures.remove(index)
+}
 
 pub fn capture_and_store(
     store: &ContextCaptureStore,
@@ -26,16 +115,28 @@ pub fn capture_and_store(
     retention_days: u32,
     max_entries: Option<u32>,
 ) -> Result<()> {
-    let capture = capture_context_with_timeout(store, history_type, history_id);
+    let id = Uuid::new_v4().to_string();
+    capture_and_store_with_id(store, id, history_type, history_id, retention_days, max_entries)
+}
+
+pub fn capture_and_store_with_id(
+    store: &ContextCaptureStore,
+    id: String,
+    history_type: ContextCaptureHistoryType,
+    history_id: String,
+    retention_days: u32,
+    max_entries: Option<u32>,
+) -> Result<()> {
+    let capture = capture_context_with_timeout(store, id, history_type, history_id);
     store.append_with_retention(capture, retention_days, max_entries)
 }
 
 fn capture_context_with_timeout(
     store: &ContextCaptureStore,
+    id: String,
     history_type: ContextCaptureHistoryType,
     history_id: String,
 ) -> ContextCaptureEntry {
-    let id = Uuid::new_v4().to_string();
     let screenshot_path = store.screenshot_path_for_id(&id);
     let (tx, rx) = std::sync::mpsc::channel();
     let worker_id = id.clone();

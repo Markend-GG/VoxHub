@@ -721,10 +721,10 @@ pub(super) fn action_hotkey_supervisor_loop(inner: Arc<Inner>, kind: ActionHotke
 
         let (tx, rx) = mpsc::channel::<ComboHotkeyEvent>();
         let (init_tx, init_rx) =
-            mpsc::sync_channel::<Result<ComboHotkeyMonitor, ComboHotkeyError>>(1);
+            mpsc::sync_channel::<Result<ActionHotkeyMonitor, ComboHotkeyError>>(1);
         let binding_for_main = binding.clone();
         let _ = app.run_on_main_thread(move || {
-            let result = ComboHotkeyMonitor::start(binding_for_main, tx);
+            let result = start_action_hotkey_monitor(kind, binding_for_main, tx);
             let _ = init_tx.send(result);
         });
 
@@ -803,6 +803,9 @@ pub(super) fn handle_action_hotkey_pressed(inner: &Arc<Inner>, kind: ActionHotke
                     run_rewrite_flow(&inner_clone);
                 })
                 .ok();
+        }
+        ActionHotkeyKind::ScreenshotRecord => {
+            crate::screenshot_record::handle_screenshot_record_hotkey(inner);
         }
     }
 }
@@ -892,11 +895,12 @@ pub(super) fn take_action_hotkey_on_main_thread(inner: &Arc<Inner>, kind: Action
 pub(super) fn action_hotkey_slot(
     inner: &Arc<Inner>,
     kind: ActionHotkeyKind,
-) -> &Mutex<Option<ComboHotkeyMonitor>> {
+) -> &Mutex<Option<ActionHotkeyMonitor>> {
     match kind {
         ActionHotkeyKind::SwitchStyle => &inner.switch_style_hotkey,
         ActionHotkeyKind::OpenApp => &inner.open_app_hotkey,
         ActionHotkeyKind::Rewrite => &inner.rewrite_hotkey,
+        ActionHotkeyKind::ScreenshotRecord => &inner.screenshot_record_hotkey,
     }
 }
 
@@ -909,6 +913,13 @@ pub(super) fn action_hotkey_binding(
         ActionHotkeyKind::SwitchStyle => prefs.switch_style_hotkey,
         ActionHotkeyKind::OpenApp => prefs.open_app_hotkey,
         ActionHotkeyKind::Rewrite => prefs.rewrite_hotkey,
+        ActionHotkeyKind::ScreenshotRecord => {
+            if prefs.screenshot_record_enabled {
+                prefs.screenshot_record_hotkey
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -927,6 +938,35 @@ pub(super) fn action_hotkey_bridge_thread_name(kind: ActionHotkeyKind) -> &'stat
         ActionHotkeyKind::SwitchStyle => "openless-switch-style-hotkey-bridge",
         ActionHotkeyKind::OpenApp => "openless-open-app-hotkey-bridge",
         ActionHotkeyKind::Rewrite => "openless-rewrite-hotkey-bridge",
+        ActionHotkeyKind::ScreenshotRecord => "openless-screenshot-record-hotkey-bridge",
+    }
+}
+
+pub(super) fn start_action_hotkey_monitor(
+    kind: ActionHotkeyKind,
+    binding: crate::types::ShortcutBinding,
+    tx: mpsc::Sender<ComboHotkeyEvent>,
+) -> Result<ActionHotkeyMonitor, ComboHotkeyError> {
+    match kind {
+        ActionHotkeyKind::ScreenshotRecord => {
+            ActionHotkeyMonitor::start_passthrough(binding, tx)
+        }
+        ActionHotkeyKind::SwitchStyle | ActionHotkeyKind::OpenApp | ActionHotkeyKind::Rewrite => {
+            ActionHotkeyMonitor::start_registered(binding, tx)
+        }
+    }
+}
+
+pub(super) fn update_action_hotkey_monitor(
+    kind: ActionHotkeyKind,
+    monitor: &mut ActionHotkeyMonitor,
+    binding: crate::types::ShortcutBinding,
+) -> Result<(), ComboHotkeyError> {
+    match kind {
+        ActionHotkeyKind::ScreenshotRecord => monitor.update_passthrough(binding),
+        ActionHotkeyKind::SwitchStyle | ActionHotkeyKind::OpenApp | ActionHotkeyKind::Rewrite => {
+            monitor.update_registered(binding)
+        }
     }
 }
 
@@ -1066,8 +1106,12 @@ pub(super) fn reset_shortcut_held_state(inner: &Arc<Inner>) {
     }
     if let Some(switch_style) = prefs.switch_style_hotkey.as_ref() {
         if !is_modifier_only_shortcut(switch_style) {
-            if let Some(monitor) = inner.switch_style_hotkey.lock().as_ref() {
-                if let Err(e) = monitor.update_binding(switch_style.clone()) {
+            if let Some(monitor) = inner.switch_style_hotkey.lock().as_mut() {
+                if let Err(e) = update_action_hotkey_monitor(
+                    ActionHotkeyKind::SwitchStyle,
+                    monitor,
+                    switch_style.clone(),
+                ) {
                     log::warn!("[coord] reset switch-style hotkey latch failed: {e}");
                 }
             }
@@ -1075,8 +1119,10 @@ pub(super) fn reset_shortcut_held_state(inner: &Arc<Inner>) {
     }
     if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
         if !is_modifier_only_shortcut(open_app) {
-            if let Some(monitor) = inner.open_app_hotkey.lock().as_ref() {
-                if let Err(e) = monitor.update_binding(open_app.clone()) {
+            if let Some(monitor) = inner.open_app_hotkey.lock().as_mut() {
+                if let Err(e) =
+                    update_action_hotkey_monitor(ActionHotkeyKind::OpenApp, monitor, open_app.clone())
+                {
                     log::warn!("[coord] reset open-app hotkey latch failed: {e}");
                 }
             }
@@ -1084,8 +1130,10 @@ pub(super) fn reset_shortcut_held_state(inner: &Arc<Inner>) {
     }
     if let Some(rewrite) = prefs.rewrite_hotkey.as_ref() {
         if !is_modifier_only_shortcut(rewrite) {
-            if let Some(monitor) = inner.rewrite_hotkey.lock().as_ref() {
-                if let Err(e) = monitor.update_binding(rewrite.clone()) {
+            if let Some(monitor) = inner.rewrite_hotkey.lock().as_mut() {
+                if let Err(e) =
+                    update_action_hotkey_monitor(ActionHotkeyKind::Rewrite, monitor, rewrite.clone())
+                {
                     log::warn!("[coord] reset rewrite hotkey latch failed: {e}");
                 }
             }

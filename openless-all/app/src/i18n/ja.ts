@@ -79,6 +79,7 @@ export const ja: typeof zhCN = {
   nav: {
     overview: '概要',
     history: '履歴',
+    reports: 'レポート',
     vocab: '語彙',
     style: 'スタイル',
     marketplace: 'マーケット',

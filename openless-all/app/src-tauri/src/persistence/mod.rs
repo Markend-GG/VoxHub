@@ -29,10 +29,13 @@ mod context_analysis;
 mod context_capture;
 mod credentials;
 mod dictionary;
+mod generated_report;
 mod history;
 mod paths;
 mod preferences;
+mod report_template;
 mod rewrite_history;
+mod screenshot_record;
 mod style_pack;
 
 pub use correction::*;
@@ -40,10 +43,13 @@ pub use context_analysis::*;
 pub use context_capture::*;
 pub use credentials::*;
 pub use dictionary::*;
+pub use generated_report::*;
 pub use history::*;
 pub use paths::*;
 pub use preferences::*;
+pub use report_template::*;
 pub use rewrite_history::*;
+pub use screenshot_record::*;
 pub use style_pack::*;
 
 const HISTORY_CAP: usize = 200;

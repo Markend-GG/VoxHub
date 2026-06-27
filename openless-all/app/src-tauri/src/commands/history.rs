@@ -110,6 +110,9 @@ pub fn reanalyze_context_history(
                 },
             );
         }
+        ContextCaptureHistoryType::ScreenshotRecord => {
+            return Err("请使用截图记录的重新分析入口".into());
+        }
     }
 
     Ok(())

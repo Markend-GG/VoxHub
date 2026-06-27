@@ -77,6 +77,7 @@ export const zhTW: typeof zhCN = {
   nav: {
     overview: '概覽',
     history: '歷史',
+    reports: '報告',
     vocab: '詞彙表',
     style: '風格',
     marketplace: '風格市場',

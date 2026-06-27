@@ -77,6 +77,7 @@ export const en: typeof zhCN = {
   nav: {
     overview: 'Overview',
     history: 'History',
+    reports: 'Reports',
     vocab: 'Vocabulary',
     style: 'Style',
     marketplace: 'Marketplace',

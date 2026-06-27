@@ -44,6 +44,17 @@ impl ContextAnalysisStore {
         }
     }
 
+    #[cfg(test)]
+    fn new_test(name: &str) -> Self {
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "openless_context_analysis_{name}_{}.json",
+                uuid::Uuid::new_v4()
+            )),
+            lock: Arc::new(Mutex::new(())),
+        }
+    }
+
     pub fn list(&self) -> Result<Vec<ContextAnalysisResult>> {
         let _guard = self.lock.lock();
         self.read_locked()
@@ -62,6 +73,77 @@ impl ContextAnalysisStore {
             entries.truncate(HISTORY_CAP);
         }
         self.write_locked(&entries)
+    }
+
+    pub fn upsert_if_generation_current(
+        &self,
+        result: ContextAnalysisResult,
+        expected_generation: Option<&str>,
+    ) -> Result<bool> {
+        let _guard = self.lock.lock();
+        let mut entries = self.read_locked()?;
+        let existing = entries.iter().find(|entry| {
+            entry.linked_history_type == result.linked_history_type
+                && entry.linked_history_id == result.linked_history_id
+                && entry.context_capture_id == result.context_capture_id
+        });
+        let current_generation = existing
+            .and_then(|entry| entry.analysis_generation.as_deref());
+        if current_generation != expected_generation {
+            return Ok(false);
+        }
+        entries.retain(|entry| {
+            !(entry.linked_history_type == result.linked_history_type
+                && entry.linked_history_id == result.linked_history_id
+                && entry.context_capture_id == result.context_capture_id)
+        });
+        entries.insert(0, result);
+        if entries.len() > HISTORY_CAP {
+            entries.truncate(HISTORY_CAP);
+        }
+        self.write_locked(&entries)?;
+        Ok(true)
+    }
+
+    pub fn upsert_if_generation_newer(&self, result: ContextAnalysisResult) -> Result<bool> {
+        let _guard = self.lock.lock();
+        let mut entries = self.read_locked()?;
+        let existing = entries.iter().find(|entry| {
+            entry.linked_history_type == result.linked_history_type
+                && entry.linked_history_id == result.linked_history_id
+                && entry.context_capture_id == result.context_capture_id
+        });
+        let current_generation = existing
+            .and_then(|entry| entry.analysis_generation.as_deref());
+        let next_generation = result.analysis_generation.as_deref();
+        if generation_is_newer_or_equal(current_generation, next_generation) {
+            return Ok(false);
+        }
+        entries.retain(|entry| {
+            !(entry.linked_history_type == result.linked_history_type
+                && entry.linked_history_id == result.linked_history_id
+                && entry.context_capture_id == result.context_capture_id)
+        });
+        entries.insert(0, result);
+        if entries.len() > HISTORY_CAP {
+            entries.truncate(HISTORY_CAP);
+        }
+        self.write_locked(&entries)?;
+        Ok(true)
+    }
+
+    pub fn latest_for_context(
+        &self,
+        history_type: ContextCaptureHistoryType,
+        history_id: &str,
+        context_capture_id: &str,
+    ) -> Result<Option<ContextAnalysisResult>> {
+        let _guard = self.lock.lock();
+        Ok(self.read_locked()?.into_iter().find(|entry| {
+            entry.linked_history_type == history_type
+                && entry.linked_history_id == history_id
+                && entry.context_capture_id == context_capture_id
+        }))
     }
 
     pub fn delete_for_history(
@@ -118,6 +200,14 @@ impl ContextAnalysisStore {
     }
 }
 
+fn generation_is_newer_or_equal(current: Option<&str>, next: Option<&str>) -> bool {
+    match (current, next) {
+        (Some(current), Some(next)) => current >= next,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
 pub fn enrich_context_entries_with_analysis(
     contexts: &mut [ContextCaptureEntry],
     analysis_entries: &[ContextAnalysisResult],
@@ -146,6 +236,8 @@ pub fn pending_analysis_result(context: &ContextCaptureEntry) -> ContextAnalysis
         provider_id: None,
         model: None,
         prompt_version: crate::context_vision_analysis::PROMPT_VERSION.to_string(),
+        prompt_hash: None,
+        analysis_generation: None,
         schema_version: 1,
         input_mode: "screenshot_text".to_string(),
         image_mime_type: None,
@@ -160,6 +252,8 @@ pub fn pending_analysis_result(context: &ContextCaptureEntry) -> ContextAnalysis
         topic: None,
         user_intent: None,
         activity_type: Default::default(),
+        work_status: Default::default(),
+        evidence_level: Default::default(),
         decision: None,
         action_items: Vec::new(),
         related_people: Vec::new(),
@@ -197,8 +291,7 @@ mod tests {
 
     #[test]
     fn upsert_replaces_existing_analysis_for_same_context() {
-        let store = ContextAnalysisStore::new_fallback();
-        let _ = store.clear_for_history_type(ContextCaptureHistoryType::Voice);
+        let store = ContextAnalysisStore::new_test("upsert");
         let ctx = context("ctx-a", "hist-a");
         let mut first = pending_analysis_result(&ctx);
         first.status = ContextAnalysisStatus::Skipped;
@@ -229,5 +322,57 @@ mod tests {
         let mut contexts = vec![ctx];
         enrich_context_entries_with_analysis(&mut contexts, &[result]);
         assert!(contexts[0].analysis.is_some());
+    }
+
+    #[test]
+    fn newer_generation_pending_replaces_older_but_not_reverse() {
+        let store = ContextAnalysisStore::new_test("generation");
+        let ctx = context("ctx-generation", "hist-generation");
+
+        let mut older = pending_analysis_result(&ctx);
+        older.analysis_generation = Some("001".into());
+        let mut newer = pending_analysis_result(&ctx);
+        newer.analysis_generation = Some("002".into());
+
+        assert!(store.upsert_if_generation_newer(older.clone()).unwrap());
+        assert!(store.upsert_if_generation_newer(newer.clone()).unwrap());
+        assert!(!store.upsert_if_generation_newer(older).unwrap());
+
+        let current = store
+            .latest_for_context(ContextCaptureHistoryType::Voice, "hist-generation", "ctx-generation")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.analysis_generation.as_deref(), Some("002"));
+    }
+
+    #[test]
+    fn final_result_requires_matching_generation() {
+        let store = ContextAnalysisStore::new_test("final-generation");
+        let ctx = context("ctx-final-generation", "hist-final-generation");
+
+        let mut pending = pending_analysis_result(&ctx);
+        pending.analysis_generation = Some("002".into());
+        store.upsert(pending).unwrap();
+
+        let mut stale = pending_analysis_result(&ctx);
+        stale.status = ContextAnalysisStatus::Success;
+        stale.analysis_generation = Some("001".into());
+        assert!(!store.upsert_if_generation_current(stale, Some("001")).unwrap());
+
+        let mut current = pending_analysis_result(&ctx);
+        current.status = ContextAnalysisStatus::Success;
+        current.analysis_generation = Some("002".into());
+        assert!(store.upsert_if_generation_current(current, Some("002")).unwrap());
+
+        let stored = store
+            .latest_for_context(
+                ContextCaptureHistoryType::Voice,
+                "hist-final-generation",
+                "ctx-final-generation",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ContextAnalysisStatus::Success);
+        assert_eq!(stored.analysis_generation.as_deref(), Some("002"));
     }
 }

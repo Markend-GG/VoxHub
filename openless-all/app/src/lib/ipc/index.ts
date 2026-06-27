@@ -107,6 +107,7 @@ export {
     setSwitchStyleHotkey,
     setOpenAppHotkey,
     setRewriteHotkey,
+    setScreenshotRecordHotkey,
     setShortcutRecordingActive,
 } from "./hotkeys"
 
@@ -210,3 +211,19 @@ export {
     runRewriteSelectedText,
 } from "./rewrite"
 // setRewriteHotkey is exported from ./hotkeys above
+
+// reports / screenshot records
+export type { GenerateReportRequest } from "./reports"
+export {
+    listScreenshotRecords,
+    deleteScreenshotRecord,
+    clearScreenshotRecords,
+    reanalyzeScreenshotRecord,
+    listReportTemplates,
+    saveReportTemplate,
+    deleteReportTemplate,
+    generateReport,
+    listGeneratedReports,
+    getGeneratedReport,
+    deleteGeneratedReport,
+} from "./reports"

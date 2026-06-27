@@ -6,9 +6,9 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
-import { clearHistory, clearRewriteHistory, deleteHistoryEntry, deleteRewriteHistoryEntry, listHistory, listRewriteHistory, readAudioRecording, readContextScreenshot, reanalyzeContextHistory, retranscribeRecording } from '../lib/ipc';
+import { clearHistory, clearRewriteHistory, clearScreenshotRecords, deleteHistoryEntry, deleteRewriteHistoryEntry, deleteScreenshotRecord, listHistory, listRewriteHistory, listScreenshotRecords, readAudioRecording, readContextScreenshot, reanalyzeContextHistory, reanalyzeScreenshotRecord, retranscribeRecording, setSettings } from '../lib/ipc';
 import { useMobileLayout } from '../lib/useMobileLayout';
-import type { ContextCaptureEntry, DictationSession, PolishMode } from '../lib/types';
+import type { ContextCaptureEntry, ContextAnalysisResult, DictationSession, PolishMode, ScreenshotRecord } from '../lib/types';
 import type { RewriteHistoryEntry } from '../lib/ipc/rewrite';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
@@ -16,6 +16,16 @@ import { chipSelectedStyle } from './settings/shared';
 
 const CONTEXT_SCREENSHOT_CACHE_LIMIT = 24;
 const REANALYSIS_STATUS_CLEAR_MS = 4_000;
+const DEFAULT_CONTEXT_ANALYSIS_FULL_SUMMARY_PROMPT = `fullSummary 是日报、周报、月报和历史复盘的上游材料，不是截图说明。请输出 100 到 300 个中文字符，让报告生成模型即使不看截图也能理解这条历史的工作含义：
+- 必须交代当前工作背景，例如项目、页面、对话、文档、任务或正在处理的问题。
+- 必须说明本条历史的来源语义：语音历史是用户通过语音表达、记录、询问或确认的内容；重写历史是用户对选中文本做表达调整或准备发送；截图记录只是屏幕中正在查看、讨论、处理或记录的上下文线索。
+- 必须体现 workStatus 和 evidenceLevel 对应的事实强度。没有明确完成证据时，不要写成“已完成工作”。
+- 对语音历史和重写历史，结合用户原文、处理后文本和截图上下文解释业务含义，不要只描述界面。
+- 对截图记录，除非截图中有明确完成、提交、发布、上线、修复完成、测试通过或确认完成证据，否则应写成“正在查看/正在讨论/正在处理/待确认”。
+- 提取可被报告复用的信息：进展、结论、待办、风险、协作对象、项目、交付物或后续价值；没有明确依据时写“未形成明确完成事项”或“待确认”。
+- 保留必要的不确定性，不要把猜测包装成事实，不要补充截图、原文和窗口元数据之外的事实。
+- 不输出大段 OCR、聊天逐字稿或与任务无关的 UI 描述。
+- 不泄露 API Key、token、验证码、手机号、邮箱、地址、订单号、完整链接等敏感信息原文；如可见敏感信息，只做泛化说明。`;
 
 type ReanalysisUiStatus = 'busy' | 'queued' | 'success' | 'failed' | 'skipped' | 'disabled';
 
@@ -184,7 +194,7 @@ export function History() {
   const os = detectOS();
   const FILTERS = useFilters();
   const MODE_LABEL = useModeLabel();
-  const [historyKind, setHistoryKind] = useState<'voice' | 'rewrite'>('voice');
+  const [historyKind, setHistoryKind] = useState<'voice' | 'rewrite' | 'screenshotRecord'>('voice');
   const [filter, setFilter] = useState<'all' | PolishMode>('all');
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
@@ -219,6 +229,29 @@ export function History() {
   const { prefs } = useHotkeySettings();
   const mobile = useMobileLayout();
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  const [promptOpen, setPromptOpen] = useState(false);
+  const [promptDraft, setPromptDraft] = useState('');
+
+  useEffect(() => {
+    if (!promptOpen) return;
+    setPromptDraft(prefs?.contextAnalysisFullSummaryPrompt ?? DEFAULT_CONTEXT_ANALYSIS_FULL_SUMMARY_PROMPT);
+  }, [promptOpen, prefs?.contextAnalysisFullSummaryPrompt]);
+
+  const savePromptDraft = async () => {
+    if (!prefs) return;
+    const trimmed = promptDraft.trim();
+    if (!trimmed) {
+      setActionError(t('history.contextAnalysis.promptEmpty', '提示词不能为空'));
+      return;
+    }
+    try {
+      await setSettings({ ...prefs, contextAnalysisFullSummaryPrompt: trimmed });
+      setPromptOpen(false);
+      setActionError(null);
+    } catch (error) {
+      setActionError(errorMessage(error));
+    }
+  };
 
   const clearReanalysisStateLater = useCallback((key: string) => {
     const existing = reanalysisClearTimersRef.current[key];
@@ -491,13 +524,23 @@ export function History() {
         desc={t('history.desc')}
         right={
           <div style={{ display: 'flex', gap: 8 }}>
+            <Btn icon="sparkle" variant="ghost" size="sm" onClick={() => setPromptOpen(true)}>{t('history.contextAnalysis.promptSettings', '截图分析提示词')}</Btn>
             <Btn icon="refresh" variant="ghost" size="sm" onClick={() => void refresh()}>{t('common.refresh')}</Btn>
             <Btn icon="trash" variant="ghost" size="sm" onClick={onClear}>{t('common.clear')}</Btn>
           </div>
         }
       />
+      {promptOpen && (
+        <ContextAnalysisPromptModal
+          value={promptDraft}
+          onChange={setPromptDraft}
+          onClose={() => setPromptOpen(false)}
+          onSave={() => void savePromptDraft()}
+          onRestoreDefault={() => setPromptDraft(DEFAULT_CONTEXT_ANALYSIS_FULL_SUMMARY_PROMPT)}
+        />
+      )}
       <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-        {(['voice', 'rewrite'] as const).map(kind => (
+        {(['voice', 'rewrite', 'screenshotRecord'] as const).map(kind => (
           <button
             key={kind}
             onClick={() => setHistoryKind(kind)}
@@ -508,11 +551,13 @@ export function History() {
               color: historyKind === kind ? '#fff' : 'var(--ol-ink-3)',
             }}
           >
-            {kind === 'voice' ? t('history.tabs.voice', '语音历史') : t('history.tabs.rewrite', '重写历史')}
+            {historyTabLabel(kind, t)}
           </button>
         ))}
       </div>
-      {historyKind === 'rewrite' ? (
+      {historyKind === 'screenshotRecord' ? (
+        <ScreenshotRecordHistoryView />
+      ) : historyKind === 'rewrite' ? (
         <RewriteHistoryView />
       ) : (
       <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
@@ -1131,10 +1176,308 @@ function RewriteHistoryView() {
   );
 }
 
+function ScreenshotRecordHistoryView() {
+  const { t } = useTranslation();
+  const mobile = useMobileLayout();
+  const [items, setItems] = useState<ScreenshotRecord[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await listScreenshotRecords();
+      setItems(data);
+      setSelectedId(prev => (prev && data.some(entry => entry.id === prev) ? prev : data[0]?.id ?? null));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const selected = items.find(entry => entry.id === selectedId) ?? items[0] ?? null;
+
+  const onClear = async () => {
+    if (items.length === 0) return;
+    if (!confirm(t('history.confirmClear', { count: items.length }))) return;
+    try {
+      await clearScreenshotRecords();
+      setItems([]);
+      setSelectedId(null);
+      setActionError(null);
+    } catch (err) {
+      setActionError(errorMessage(err));
+    }
+  };
+
+  const onDelete = async (id: string) => {
+    try {
+      await deleteScreenshotRecord(id);
+      setItems(prev => prev.filter(entry => entry.id !== id));
+      setSelectedId(prev => (prev === id ? null : prev));
+      setActionError(null);
+    } catch (err) {
+      setActionError(errorMessage(err));
+    }
+  };
+
+  const onReanalyze = async (id: string) => {
+    setBusyId(id);
+    try {
+      await reanalyzeScreenshotRecord(id);
+      await refresh();
+      setActionError(null);
+    } catch (err) {
+      setActionError(errorMessage(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  if (loading) {
+    return <Card><div style={{ fontSize: 12, color: 'var(--ol-ink-4)' }}>{t('common.loading')}</div></Card>;
+  }
+  if (error) {
+    return <Card><div style={{ fontSize: 12, color: 'var(--ol-err)' }}>{t('history.loadFailed', { err: error })}</div></Card>;
+  }
+  if (items.length === 0) {
+    return (
+      <Card>
+        <div style={{ padding: 40, textAlign: 'center', fontSize: 13, color: 'var(--ol-ink-4)' }}>
+          {t('history.screenshotRecord.empty', '暂无截图记录')}
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
+      {(!mobile || !mobileDetailOpen) && (
+        <Card padding={0} style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <div style={{ padding: '12px 14px', borderBottom: '0.5px solid var(--ol-line)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+            <div style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
+              {t('history.summary', { total: items.length, shown: items.length })}
+            </div>
+            <Btn icon="trash" variant="ghost" size="sm" onClick={onClear}>{t('common.clear')}</Btn>
+          </div>
+          {actionError && (
+            <div style={{ margin: 8, padding: '9px 10px', borderRadius: 8, background: 'rgba(239,68,68,0.08)', color: 'var(--ol-red, #ef4444)', fontSize: 12, lineHeight: 1.45 }}>
+              {actionError}
+            </div>
+          )}
+          <div className="ol-thinscroll" style={{ overflowY: 'auto', flex: 1 }}>
+            {items.map(entry => (
+              <button
+                key={entry.id}
+                onClick={() => {
+                  setSelectedId(entry.id);
+                  if (mobile) setMobileDetailOpen(true);
+                }}
+                style={{
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '10px 14px',
+                  border: 0,
+                  borderBottom: '0.5px solid var(--ol-line)',
+                  background: entry.id === selected?.id ? 'rgba(37,99,235,0.06)' : 'transparent',
+                  boxShadow: entry.id === selected?.id ? 'inset 2px 0 0 var(--ol-blue)' : 'none',
+                  cursor: 'default',
+                  fontFamily: 'inherit',
+                }}
+              >
+                <div style={{ fontSize: 12, color: 'var(--ol-ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {entry.conversationWindow || entry.windowTitle || t('history.screenshotRecord.unknownWindow', '未知窗口')}
+                </div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 10, color: 'var(--ol-ink-4)' }}>{formatTime(entry.createdAt)}</span>
+                  <Pill size="sm" tone={entry.status === 'success' ? 'blue' : 'outline'}>{screenshotRecordStatusLabel(entry.status, t)}</Pill>
+                  <span style={{ fontSize: 10, color: 'var(--ol-ink-4)' }}>
+                    {t('history.screenshotRecord.count', '{{count}} 张截图', { count: entry.screenshotIds.length })}
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {(!mobile || mobileDetailOpen) && selected && (
+        <Card className="ol-thinscroll" style={{ overflowY: 'auto', padding: 20 }}>
+          {mobile && (
+            <div style={{ marginBottom: 12 }}>
+              <Btn icon="chevLeft" variant="ghost" size="sm" onClick={() => setMobileDetailOpen(false)}>
+                {t('history.backToList')}
+              </Btn>
+            </div>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 13, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)' }}>{formatTime(selected.createdAt)}</span>
+              <Pill size="sm" tone={selected.status === 'success' ? 'blue' : 'outline'}>{screenshotRecordStatusLabel(selected.status, t)}</Pill>
+              <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
+                {t('history.screenshotRecord.triggerCount', '触发 {{count}} 次', { count: selected.triggerCount })}
+              </span>
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <Btn icon="refresh" variant="ghost" size="sm" disabled={busyId === selected.id || selected.status === 'analyzing' || selected.status === 'collecting' || selected.status === 'queued'} onClick={() => void onReanalyze(selected.id)}>
+                {busyId === selected.id || selected.status === 'queued' || selected.status === 'analyzing' ? t('history.contextAnalysis.reanalyzing', '分析中') : t('history.contextAnalysis.reanalyze', '重新分析')}
+              </Btn>
+              <Btn icon="trash" variant="ghost" size="sm" onClick={() => void onDelete(selected.id)}>{t('common.delete')}</Btn>
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 12 }}>
+            <ContextMeta label={t('history.contextCapture.app', '获取应用')} value={selected.contextApp} />
+            <ContextMeta label={t('history.contextCapture.window', '对话窗口')} value={selected.conversationWindow} />
+            <ContextMeta label={t('history.contextAnalysis.status', '分析状态')} value={screenshotRecordStatusLabel(selected.status, t)} />
+            <ContextMeta label={t('history.contextAnalysis.duration', '分析耗时')} value={selected.analysis ? formatContextAnalysisDuration(selected.analysis) : null} />
+            <ContextMeta label={t('history.screenshotRecord.submitted', '提交截图')} value={`${selected.submittedScreenshotIds.length}/${selected.screenshotIds.length}`} />
+          </div>
+          {selected.windowTitle && (
+            <div style={{ marginBottom: 12, fontSize: 11, color: 'var(--ol-ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={selected.windowTitle}>
+              {selected.windowTitle}
+            </div>
+          )}
+          {selected.analysis && (
+            <div style={{ marginBottom: 14, padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
+              <ContextAnalysisSummary analysis={selected.analysis} />
+            </div>
+          )}
+          {selected.errorCode && (
+            <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--ol-err)' }}>
+              {contextAnalysisStatusLabel(selected.analysis?.status ?? 'failed', selected.errorCode, t)}
+              {selected.errorMessage ? `：${selected.errorMessage}` : ''}
+            </div>
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {selected.screenshotIds.map(contextId => (
+              <ContextCapturePanel
+                key={contextId}
+                context={screenshotContextFromRecord(selected, contextId)}
+                onReanalyze={() => void onReanalyze(selected.id)}
+              />
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 function errorMessage(error: unknown): string {
   if (typeof error === 'string') return error;
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function historyTabLabel(
+  kind: 'voice' | 'rewrite' | 'screenshotRecord',
+  t: ReturnType<typeof useTranslation>['t'],
+): string {
+  if (kind === 'voice') return t('history.tabs.voice', '语音历史');
+  if (kind === 'rewrite') return t('history.tabs.rewrite', '重写历史');
+  return t('history.tabs.screenshotRecord', '截图记录');
+}
+
+function ContextAnalysisPromptModal({
+  value,
+  onChange,
+  onClose,
+  onSave,
+  onRestoreDefault,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+  onRestoreDefault: () => void;
+}) {
+  const { t } = useTranslation();
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={t('history.contextAnalysis.promptSettings', '截图分析提示词')}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1900,
+        display: 'grid',
+        placeItems: 'center',
+        padding: 24,
+        background: 'rgba(9,12,18,0.34)',
+        backdropFilter: 'blur(4px)',
+      }}
+      onClick={onClose}
+    >
+      <div
+        onClick={event => event.stopPropagation()}
+        style={{
+          width: 'min(720px, 100%)',
+          maxHeight: 'min(720px, 100%)',
+          display: 'flex',
+          flexDirection: 'column',
+          borderRadius: 10,
+          background: 'var(--ol-surface)',
+          border: '0.5px solid var(--ol-line-strong)',
+          boxShadow: '0 18px 64px rgba(0,0,0,0.22)',
+          overflow: 'hidden',
+        }}
+      >
+        <div style={{ padding: '16px 18px', borderBottom: '0.5px solid var(--ol-line)' }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>
+            {t('history.contextAnalysis.promptSettings', '截图分析提示词')}
+          </div>
+          <div style={{ marginTop: 6, fontSize: 12, lineHeight: 1.55, color: 'var(--ol-ink-4)' }}>
+            {t(
+              'history.contextAnalysis.promptSettingsDesc',
+              '用于控制语音历史、重写历史、截图记录的完整摘要生成方式。完整摘要会作为后续日报、周报、月报的主要输入，请保持可复盘、可汇总，并避免把截图记录误写成已完成工作。',
+            )}
+          </div>
+        </div>
+        <div style={{ padding: 18, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <textarea
+            value={value}
+            onChange={event => onChange(event.target.value)}
+            style={{
+              width: '100%',
+              minHeight: 320,
+              resize: 'vertical',
+              borderRadius: 8,
+              border: '0.5px solid var(--ol-line-strong)',
+              background: 'var(--ol-surface-2)',
+              color: 'var(--ol-ink-1)',
+              fontSize: 12,
+              lineHeight: 1.6,
+              fontFamily: 'var(--ol-font-mono)',
+              padding: 12,
+              outline: 'none',
+            }}
+          />
+          <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>
+            {t('history.contextAnalysis.promptSettingsHint', '保存后只影响新分析和手动重新分析，不会自动重跑旧历史。')}
+          </div>
+        </div>
+        <div style={{ padding: '12px 18px', borderTop: '0.5px solid var(--ol-line)', display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+          <Btn variant="ghost" size="sm" onClick={onRestoreDefault}>{t('common.restoreDefault', '恢复默认')}</Btn>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Btn variant="ghost" size="sm" onClick={onClose}>{t('common.cancel')}</Btn>
+            <Btn variant="primary" size="sm" onClick={onSave}>{t('common.save')}</Btn>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** 当 session.hasAudioRecording 为 true 时渲染：一个加载按钮 + 拿到字节后切换为
@@ -1346,6 +1689,8 @@ function ContextAnalysisPanel({
             <ContextMeta label={t('history.contextAnalysis.status', '分析状态')} value={contextAnalysisStatusLabel(analysis.status, analysis.errorCode, t)} />
             <ContextMeta label={t('history.contextAnalysis.conversationName', '对话名称')} value={analysis.conversationName} />
             <ContextMeta label={t('history.contextAnalysis.topic', '主题')} value={analysis.topic} />
+            <ContextMeta label={t('history.contextAnalysis.workStatus', '工作状态')} value={contextAnalysisWorkStatusLabel(analysis.workStatus, t)} />
+            <ContextMeta label={t('history.contextAnalysis.evidenceLevel', '证据强度')} value={contextAnalysisEvidenceLevelLabel(analysis.evidenceLevel, t)} />
             <ContextMeta label={t('history.contextAnalysis.confidence', '置信度')} value={formatConfidence(analysis.confidence)} />
             <ContextMeta label={t('history.contextAnalysis.duration', '分析耗时')} value={analysisDuration} />
           </div>
@@ -1374,6 +1719,12 @@ function ContextAnalysisPanel({
               {analysis.visualEvidence.length > 0 && <AnalysisBlock label={t('history.contextAnalysis.visualEvidence', '视觉依据')} value={analysis.visualEvidence.join('\n')} />}
               <AnalysisBlock label={t('history.contextAnalysis.contextType', '上下文类型')} value={analysis.detectedContextType} />
               <AnalysisBlock label={t('history.contextAnalysis.activityType', '活动类型')} value={analysis.activityType} />
+              {contextAnalysisWorkStatusLabel(analysis.workStatus, t) && (
+                <AnalysisBlock label={t('history.contextAnalysis.workStatus', '工作状态')} value={contextAnalysisWorkStatusLabel(analysis.workStatus, t)!} />
+              )}
+              {contextAnalysisEvidenceLevelLabel(analysis.evidenceLevel, t) && (
+                <AnalysisBlock label={t('history.contextAnalysis.evidenceLevel', '证据强度')} value={contextAnalysisEvidenceLevelLabel(analysis.evidenceLevel, t)!} />
+              )}
               <AnalysisBlock label={t('history.contextAnalysis.sensitive', '敏感信息')} value={analysis.sensitiveContentVisible ? t('common.yes', '是') : t('common.no', '否')} />
               {analysis.uncertaintyReason && <AnalysisBlock label={t('history.contextAnalysis.uncertaintyReason', '不确定原因')} value={analysis.uncertaintyReason} />}
               {analysis.errorCode && <AnalysisBlock label={t('history.contextAnalysis.errorCode', '错误原因')} value={analysis.errorCode} />}
@@ -1391,6 +1742,70 @@ function ContextAnalysisPanel({
       )}
     </div>
   );
+}
+
+function ContextAnalysisSummary({ analysis }: { analysis: ContextAnalysisResult }) {
+  const { t } = useTranslation();
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+        <ContextMeta label={t('history.contextAnalysis.conversationName', '对话名称')} value={analysis.conversationName} />
+        <ContextMeta label={t('history.contextAnalysis.topic', '主题')} value={analysis.topic} />
+        <ContextMeta label={t('history.contextAnalysis.workStatus', '工作状态')} value={contextAnalysisWorkStatusLabel(analysis.workStatus, t)} />
+        <ContextMeta label={t('history.contextAnalysis.evidenceLevel', '证据强度')} value={contextAnalysisEvidenceLevelLabel(analysis.evidenceLevel, t)} />
+        <ContextMeta label={t('history.contextAnalysis.confidence', '置信度')} value={formatConfidence(analysis.confidence)} />
+      </div>
+      {analysis.briefSummary && <AnalysisBlock label={t('history.contextAnalysis.briefSummary', '简要摘要')} value={analysis.briefSummary} />}
+      {analysis.fullSummary && <AnalysisBlock label={t('history.contextAnalysis.fullSummary', '完整摘要')} value={analysis.fullSummary} />}
+      {analysis.decision && <AnalysisBlock label={t('history.contextAnalysis.decision', '决策/结论')} value={analysis.decision} />}
+      {analysis.actionItems.length > 0 && (
+        <AnalysisBlock
+          label={t('history.contextAnalysis.actionItems', '待办事项')}
+          value={analysis.actionItems.map(item => `${item.text}${item.owner ? `（${item.owner}）` : ''}`).join('\n')}
+        />
+      )}
+      {analysis.promptHash && <AnalysisBlock label={t('history.contextAnalysis.promptHash', '提示词哈希')} value={analysis.promptHash.slice(0, 12)} />}
+    </div>
+  );
+}
+
+function screenshotContextFromRecord(record: ScreenshotRecord, contextId: string): ContextCaptureEntry {
+  return {
+    id: contextId,
+    createdAt: record.createdAt,
+    contextApp: record.contextApp,
+    conversationWindow: record.conversationWindow,
+    windowTitle: record.windowTitle,
+    captureStatus: 'success',
+    captureSource: null,
+    screenshotRef: `${contextId}.bmp`,
+    linkedHistoryType: 'screenshotRecord',
+    linkedHistoryId: record.id,
+    errorCode: null,
+    analysis: null,
+  };
+}
+
+function screenshotRecordStatusLabel(
+  status: ScreenshotRecord['status'],
+  t: ReturnType<typeof useTranslation>['t'],
+): string {
+  switch (status) {
+    case 'collecting':
+      return t('history.screenshotRecord.statusCollecting', '采集中');
+    case 'queued':
+      return t('history.screenshotRecord.statusQueued', '已入队');
+    case 'analyzing':
+      return t('history.screenshotRecord.statusAnalyzing', '分析中');
+    case 'success':
+      return t('history.screenshotRecord.statusSuccess', '成功');
+    case 'failed':
+      return t('history.screenshotRecord.statusFailed', '失败');
+    case 'skipped':
+      return t('history.screenshotRecord.statusSkipped', '已跳过');
+    default:
+      return status;
+  }
 }
 
 function AnalysisBlock({ label, value }: { label: string; value: string }) {
@@ -1571,6 +1986,30 @@ function contextAnalysisStatusLabel(
     return t('history.contextAnalysis.statusFailed', '失败');
   }
   return status;
+}
+
+function contextAnalysisWorkStatusLabel(
+  status: ContextAnalysisResult['workStatus'] | undefined,
+  t: ReturnType<typeof useTranslation>['t'],
+): string | null {
+  if (status === 'completed') return t('history.contextAnalysis.workStatusCompleted', '已完成');
+  if (status === 'inProgress') return t('history.contextAnalysis.workStatusInProgress', '进行中');
+  if (status === 'planned') return t('history.contextAnalysis.workStatusPlanned', '计划中');
+  if (status === 'discussed') return t('history.contextAnalysis.workStatusDiscussed', '讨论中');
+  if (status === 'viewed') return t('history.contextAnalysis.workStatusViewed', '仅查看');
+  if (status === 'unknown') return t('history.contextAnalysis.workStatusUnknown', '未知');
+  return null;
+}
+
+function contextAnalysisEvidenceLevelLabel(
+  level: ContextAnalysisResult['evidenceLevel'] | undefined,
+  t: ReturnType<typeof useTranslation>['t'],
+): string | null {
+  if (level === 'explicit') return t('history.contextAnalysis.evidenceLevelExplicit', '明确证据');
+  if (level === 'inferred') return t('history.contextAnalysis.evidenceLevelInferred', '合理推断');
+  if (level === 'weak') return t('history.contextAnalysis.evidenceLevelWeak', '弱线索');
+  if (level === 'unknown') return t('history.contextAnalysis.evidenceLevelUnknown', '未知');
+  return null;
 }
 
 function formatConfidence(confidence: number | null | undefined): string | null {

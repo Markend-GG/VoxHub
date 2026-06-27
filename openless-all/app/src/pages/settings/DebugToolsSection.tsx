@@ -201,6 +201,24 @@ export function DebugToolsSection() {
           </div>
         </SettingRow>
       )}
+      <SettingRow
+        label={t('settings.debug.dailyReportScheduleLabel', '定时日报')}
+        desc={t('settings.debug.dailyReportScheduleDesc', '开启后每天按设定时间生成日报，并只保存到历史报告。')}
+      >
+        <Toggle
+          on={prefs.dailyReportScheduleEnabled}
+          onToggle={dailyReportScheduleEnabled => void savePrefs({ ...prefs, dailyReportScheduleEnabled })}
+        />
+      </SettingRow>
+      <SettingRow label={t('settings.debug.dailyReportScheduleTime', '日报时间')}>
+        <input
+          type="time"
+          value={prefs.dailyReportScheduleTime || '18:00'}
+          onChange={event => void savePrefs({ ...prefs, dailyReportScheduleTime: event.target.value || '18:00' })}
+          style={{ ...inputStyle, width: 112 }}
+          disabled={!prefs.dailyReportScheduleEnabled}
+        />
+      </SettingRow>
       <SettingRow label={t('settings.recording.audioRecordingMaxEntriesLabel')}>
         <input
           type="number"

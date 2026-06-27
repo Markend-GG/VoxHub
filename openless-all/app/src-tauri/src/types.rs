@@ -128,6 +128,7 @@ pub enum ContextCaptureSource {
 pub enum ContextCaptureHistoryType {
     Voice,
     Rewrite,
+    ScreenshotRecord,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,6 +182,38 @@ impl Default for ContextAnalysisActivityType {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextAnalysisWorkStatus {
+    Completed,
+    InProgress,
+    Planned,
+    Discussed,
+    Viewed,
+    Unknown,
+}
+
+impl Default for ContextAnalysisWorkStatus {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextAnalysisEvidenceLevel {
+    Explicit,
+    Inferred,
+    Weak,
+    Unknown,
+}
+
+impl Default for ContextAnalysisEvidenceLevel {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextAnalysisActionItem {
@@ -203,6 +236,10 @@ pub struct ContextAnalysisResult {
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub prompt_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_generation: Option<String>,
     pub schema_version: u32,
     pub input_mode: String,
     pub image_mime_type: Option<String>,
@@ -217,6 +254,10 @@ pub struct ContextAnalysisResult {
     pub topic: Option<String>,
     pub user_intent: Option<String>,
     pub activity_type: ContextAnalysisActivityType,
+    #[serde(default)]
+    pub work_status: ContextAnalysisWorkStatus,
+    #[serde(default)]
+    pub evidence_level: ContextAnalysisEvidenceLevel,
     pub decision: Option<String>,
     #[serde(default)]
     pub action_items: Vec<ContextAnalysisActionItem>,
@@ -229,6 +270,100 @@ pub struct ContextAnalysisResult {
     pub confidence: f32,
     pub uncertainty_reason: Option<String>,
     pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ScreenshotRecordStatus {
+    Collecting,
+    Queued,
+    Analyzing,
+    Success,
+    Failed,
+    #[default]
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotRecord {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub window_started_at: String,
+    pub window_ended_at: Option<String>,
+    pub status: ScreenshotRecordStatus,
+    pub context_app: Option<String>,
+    pub conversation_window: Option<String>,
+    pub window_title: Option<String>,
+    pub screenshot_ids: Vec<String>,
+    pub submitted_screenshot_ids: Vec<String>,
+    pub trigger_count: u32,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<ContextAnalysisResult>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportType {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportTemplate {
+    pub id: String,
+    pub report_type: ReportType,
+    pub name: String,
+    pub content: String,
+    pub is_builtin: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportGenerationStatus {
+    Pending,
+    Success,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedReportSourceStats {
+    pub voice_count: u32,
+    pub rewrite_count: u32,
+    pub screenshot_record_count: u32,
+    pub analyzed_screenshot_record_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedReport {
+    pub id: String,
+    pub report_type: ReportType,
+    pub title: String,
+    pub range_start: String,
+    pub range_end: String,
+    pub template_id: String,
+    pub template_name: String,
+    pub template_content: String,
+    pub user_main_work: Option<String>,
+    pub status: ReportGenerationStatus,
+    pub content: Option<String>,
+    pub source_stats: GeneratedReportSourceStats,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_key: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -919,6 +1054,39 @@ pub struct UserPreferences {
     /// 默认 `Some(Ctrl/Cmd+Shift+R)`。
     #[serde(default = "default_rewrite_hotkey")]
     pub rewrite_hotkey: Option<ShortcutBinding>,
+    /// 截图记录全局快捷键。功能默认关闭；开启后默认 Enter。
+    #[serde(default = "default_screenshot_record_hotkey")]
+    pub screenshot_record_hotkey: Option<ShortcutBinding>,
+    /// 截图记录开关。默认关闭，用户主动开启。
+    #[serde(default)]
+    pub screenshot_record_enabled: bool,
+    /// 截图记录暂停状态。不同于关闭，可从托盘快速恢复。
+    #[serde(default)]
+    pub screenshot_record_paused: bool,
+    /// 单条截图记录合并窗口秒数。V1 固定默认 60。
+    #[serde(default = "default_screenshot_record_merge_window_seconds")]
+    pub screenshot_record_merge_window_seconds: u32,
+    /// 单条截图记录最多提交给分析模型的截图数。V1 固定默认 5。
+    #[serde(default = "default_screenshot_record_max_images")]
+    pub screenshot_record_max_images_per_analysis: u32,
+    /// 统一上下文分析完整摘要提示词。影响语音、重写、截图记录的完整摘要。
+    #[serde(default)]
+    pub context_analysis_full_summary_prompt: Option<String>,
+    /// 每日定时生成日报开关。默认关闭。
+    #[serde(default)]
+    pub daily_report_schedule_enabled: bool,
+    /// 每日定时生成日报时间，格式 HH:mm。默认 18:00。
+    #[serde(default = "default_daily_report_schedule_time")]
+    pub daily_report_schedule_time: String,
+    /// 生成报告页当前选择的日报模板。
+    #[serde(default = "default_daily_report_template_id")]
+    pub selected_daily_report_template_id: String,
+    /// 生成报告页当前选择的周报模板。
+    #[serde(default = "default_weekly_report_template_id")]
+    pub selected_weekly_report_template_id: String,
+    /// 生成报告页当前选择的月报模板。
+    #[serde(default = "default_monthly_report_template_id")]
+    pub selected_monthly_report_template_id: String,
     /// 是否保存重写历史。默认 true；失败请求也写入历史并包含 error_code。
     #[serde(default = "default_true")]
     pub rewrite_save_history: bool,
@@ -1199,6 +1367,28 @@ struct UserPreferencesWire {
     open_app_hotkey: Option<ShortcutBinding>,
     #[serde(default = "default_rewrite_hotkey")]
     rewrite_hotkey: Option<ShortcutBinding>,
+    #[serde(default = "default_screenshot_record_hotkey")]
+    screenshot_record_hotkey: Option<ShortcutBinding>,
+    #[serde(default)]
+    screenshot_record_enabled: bool,
+    #[serde(default)]
+    screenshot_record_paused: bool,
+    #[serde(default = "default_screenshot_record_merge_window_seconds")]
+    screenshot_record_merge_window_seconds: u32,
+    #[serde(default = "default_screenshot_record_max_images")]
+    screenshot_record_max_images_per_analysis: u32,
+    #[serde(default)]
+    context_analysis_full_summary_prompt: Option<String>,
+    #[serde(default)]
+    daily_report_schedule_enabled: bool,
+    #[serde(default = "default_daily_report_schedule_time")]
+    daily_report_schedule_time: String,
+    #[serde(default = "default_daily_report_template_id")]
+    selected_daily_report_template_id: String,
+    #[serde(default = "default_weekly_report_template_id")]
+    selected_weekly_report_template_id: String,
+    #[serde(default = "default_monthly_report_template_id")]
+    selected_monthly_report_template_id: String,
     #[serde(default = "default_true")]
     rewrite_save_history: bool,
     #[serde(default)]
@@ -1331,6 +1521,18 @@ impl Default for UserPreferencesWire {
             switch_style_hotkey: prefs.switch_style_hotkey,
             open_app_hotkey: prefs.open_app_hotkey,
             rewrite_hotkey: prefs.rewrite_hotkey,
+            screenshot_record_hotkey: prefs.screenshot_record_hotkey,
+            screenshot_record_enabled: prefs.screenshot_record_enabled,
+            screenshot_record_paused: prefs.screenshot_record_paused,
+            screenshot_record_merge_window_seconds: prefs.screenshot_record_merge_window_seconds,
+            screenshot_record_max_images_per_analysis: prefs
+                .screenshot_record_max_images_per_analysis,
+            context_analysis_full_summary_prompt: prefs.context_analysis_full_summary_prompt,
+            daily_report_schedule_enabled: prefs.daily_report_schedule_enabled,
+            daily_report_schedule_time: prefs.daily_report_schedule_time,
+            selected_daily_report_template_id: prefs.selected_daily_report_template_id,
+            selected_weekly_report_template_id: prefs.selected_weekly_report_template_id,
+            selected_monthly_report_template_id: prefs.selected_monthly_report_template_id,
             rewrite_save_history: prefs.rewrite_save_history,
             active_rewrite_style_pack_id: prefs.active_rewrite_style_pack_id,
             coding_agent_enabled: prefs.coding_agent_enabled,
@@ -1454,6 +1656,39 @@ impl<'de> Deserialize<'de> for UserPreferences {
             switch_style_hotkey: wire.switch_style_hotkey,
             open_app_hotkey: wire.open_app_hotkey,
             rewrite_hotkey: wire.rewrite_hotkey,
+            screenshot_record_hotkey: wire.screenshot_record_hotkey,
+            screenshot_record_enabled: wire.screenshot_record_enabled,
+            screenshot_record_paused: wire.screenshot_record_paused,
+            screenshot_record_merge_window_seconds: wire
+                .screenshot_record_merge_window_seconds
+                .clamp(10, 300),
+            screenshot_record_max_images_per_analysis: wire
+                .screenshot_record_max_images_per_analysis
+                .clamp(1, 5),
+            context_analysis_full_summary_prompt: wire
+                .context_analysis_full_summary_prompt
+                .and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }),
+            daily_report_schedule_enabled: wire.daily_report_schedule_enabled,
+            daily_report_schedule_time: normalize_report_time(&wire.daily_report_schedule_time),
+            selected_daily_report_template_id: non_empty_or(
+                wire.selected_daily_report_template_id,
+                default_daily_report_template_id,
+            ),
+            selected_weekly_report_template_id: non_empty_or(
+                wire.selected_weekly_report_template_id,
+                default_weekly_report_template_id,
+            ),
+            selected_monthly_report_template_id: non_empty_or(
+                wire.selected_monthly_report_template_id,
+                default_monthly_report_template_id,
+            ),
             rewrite_save_history: wire.rewrite_save_history,
             active_rewrite_style_pack_id: wire.active_rewrite_style_pack_id,
             local_asr_active_model: wire.local_asr_active_model,
@@ -1554,6 +1789,64 @@ fn default_rewrite_hotkey() -> Option<ShortcutBinding> {
         primary: "R".into(),
         modifiers: default_app_shortcut_modifiers(),
     })
+}
+
+fn default_screenshot_record_hotkey() -> Option<ShortcutBinding> {
+    Some(ShortcutBinding {
+        primary: "Enter".into(),
+        modifiers: Vec::new(),
+    })
+}
+
+fn default_screenshot_record_merge_window_seconds() -> u32 {
+    60
+}
+
+fn default_screenshot_record_max_images() -> u32 {
+    5
+}
+
+fn default_daily_report_schedule_time() -> String {
+    "18:00".into()
+}
+
+fn normalize_report_time(value: &str) -> String {
+    let trimmed = value.trim();
+    let mut parts = trimmed.split(':');
+    let (Some(hour), Some(minute), None) = (parts.next(), parts.next(), parts.next()) else {
+        return default_daily_report_schedule_time();
+    };
+    let Ok(hour) = hour.parse::<u32>() else {
+        return default_daily_report_schedule_time();
+    };
+    let Ok(minute) = minute.parse::<u32>() else {
+        return default_daily_report_schedule_time();
+    };
+    if hour > 23 || minute > 59 {
+        return default_daily_report_schedule_time();
+    }
+    format!("{hour:02}:{minute:02}")
+}
+
+fn non_empty_or(value: String, default: fn() -> String) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        default()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+pub fn default_daily_report_template_id() -> String {
+    "builtin.daily.default".into()
+}
+
+pub fn default_weekly_report_template_id() -> String {
+    "builtin.weekly.default".into()
+}
+
+pub fn default_monthly_report_template_id() -> String {
+    "builtin.monthly.default".into()
 }
 
 fn default_app_shortcut_modifiers() -> Vec<String> {
@@ -2194,6 +2487,18 @@ impl Default for UserPreferences {
             switch_style_hotkey: default_switch_style_hotkey(),
             open_app_hotkey: default_open_app_hotkey(),
             rewrite_hotkey: default_rewrite_hotkey(),
+            screenshot_record_hotkey: default_screenshot_record_hotkey(),
+            screenshot_record_enabled: false,
+            screenshot_record_paused: false,
+            screenshot_record_merge_window_seconds: default_screenshot_record_merge_window_seconds(
+            ),
+            screenshot_record_max_images_per_analysis: default_screenshot_record_max_images(),
+            context_analysis_full_summary_prompt: None,
+            daily_report_schedule_enabled: false,
+            daily_report_schedule_time: default_daily_report_schedule_time(),
+            selected_daily_report_template_id: default_daily_report_template_id(),
+            selected_weekly_report_template_id: default_weekly_report_template_id(),
+            selected_monthly_report_template_id: default_monthly_report_template_id(),
             rewrite_save_history: true,
             active_rewrite_style_pack_id: None,
             coding_agent_enabled: false,

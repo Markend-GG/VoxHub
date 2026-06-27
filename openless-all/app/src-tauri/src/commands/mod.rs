@@ -79,6 +79,7 @@ mod misc;
 mod permissions_cmds;
 mod providers;
 mod qa;
+mod report;
 #[cfg(not(mobile))]
 mod remote_input;
 mod rewrite;
@@ -102,6 +103,7 @@ pub use misc::*;
 pub use permissions_cmds::*;
 pub use providers::*;
 pub use qa::*;
+pub use report::*;
 #[cfg(not(mobile))]
 pub use remote_input::*;
 pub use rewrite::*;
@@ -637,6 +639,10 @@ mod tests {
         }
 
         fn refresh_rewrite_hotkey(&self) {}
+
+        fn refresh_screenshot_record_hotkey(&self) {}
+
+        fn cancel_active_screenshot_record(&self, _reason: &str) {}
 
         fn refresh_coding_agent_hotkey(&self) {
             *self.coding_agent_refreshes.lock().unwrap() += 1;

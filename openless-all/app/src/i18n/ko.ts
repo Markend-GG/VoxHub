@@ -79,6 +79,7 @@ export const ko: typeof zhCN = {
   nav: {
     overview: '개요',
     history: '기록',
+    reports: '보고서',
     vocab: '어휘',
     style: '스타일',
     marketplace: '마켓',

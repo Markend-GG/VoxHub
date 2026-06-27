@@ -72,6 +72,10 @@ mod shortcut_binding;
 #[cfg(mobile)]
 #[path = "mobile_stubs/shortcut_binding.rs"]
 mod shortcut_binding;
+#[cfg(not(mobile))]
+mod screenshot_record;
+#[cfg(not(mobile))]
+mod report_scheduler;
 mod types;
 #[cfg(not(mobile))]
 mod unicode_keystroke;
@@ -167,6 +171,17 @@ macro_rules! app_invoke_handler_desktop {
             commands::read_context_screenshot,
             commands::reanalyze_context_history,
             commands::retranscribe_recording,
+            commands::list_screenshot_records,
+            commands::delete_screenshot_record,
+            commands::clear_screenshot_records,
+            commands::reanalyze_screenshot_record,
+            commands::list_report_templates,
+            commands::save_report_template,
+            commands::delete_report_template,
+            commands::generate_report,
+            commands::list_generated_reports,
+            commands::get_generated_report,
+            commands::delete_generated_report,
             commands::marketplace_list,
             commands::marketplace_detail,
             commands::marketplace_install,
@@ -228,6 +243,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::set_switch_style_hotkey,
             commands::set_open_app_hotkey,
             commands::set_rewrite_hotkey,
+            commands::set_screenshot_record_hotkey,
             commands::list_rewrite_history,
             commands::delete_rewrite_history_entry,
             commands::clear_rewrite_history,
@@ -635,6 +651,7 @@ fn run_desktop() {
                     .show_menu_on_left_click(false)
                     .on_menu_event(move |app, event| match event.id.as_ref() {
                         "toggle" => show_main_window(app),
+                        "screenshot-record-toggle" => handle_screenshot_record_tray_menu_event(app),
                         "quit" => app.exit(0),
                         id => {
                             if handle_style_tray_menu_event(app, id) {
@@ -697,6 +714,8 @@ fn run_desktop() {
                 coordinator.start_switch_style_hotkey_listener();
                 coordinator.start_open_app_hotkey_listener();
                 coordinator.start_rewrite_hotkey_listener();
+                coordinator.start_screenshot_record_hotkey_listener();
+                report_scheduler::start_daily_report_scheduler(Arc::clone(&coordinator));
             }
             #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => show_main_window(app),
@@ -792,6 +811,17 @@ fn build_tray_menu<M: Manager<tauri::Wry>>(
     coordinator: &Arc<coordinator::Coordinator>,
 ) -> tauri::Result<TrayMenu> {
     let toggle = MenuItemBuilder::with_id("toggle", "显示主窗口").build(app)?;
+    let prefs = coordinator.prefs().get();
+    let screenshot_record_toggle = MenuItemBuilder::with_id(
+        "screenshot-record-toggle",
+        if prefs.screenshot_record_paused {
+            "截图记录：恢复记录"
+        } else {
+            "截图记录：暂停记录"
+        },
+    )
+    .enabled(prefs.screenshot_record_enabled)
+    .build(app)?;
     let microphone_menu = build_microphone_tray_menu(app, coordinator)?;
     let quit = MenuItemBuilder::with_id("quit", "退出 OpenLess").build(app)?;
     let mut builder = MenuBuilder::new(app);
@@ -804,7 +834,7 @@ fn build_tray_menu<M: Manager<tauri::Wry>>(
         builder = builder.item(&style_menu.submenu);
     }
     let menu = builder
-        .items(&[&toggle, &microphone_menu.submenu, &quit])
+        .items(&[&toggle, &screenshot_record_toggle, &microphone_menu.submenu, &quit])
         .build()?;
     Ok(TrayMenu {
         menu,
@@ -1025,6 +1055,24 @@ fn handle_microphone_tray_menu_event(app: &AppHandle, id: &str) {
     let _ = app.emit("prefs:changed", &prefs);
 
     commands::sync_tray_microphone_selection(&items, &selected.device_name);
+}
+
+#[cfg(not(mobile))]
+fn handle_screenshot_record_tray_menu_event(app: &AppHandle) {
+    let coord = app.state::<Arc<coordinator::Coordinator>>();
+    let mut prefs = coord.prefs().get();
+    if !prefs.screenshot_record_enabled {
+        return;
+    }
+    prefs.screenshot_record_paused = !prefs.screenshot_record_paused;
+    if let Err(err) = coord.prefs().set(prefs.clone()) {
+        log::warn!("[tray] save screenshot record pause state failed: {err}");
+        return;
+    }
+    let _ = app.emit("prefs:changed", &prefs);
+    if let Err(err) = refresh_tray_microphone_menu(app) {
+        log::warn!("[tray] refresh screenshot record menu failed: {err}");
+    }
 }
 
 #[cfg(not(mobile))]

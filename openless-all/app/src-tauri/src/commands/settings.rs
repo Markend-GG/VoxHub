@@ -21,6 +21,8 @@ pub(crate) trait SettingsWriter {
     fn refresh_switch_style_hotkey(&self);
     fn refresh_open_app_hotkey(&self);
     fn refresh_rewrite_hotkey(&self);
+    fn refresh_screenshot_record_hotkey(&self);
+    fn cancel_active_screenshot_record(&self, reason: &str);
     fn refresh_coding_agent_hotkey(&self);
 }
 
@@ -63,6 +65,14 @@ impl SettingsWriter for Coordinator {
 
     fn refresh_rewrite_hotkey(&self) {
         self.update_rewrite_hotkey_binding();
+    }
+
+    fn refresh_screenshot_record_hotkey(&self) {
+        self.update_screenshot_record_hotkey_binding();
+    }
+
+    fn cancel_active_screenshot_record(&self, reason: &str) {
+        self.cancel_active_screenshot_record_without_analysis(reason);
     }
 
     fn refresh_coding_agent_hotkey(&self) {
@@ -111,6 +121,14 @@ impl<T: SettingsWriter + ?Sized> SettingsWriter for Arc<T> {
         (**self).refresh_rewrite_hotkey();
     }
 
+    fn refresh_screenshot_record_hotkey(&self) {
+        (**self).refresh_screenshot_record_hotkey();
+    }
+
+    fn cancel_active_screenshot_record(&self, reason: &str) {
+        (**self).cancel_active_screenshot_record(reason);
+    }
+
     fn refresh_coding_agent_hotkey(&self) {
         (**self).refresh_coding_agent_hotkey();
     }
@@ -131,6 +149,11 @@ pub(crate) fn persist_settings<T: SettingsWriter>(
     let switch_style_changed = previous.switch_style_hotkey != prefs.switch_style_hotkey;
     let open_app_changed = previous.open_app_hotkey != prefs.open_app_hotkey;
     let rewrite_changed = previous.rewrite_hotkey != prefs.rewrite_hotkey;
+    let screenshot_record_changed =
+        previous.screenshot_record_hotkey != prefs.screenshot_record_hotkey
+            || previous.screenshot_record_enabled != prefs.screenshot_record_enabled;
+    let screenshot_record_disabled =
+        previous.screenshot_record_enabled && !prefs.screenshot_record_enabled;
     let coding_agent_changed = previous.coding_agent_enabled != prefs.coding_agent_enabled
         || previous.coding_agent_voice_hotkey != prefs.coding_agent_voice_hotkey;
     let active_asr_provider_changed = previous.active_asr_provider != prefs.active_asr_provider;
@@ -175,6 +198,12 @@ pub(crate) fn persist_settings<T: SettingsWriter>(
     }
     if rewrite_changed {
         coord.refresh_rewrite_hotkey();
+    }
+    if screenshot_record_changed {
+        coord.refresh_screenshot_record_hotkey();
+    }
+    if screenshot_record_disabled {
+        coord.cancel_active_screenshot_record("skipped:featureDisabled");
     }
     if coding_agent_changed {
         coord.refresh_coding_agent_hotkey();

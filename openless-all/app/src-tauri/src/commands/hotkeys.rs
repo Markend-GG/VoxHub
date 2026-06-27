@@ -154,10 +154,48 @@ pub fn set_rewrite_hotkey(
         if let Some(less_computer) = prefs.coding_agent_voice_hotkey.as_ref() {
             reject_rewrite_less_computer_hotkey_overlap(binding, less_computer)?;
         }
+        if let Some(screenshot_record) = prefs.screenshot_record_hotkey.as_ref() {
+            reject_rewrite_screenshot_record_hotkey_overlap(binding, screenshot_record)?;
+        }
     }
     prefs.rewrite_hotkey = binding;
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
     coord.update_rewrite_hotkey_binding();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_screenshot_record_hotkey(
+    coord: CoordinatorState<'_>,
+    binding: Option<ShortcutBinding>,
+) -> Result<(), String> {
+    if let Some(binding) = binding.as_ref() {
+        crate::shortcut_binding::validate_binding(binding).map_err(|e| e.to_string())?;
+        reject_modifier_only_action_shortcut(binding)?;
+    }
+    let mut prefs = coord.prefs().get();
+    if let Some(binding) = binding.as_ref() {
+        reject_screenshot_record_dictation_hotkey_overlap(binding, &prefs.dictation_hotkey)?;
+        reject_screenshot_record_translation_hotkey_overlap(binding, &prefs.translation_hotkey)?;
+        if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
+            reject_screenshot_record_qa_hotkey_overlap(binding, qa_hotkey)?;
+        }
+        if let Some(switch_style) = prefs.switch_style_hotkey.as_ref() {
+            reject_screenshot_record_switch_style_hotkey_overlap(binding, switch_style)?;
+        }
+        if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
+            reject_screenshot_record_open_app_hotkey_overlap(binding, open_app)?;
+        }
+        if let Some(rewrite) = prefs.rewrite_hotkey.as_ref() {
+            reject_rewrite_screenshot_record_hotkey_overlap(rewrite, binding)?;
+        }
+        if let Some(less_computer) = prefs.coding_agent_voice_hotkey.as_ref() {
+            reject_screenshot_record_less_computer_hotkey_overlap(binding, less_computer)?;
+        }
+    }
+    prefs.screenshot_record_hotkey = binding;
+    coord.prefs().set(prefs).map_err(|e| e.to_string())?;
+    coord.update_screenshot_record_hotkey_binding();
     Ok(())
 }
 
@@ -265,6 +303,11 @@ pub(crate) fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), St
     // 停用（None）的 action 快捷键不参与任何冲突检测。
     let switch_style = prefs.switch_style_hotkey.as_ref();
     let open_app = prefs.open_app_hotkey.as_ref();
+    let screenshot_record = if prefs.screenshot_record_enabled {
+        prefs.screenshot_record_hotkey.as_ref()
+    } else {
+        None
+    };
     let less_computer = prefs.coding_agent_voice_hotkey.as_ref();
     if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
         reject_dictation_qa_hotkey_overlap(&prefs.dictation_hotkey, qa_hotkey)?;
@@ -278,6 +321,9 @@ pub(crate) fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), St
         if let Some(open_app) = open_app {
             reject_qa_open_app_hotkey_overlap(qa_hotkey, open_app)?;
         }
+        if let Some(screenshot_record) = screenshot_record {
+            reject_screenshot_record_qa_hotkey_overlap(screenshot_record, qa_hotkey)?;
+        }
     }
     reject_dictation_translation_hotkey_overlap(
         &prefs.dictation_hotkey,
@@ -287,11 +333,24 @@ pub(crate) fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), St
         reject_dictation_less_computer_hotkey_overlap(&prefs.dictation_hotkey, less_computer)?;
         reject_translation_less_computer_hotkey_overlap(&prefs.translation_hotkey, less_computer)?;
     }
+    if let Some(screenshot_record) = screenshot_record {
+        reject_screenshot_record_dictation_hotkey_overlap(
+            screenshot_record,
+            &prefs.dictation_hotkey,
+        )?;
+        reject_screenshot_record_translation_hotkey_overlap(
+            screenshot_record,
+            &prefs.translation_hotkey,
+        )?;
+    }
     if let Some(switch_style) = switch_style {
         reject_dictation_switch_style_hotkey_overlap(&prefs.dictation_hotkey, switch_style)?;
         reject_translation_switch_style_hotkey_overlap(&prefs.translation_hotkey, switch_style)?;
         if let Some(less_computer) = less_computer {
             reject_less_computer_switch_style_hotkey_overlap(less_computer, switch_style)?;
+        }
+        if let Some(screenshot_record) = screenshot_record {
+            reject_screenshot_record_switch_style_hotkey_overlap(screenshot_record, switch_style)?;
         }
     }
     if let Some(open_app) = open_app {
@@ -299,6 +358,9 @@ pub(crate) fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), St
         reject_translation_open_app_hotkey_overlap(&prefs.translation_hotkey, open_app)?;
         if let Some(less_computer) = less_computer {
             reject_less_computer_open_app_hotkey_overlap(less_computer, open_app)?;
+        }
+        if let Some(screenshot_record) = screenshot_record {
+            reject_screenshot_record_open_app_hotkey_overlap(screenshot_record, open_app)?;
         }
     }
     if let (Some(switch_style), Some(open_app)) = (switch_style, open_app) {
@@ -319,6 +381,12 @@ pub(crate) fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), St
         if let Some(less_computer) = less_computer {
             reject_rewrite_less_computer_hotkey_overlap(rewrite, less_computer)?;
         }
+        if let Some(screenshot_record) = screenshot_record {
+            reject_rewrite_screenshot_record_hotkey_overlap(rewrite, screenshot_record)?;
+        }
+    }
+    if let (Some(screenshot_record), Some(less_computer)) = (screenshot_record, less_computer) {
+        reject_screenshot_record_less_computer_hotkey_overlap(screenshot_record, less_computer)?;
     }
     Ok(())
 }
@@ -496,6 +564,63 @@ fn reject_rewrite_less_computer_hotkey_overlap(
         rewrite,
         less_computer,
         "重写快捷键不能和 Less Computer 快捷键相同",
+    )
+}
+
+fn reject_rewrite_screenshot_record_hotkey_overlap(
+    rewrite: &ShortcutBinding,
+    screenshot_record: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(rewrite, screenshot_record, "重写快捷键不能和截图记录快捷键相同")
+}
+
+fn reject_screenshot_record_dictation_hotkey_overlap(
+    screenshot_record: &ShortcutBinding,
+    dictation: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(screenshot_record, dictation, "截图记录快捷键不能和听写快捷键相同")
+}
+
+fn reject_screenshot_record_translation_hotkey_overlap(
+    screenshot_record: &ShortcutBinding,
+    translation: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(screenshot_record, translation, "截图记录快捷键不能和翻译快捷键相同")
+}
+
+fn reject_screenshot_record_qa_hotkey_overlap(
+    screenshot_record: &ShortcutBinding,
+    qa: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(screenshot_record, qa, "截图记录快捷键不能和 QA 快捷键相同")
+}
+
+fn reject_screenshot_record_switch_style_hotkey_overlap(
+    screenshot_record: &ShortcutBinding,
+    switch_style: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        screenshot_record,
+        switch_style,
+        "截图记录快捷键不能和切换风格快捷键相同",
+    )
+}
+
+fn reject_screenshot_record_open_app_hotkey_overlap(
+    screenshot_record: &ShortcutBinding,
+    open_app: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(screenshot_record, open_app, "截图记录快捷键不能和打开应用快捷键相同")
+}
+
+fn reject_screenshot_record_less_computer_hotkey_overlap(
+    screenshot_record: &ShortcutBinding,
+    less_computer: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        screenshot_record,
+        less_computer,
+        "截图记录快捷键不能和 Less Computer 快捷键相同",
     )
 }
 

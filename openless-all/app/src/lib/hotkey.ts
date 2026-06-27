@@ -26,6 +26,10 @@ export function defaultRewriteShortcut(): ShortcutBinding {
   return { primary: 'R', modifiers: defaultAppShortcutModifiers() };
 }
 
+export function defaultScreenshotRecordShortcut(): ShortcutBinding {
+  return { primary: 'Enter', modifiers: [] };
+}
+
 export function defaultLessComputerShortcut(): ShortcutBinding {
   return { primary: 'LeftControl', modifiers: [] };
 }

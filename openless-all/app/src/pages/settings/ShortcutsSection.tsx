@@ -4,12 +4,13 @@ import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ShortcutRecorder } from '../../components/ShortcutRecorder';
-import { defaultLessComputerShortcut, defaultOpenAppShortcut, defaultQaShortcut, defaultRewriteShortcut, defaultSwitchStyleShortcut } from '../../lib/hotkey';
+import { defaultLessComputerShortcut, defaultOpenAppShortcut, defaultQaShortcut, defaultRewriteShortcut, defaultScreenshotRecordShortcut, defaultSwitchStyleShortcut } from '../../lib/hotkey';
 import {
   setDictationHotkey,
   setOpenAppHotkey,
   setQaHotkey,
   setRewriteHotkey,
+  setScreenshotRecordHotkey,
   setSwitchStyleHotkey,
   setTranslationHotkey,
 } from '../../lib/ipc';
@@ -192,6 +193,60 @@ export function ShortcutsSection() {
             style={enableBtnStyle}
           >
             {t('settings.shortcuts.enable', 'Enable')}
+          </button>
+        )}
+      </SettingRow>
+      <SettingRow
+        label={t('settings.shortcuts.screenshotRecord', '截图记录')}
+        desc={t('settings.shortcuts.screenshotRecordDesc', '开启后全局快捷键会异步记录截图，不阻塞输入。')}
+      >
+        {prefs.screenshotRecordEnabled ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
+            {prefs.screenshotRecordHotkey ? (
+              <ShortcutRecorder
+                value={prefs.screenshotRecordHotkey}
+                alignRecordButton
+                onSave={async binding => {
+                  await setScreenshotRecordHotkey(binding);
+                  await savePrefs({ ...prefs, screenshotRecordHotkey: binding });
+                }}
+                onDisable={async () => {
+                  await setScreenshotRecordHotkey(null);
+                  await savePrefs({ ...prefs, screenshotRecordHotkey: null });
+                }}
+              />
+            ) : (
+              <button
+                onClick={async () => {
+                  const binding = defaultScreenshotRecordShortcut();
+                  await setScreenshotRecordHotkey(binding);
+                  await savePrefs({ ...prefs, screenshotRecordHotkey: binding });
+                }}
+                style={enableBtnStyle}
+              >
+                {t('settings.shortcuts.enable', 'Enable')}
+              </button>
+            )}
+            <button
+              onClick={() => void savePrefs({ ...prefs, screenshotRecordEnabled: false, screenshotRecordPaused: false })}
+              style={{ ...enableBtnStyle, background: 'var(--ol-surface-2)', color: 'var(--ol-ink-2)' }}
+            >
+              {t('settings.shortcuts.screenshotRecordDisable', '关闭截图记录')}
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() =>
+              void savePrefs({
+                ...prefs,
+                screenshotRecordEnabled: true,
+                screenshotRecordPaused: false,
+                screenshotRecordHotkey: prefs.screenshotRecordHotkey ?? defaultScreenshotRecordShortcut(),
+              })
+            }
+            style={enableBtnStyle}
+          >
+            {t('settings.shortcuts.screenshotRecordEnable', '开启截图记录')}
           </button>
         )}
       </SettingRow>

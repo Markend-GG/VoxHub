@@ -28,7 +28,9 @@ use crate::asr::{
     BailianCredentials, BailianRealtimeASR, DictionaryHotword, MimoBatchASR, RawTranscript,
     VolcengineCredentials, VolcengineStreamingASR, WhisperBatchASR,
 };
-use crate::combo_hotkey::{ComboHotkeyError, ComboHotkeyEvent, ComboHotkeyMonitor};
+use crate::combo_hotkey::{
+    ActionHotkeyMonitor, ComboHotkeyError, ComboHotkeyEvent, ComboHotkeyMonitor,
+};
 use crate::coordinator_state::{
     begin_cancel_session_state, begin_recording_abort_before_restore, begin_session_state,
     finish_cancel_session_state, finish_starting_session_state, new_session_id,
@@ -40,8 +42,9 @@ use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::insertion::TextInserter;
 use crate::persistence::{
     sync_style_pack_preferences, ContextAnalysisStore, ContextCaptureStore, CorrectionRuleStore,
-    CredentialAccount, CredentialsVault, DictionaryStore, HistoryStore, PreferencesStore,
-    RewriteHistoryStore, StylePackStore,
+    CredentialAccount, CredentialsVault, DictionaryStore, GeneratedReportStore, HistoryStore,
+    PreferencesStore, ReportTemplateStore, RewriteHistoryStore, ScreenshotRecordStore,
+    StylePackStore,
 };
 
 use crate::llm_gemini::{GeminiConfig, GeminiProvider};
@@ -239,12 +242,15 @@ pub struct Coordinator {
     inner: Arc<Inner>,
 }
 
-struct Inner {
+pub(crate) struct Inner {
     app: Mutex<Option<AppHandle>>,
     history: HistoryStore,
-    context_capture: ContextCaptureStore,
-    context_analysis: ContextAnalysisStore,
-    prefs: PreferencesStore,
+    pub(crate) context_capture: ContextCaptureStore,
+    pub(crate) context_analysis: ContextAnalysisStore,
+    pub(crate) screenshot_records: ScreenshotRecordStore,
+    report_templates: ReportTemplateStore,
+    generated_reports: GeneratedReportStore,
+    pub(crate) prefs: PreferencesStore,
     style_packs: StylePackStore,
     vocab: DictionaryStore,
     correction_rules: CorrectionRuleStore,
@@ -289,9 +295,10 @@ struct Inner {
     /// 代替 modifier-only 的 hotkey monitor。`None` 表示不使用自定义组合键或还没成功安装。
     combo_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
     translation_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
-    switch_style_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
-    open_app_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
-    rewrite_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
+    switch_style_hotkey: Mutex<Option<ActionHotkeyMonitor>>,
+    open_app_hotkey: Mutex<Option<ActionHotkeyMonitor>>,
+    rewrite_hotkey: Mutex<Option<ActionHotkeyMonitor>>,
+    screenshot_record_hotkey: Mutex<Option<ActionHotkeyMonitor>>,
     rewrite_history: RewriteHistoryStore,
     rewrite_in_progress: AtomicBool,
     /// 翻译模式触发标志。每次 begin_session 重置为 false；hotkey 监听器在
@@ -350,6 +357,7 @@ enum ActionHotkeyKind {
     SwitchStyle,
     OpenApp,
     Rewrite,
+    ScreenshotRecord,
 }
 
 #[cfg(target_os = "windows")]
@@ -387,6 +395,18 @@ impl Coordinator {
                 log::error!("[coord] ContextAnalysisStore init failed: {e}; fallback to temp storage");
                 ContextAnalysisStore::new_fallback()
             });
+            let screenshot_records = ScreenshotRecordStore::new().unwrap_or_else(|e| {
+                log::error!("[coord] ScreenshotRecordStore init failed: {e}; fallback to temp storage");
+                ScreenshotRecordStore::new_fallback()
+            });
+            let report_templates = ReportTemplateStore::new().unwrap_or_else(|e| {
+                log::error!("[coord] ReportTemplateStore init failed: {e}; fallback to temp storage");
+                ReportTemplateStore::new_fallback()
+            });
+            let generated_reports = GeneratedReportStore::new().unwrap_or_else(|e| {
+                log::error!("[coord] GeneratedReportStore init failed: {e}; fallback to temp storage");
+                GeneratedReportStore::new_fallback()
+            });
             let prefs = PreferencesStore::new().unwrap_or_else(|e| {
                 log::error!("[coord] PreferencesStore init failed: {e}; 降级为默认偏好设置");
                 PreferencesStore::new_fallback()
@@ -410,6 +430,9 @@ impl Coordinator {
                     history,
                     context_capture,
                     context_analysis,
+                    screenshot_records,
+                    report_templates,
+                    generated_reports,
                     rewrite_history,
                     prefs,
                     style_packs,
@@ -431,7 +454,8 @@ impl Coordinator {
                     translation_hotkey: Mutex::new(None),
                     switch_style_hotkey: Mutex::new(None),
                     open_app_hotkey: Mutex::new(None),
-                            rewrite_hotkey: Mutex::new(None),
+                    rewrite_hotkey: Mutex::new(None),
+                    screenshot_record_hotkey: Mutex::new(None),
                     translation_modifier_seen: AtomicBool::new(false),
                     qa_hotkey: Mutex::new(None),
                     coding_agent_modifier_hotkey: Mutex::new(None),
@@ -494,6 +518,18 @@ impl Coordinator {
             log::error!("[coord] ContextAnalysisStore init failed: {e}; fallback to temp storage");
             ContextAnalysisStore::new_fallback()
         });
+        let screenshot_records = ScreenshotRecordStore::new().unwrap_or_else(|e| {
+            log::error!("[coord] ScreenshotRecordStore init failed: {e}; fallback to temp storage");
+            ScreenshotRecordStore::new_fallback()
+        });
+        let report_templates = ReportTemplateStore::new().unwrap_or_else(|e| {
+            log::error!("[coord] ReportTemplateStore init failed: {e}; fallback to temp storage");
+            ReportTemplateStore::new_fallback()
+        });
+        let generated_reports = GeneratedReportStore::new().unwrap_or_else(|e| {
+            log::error!("[coord] GeneratedReportStore init failed: {e}; fallback to temp storage");
+            GeneratedReportStore::new_fallback()
+        });
         let prefs = PreferencesStore::new().unwrap_or_else(|e| {
             log::error!("[coord] PreferencesStore init failed: {e}; 降级为默认偏好设置");
             PreferencesStore::new_fallback()
@@ -517,6 +553,9 @@ impl Coordinator {
                 history,
                 context_capture,
                 context_analysis,
+                screenshot_records,
+                report_templates,
+                generated_reports,
                 rewrite_history,
                 prefs,
                 style_packs,
@@ -541,6 +580,7 @@ impl Coordinator {
                 switch_style_hotkey: Mutex::new(None),
                 open_app_hotkey: Mutex::new(None),
                 rewrite_hotkey: Mutex::new(None),
+                screenshot_record_hotkey: Mutex::new(None),
                 translation_modifier_seen: AtomicBool::new(false),
                 qa_hotkey: Mutex::new(None),
                 coding_agent_modifier_hotkey: Mutex::new(None),
@@ -1021,6 +1061,10 @@ impl Coordinator {
         self.update_action_hotkey_binding(ActionHotkeyKind::Rewrite);
     }
 
+    pub fn update_screenshot_record_hotkey_binding(&self) {
+        self.update_action_hotkey_binding(ActionHotkeyKind::ScreenshotRecord);
+    }
+
     pub fn start_rewrite_hotkey_listener(&self) {
         let inner = Arc::clone(&self.inner);
         std::thread::Builder::new()
@@ -1029,8 +1073,24 @@ impl Coordinator {
             .ok();
     }
 
+    pub fn start_screenshot_record_hotkey_listener(&self) {
+        let inner = Arc::clone(&self.inner);
+        std::thread::Builder::new()
+            .name("openless-screenshot-record-hotkey-supervisor".into())
+            .spawn(move || action_hotkey_supervisor_loop(inner, ActionHotkeyKind::ScreenshotRecord))
+            .ok();
+    }
+
     pub fn stop_rewrite_hotkey_listener(&self) {
         take_action_hotkey_on_main_thread(&self.inner, ActionHotkeyKind::Rewrite);
+    }
+
+    pub fn stop_screenshot_record_hotkey_listener(&self) {
+        take_action_hotkey_on_main_thread(&self.inner, ActionHotkeyKind::ScreenshotRecord);
+    }
+
+    pub fn cancel_active_screenshot_record_without_analysis(&self, reason: &str) {
+        crate::screenshot_record::cancel_active_window_without_analysis(&self.inner, reason);
     }
 
     fn update_action_hotkey_binding(&self, kind: ActionHotkeyKind) {
@@ -1053,14 +1113,14 @@ impl Coordinator {
         };
         let inner_clone = Arc::clone(&self.inner);
         let _ = app.run_on_main_thread(move || {
-            if let Some(monitor) = action_hotkey_slot(&inner_clone, kind).lock().as_ref() {
-                if let Err(e) = monitor.update_binding(binding.clone()) {
+            if let Some(monitor) = action_hotkey_slot(&inner_clone, kind).lock().as_mut() {
+                if let Err(e) = update_action_hotkey_monitor(kind, monitor, binding.clone()) {
                     log::warn!("[coord] update action hotkey {kind:?} binding 失败: {e}");
                 }
                 return;
             }
             let (tx, rx) = mpsc::channel::<ComboHotkeyEvent>();
-            match ComboHotkeyMonitor::start(binding, tx) {
+            match start_action_hotkey_monitor(kind, binding, tx) {
                 Ok(monitor) => {
                     *action_hotkey_slot(&inner_clone, kind).lock() = Some(monitor);
                     let bridge_inner = Arc::clone(&inner_clone);
@@ -1134,6 +1194,18 @@ impl Coordinator {
         &self.inner.context_analysis
     }
 
+    pub fn screenshot_records(&self) -> &ScreenshotRecordStore {
+        &self.inner.screenshot_records
+    }
+
+    pub fn report_templates(&self) -> &ReportTemplateStore {
+        &self.inner.report_templates
+    }
+
+    pub fn generated_reports(&self) -> &GeneratedReportStore {
+        &self.inner.generated_reports
+    }
+
     pub fn prefs(&self) -> &PreferencesStore {
         &self.inner.prefs
     }
@@ -1175,14 +1247,20 @@ impl Coordinator {
         if history_type == ContextCaptureHistoryType::Rewrite && !prefs.rewrite_save_history {
             return;
         }
+        let context_capture_id = Uuid::new_v4().to_string();
+        crate::context_capture::remember_recent_primary_capture(
+            history_type,
+            context_capture_id.clone(),
+        );
         let retention_days = prefs.history_retention_days;
         let max_entries = prefs.history_max_entries;
         let inner = Arc::clone(inner);
         std::thread::Builder::new()
             .name("openless-context-capture".into())
             .spawn(move || {
-                if let Err(error) = crate::context_capture::capture_and_store(
+                if let Err(error) = crate::context_capture::capture_and_store_with_id(
                     &inner.context_capture,
+                    context_capture_id,
                     history_type,
                     history_id,
                     retention_days,

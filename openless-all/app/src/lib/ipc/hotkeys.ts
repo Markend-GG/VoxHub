@@ -77,6 +77,10 @@ export function setRewriteHotkey(binding: ShortcutBinding | null): Promise<void>
     return invokeOrMock("set_rewrite_hotkey", { binding }, () => undefined)
 }
 
+export function setScreenshotRecordHotkey(binding: ShortcutBinding | null): Promise<void> {
+    return invokeOrMock("set_screenshot_record_hotkey", { binding }, () => undefined)
+}
+
 export function setShortcutRecordingActive(active: boolean): Promise<void> {
     return invokeOrMock(
         "set_shortcut_recording_active",
