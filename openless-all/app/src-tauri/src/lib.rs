@@ -185,6 +185,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::list_generated_reports,
             commands::get_generated_report,
             commands::delete_generated_report,
+            commands::update_generated_report,
             commands::marketplace_list,
             commands::marketplace_detail,
             commands::marketplace_install,

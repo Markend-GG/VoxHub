@@ -226,6 +226,7 @@ export {
     listGeneratedReports,
     getGeneratedReport,
     deleteGeneratedReport,
+  updateGeneratedReport,
 } from "./reports"
 
 // screenshot whitelist

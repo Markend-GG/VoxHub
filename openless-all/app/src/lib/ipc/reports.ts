@@ -83,3 +83,33 @@ export function getGeneratedReport(id: string): Promise<GeneratedReport | null> 
 export function deleteGeneratedReport(id: string): Promise<void> {
     return invokeOrMock("delete_generated_report", { id }, () => undefined)
 }
+
+export function updateGeneratedReport(id: string, title: string, content: string): Promise<GeneratedReport> {
+    return invokeOrMock(
+        "update_generated_report",
+        { id, title, content },
+        () => ({
+            id,
+            reportType: "daily" as const,
+            title,
+            rangeStart: new Date().toISOString(),
+            rangeEnd: new Date().toISOString(),
+            templateId: "",
+            templateName: "",
+            templateContent: "",
+            userMainWork: null,
+            status: "success" as const,
+            content,
+            sourceStats: {
+                voiceCount: 0,
+                rewriteCount: 0,
+                screenshotRecordCount: 0,
+                analyzedScreenshotRecordCount: 0,
+            },
+            errorCode: null,
+            errorMessage: null,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+        }),
+    )
+}

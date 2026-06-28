@@ -136,6 +136,34 @@ pub fn delete_generated_report(coord: CoordinatorState<'_>, id: String) -> Resul
 }
 
 #[tauri::command]
+pub fn update_generated_report(
+    coord: CoordinatorState<'_>,
+    id: String,
+    title: String,
+    content: String,
+) -> Result<GeneratedReport, String> {
+    if !is_valid_session_id(&id) {
+        return Err("invalid report id".into());
+    }
+    let trimmed_title = title.trim();
+    if trimmed_title.is_empty() {
+        return Err("报告标题不能为空".into());
+    }
+    if content.trim().is_empty() {
+        return Err("报告内容不能为空".into());
+    }
+    coord
+        .generated_reports()
+        .update(&id, trimmed_title, &content)
+        .map_err(|e| e.to_string())?;
+    coord
+        .generated_reports()
+        .get(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "report not found after update".to_string())
+}
+
+#[tauri::command]
 pub async fn generate_report(
     coord: CoordinatorState<'_>,
     request: GenerateReportRequest,

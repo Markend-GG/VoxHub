@@ -83,6 +83,24 @@ impl GeneratedReportStore {
         self.write_locked(&reports)
     }
 
+    /// 仅更新报告的 title、content 和 updatedAt。
+    pub fn update(&self, id: &str, title: &str, content: &str) -> Result<bool> {
+        let _guard = self.lock.lock();
+        let mut reports = self.read_locked()?;
+        let updated = if let Some(report) = reports.iter_mut().find(|entry| entry.id == id) {
+            report.title = title.to_string();
+            report.content = Some(content.to_string());
+            report.updated_at = chrono::Utc::now().to_rfc3339();
+            true
+        } else {
+            false
+        };
+        if updated {
+            self.write_locked(&reports)?;
+        }
+        Ok(updated)
+    }
+
     fn read_locked(&self) -> Result<Vec<GeneratedReport>> {
         read_or_default::<Vec<GeneratedReport>>(&self.path)
     }
