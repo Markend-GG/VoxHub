@@ -43,8 +43,8 @@ use crate::insertion::TextInserter;
 use crate::persistence::{
     sync_style_pack_preferences, ContextAnalysisStore, ContextCaptureStore, CorrectionRuleStore,
     CredentialAccount, CredentialsVault, DictionaryStore, GeneratedReportStore, HistoryStore,
-    PreferencesStore, ReportTemplateStore, RewriteHistoryStore, ScreenshotRecordStore,
-    StylePackStore,
+    PreferencesStore, ReportTemplateStore, RewriteHistoryStore, ScreenshotAggregationStore,
+    ScreenshotRecordStore, StylePackStore,
 };
 
 use crate::llm_gemini::{GeminiConfig, GeminiProvider};
@@ -239,7 +239,7 @@ fn batch_asr_chunk_limit_ms(provider_id: &str) -> Option<u64> {
 }
 
 pub struct Coordinator {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
 impl Inner {
@@ -250,6 +250,11 @@ impl Inner {
             let _ = app.emit(event, payload);
         }
     }
+
+    /// 检查是否已请求关闭。
+    pub(crate) fn is_shutdown(&self) -> bool {
+        self.shutdown.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 pub(crate) struct Inner {
@@ -258,6 +263,7 @@ pub(crate) struct Inner {
     pub(crate) context_capture: ContextCaptureStore,
     pub(crate) context_analysis: ContextAnalysisStore,
     pub(crate) screenshot_records: ScreenshotRecordStore,
+    pub(crate) screenshot_aggregation: ScreenshotAggregationStore,
     report_templates: ReportTemplateStore,
     generated_reports: GeneratedReportStore,
     pub(crate) prefs: PreferencesStore,
@@ -409,6 +415,10 @@ impl Coordinator {
                 log::error!("[coord] ScreenshotRecordStore init failed: {e}; fallback to temp storage");
                 ScreenshotRecordStore::new_fallback()
             });
+            let screenshot_aggregation = ScreenshotAggregationStore::new().unwrap_or_else(|e| {
+                log::error!("[coord] ScreenshotAggregationStore init failed: {e}; fallback to temp storage");
+                ScreenshotAggregationStore::new_fallback()
+            });
             let report_templates = ReportTemplateStore::new().unwrap_or_else(|e| {
                 log::error!("[coord] ReportTemplateStore init failed: {e}; fallback to temp storage");
                 ReportTemplateStore::new_fallback()
@@ -441,6 +451,7 @@ impl Coordinator {
                     context_capture,
                     context_analysis,
                     screenshot_records,
+                    screenshot_aggregation,
                     report_templates,
                     generated_reports,
                     rewrite_history,
@@ -532,6 +543,10 @@ impl Coordinator {
             log::error!("[coord] ScreenshotRecordStore init failed: {e}; fallback to temp storage");
             ScreenshotRecordStore::new_fallback()
         });
+        let screenshot_aggregation = ScreenshotAggregationStore::new().unwrap_or_else(|e| {
+            log::error!("[coord] ScreenshotAggregationStore init failed: {e}; fallback to temp storage");
+            ScreenshotAggregationStore::new_fallback()
+        });
         let report_templates = ReportTemplateStore::new().unwrap_or_else(|e| {
             log::error!("[coord] ReportTemplateStore init failed: {e}; fallback to temp storage");
             ReportTemplateStore::new_fallback()
@@ -564,6 +579,7 @@ impl Coordinator {
                 context_capture,
                 context_analysis,
                 screenshot_records,
+                screenshot_aggregation,
                 report_templates,
                 generated_reports,
                 rewrite_history,
@@ -685,6 +701,17 @@ impl Coordinator {
 
     pub fn bind_app(&self, handle: AppHandle) {
         *self.inner.app.lock() = Some(handle);
+        // 聚合模式：启动时 finalize 上次会话遗留的过期桶，并启动后台定时器
+        if self.inner.prefs.get().screenshot_app_aggregation_enabled {
+            let inner = Arc::clone(&self.inner);
+            std::thread::Builder::new()
+                .name("openless-agg-startup".into())
+                .spawn(move || {
+                    crate::screenshot_aggregation::finalize_expired_buckets(&inner);
+                })
+                .ok();
+            crate::screenshot_aggregation::start_aggregation_timer(Arc::clone(&self.inner));
+        }
     }
 
     pub fn android_insert_strategy(&self) -> crate::types::AndroidInsertStrategy {

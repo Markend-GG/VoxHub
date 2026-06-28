@@ -48,7 +48,7 @@ pub(crate) fn screenshot_allowed_by_whitelist(prefs: &UserPreferences) -> bool {
 }
 
 /// 判断是否为 OpenLess 自身进程
-fn is_openless_process(process_name_lower: &str) -> bool {
+pub(crate) fn is_openless_process(process_name_lower: &str) -> bool {
     let openless_names = ["openless.exe", "openless"];
     openless_names.contains(&process_name_lower)
 }

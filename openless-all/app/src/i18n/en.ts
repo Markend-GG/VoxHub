@@ -344,6 +344,10 @@ export const en: typeof zhCN = {
     insertFailed: 'Insert failed',
     confirmClear: 'Delete all {{count}} history entries? This cannot be undone.',
     backToList: 'Back to list',
+    screenshotAggregation: {
+      pending: 'Aggregating',
+      count: 'screenshots',
+    },
   },
   vocab: {
     kicker: 'VOCABULARY',
@@ -608,6 +612,18 @@ export const en: typeof zhCN = {
       source: 'Source',
       windowTitle: 'Window title',
       noVisibleApps: 'No visible window apps found',
+    },
+    screenshotAggregation: {
+      label: 'Aggregate by app',
+      desc: 'When enabled, screenshots are buffered per app before analysis. Pending items do not appear in history or reports.',
+    },
+    screenshotAnalysis: {
+      title: 'Screenshot Analysis',
+      contextCaptureHint: 'Captures the active window title and screenshot to automatically record context during voice input or text rewriting.',
+      visionAnalysisHint: 'Performs AI analysis on screenshots to generate conversation summaries, action items, and other structured content. Requires a multimodal model that supports image input.',
+    },
+    reportRecord: {
+      title: 'Reports & Records',
     },
     codingConsole: {
       title: 'Claude Console',

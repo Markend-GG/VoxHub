@@ -73,6 +73,8 @@ mod shortcut_binding;
 #[path = "mobile_stubs/shortcut_binding.rs"]
 mod shortcut_binding;
 #[cfg(not(mobile))]
+mod screenshot_aggregation;
+#[cfg(not(mobile))]
 mod screenshot_record;
 mod screenshot_whitelist;
 #[cfg(not(mobile))]
@@ -319,6 +321,8 @@ macro_rules! app_invoke_handler_desktop {
             commands::add_screenshot_whitelist_app,
             commands::remove_screenshot_whitelist_app,
             commands::restore_default_screenshot_whitelist_apps,
+            commands::set_screenshot_app_aggregation_enabled,
+            commands::get_screenshot_aggregation_status,
             restart_app,
             log_client_error,
             set_windows_caption_theme,

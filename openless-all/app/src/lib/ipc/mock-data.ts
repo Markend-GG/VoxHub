@@ -123,6 +123,7 @@ export let mockSettings: UserPreferences = {
     screenshotWhitelistEnabled: true,
     screenshotWhitelistApps: [],
     screenshotWhitelistDefaultsVersion: 1,
+    screenshotAppAggregationEnabled: false,
 }
 
 const mockFullStylePrompts: StyleSystemPrompts = {

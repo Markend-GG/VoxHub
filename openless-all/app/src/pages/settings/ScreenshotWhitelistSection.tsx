@@ -1,11 +1,11 @@
-// 设置 → 隐私 → 截图白名单管理。
+// 设置 → 报告记录 → 截图白名单管理。
 // V1 仅在 Windows 展示；macOS/Linux 不展示此入口。
 
 import { useState, useEffect, useCallback, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
-import { Card } from '../_atoms';
-import { SettingRow, SectionTitle } from './shared';
+import { Card, Btn, Pill } from '../_atoms';
+import { SettingRow, SectionTitle, Toggle } from './shared';
 import {
   listOpenWindowApps,
   setScreenshotWhitelistEnabled,
@@ -24,7 +24,7 @@ const BROWSER_PROCESS_NAMES = new Set(['chrome.exe', 'msedge.exe', 'firefox.exe'
 
 export function ScreenshotWhitelistSection() {
   const { t } = useTranslation();
-  const { prefs, updatePrefs: savePrefs, refresh } = useHotkeySettings();
+  const { prefs } = useHotkeySettings();
   const [showModal, setShowModal] = useState(false);
   const os = detectOS();
 
@@ -35,16 +35,15 @@ export function ScreenshotWhitelistSection() {
     <>
       <Card>
         <SectionTitle>{t('settings.screenshotWhitelist.title')}</SectionTitle>
+        <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6, marginBottom: 6 }}>
+          {t('settings.screenshotWhitelist.desc')}
+        </div>
         <SettingRow
-          label={t('settings.screenshotWhitelist.desc')}
+          label={t('settings.screenshotWhitelist.title')}
         >
-          <button
-            type="button"
-            onClick={() => setShowModal(true)}
-            style={manageBtnStyle}
-          >
+          <Btn variant="ghost" size="sm" onClick={() => setShowModal(true)}>
             {t('settings.screenshotWhitelist.manage')}
-          </button>
+          </Btn>
         </SettingRow>
       </Card>
       {showModal && (
@@ -104,18 +103,18 @@ function WhitelistModal({ onClose }: { onClose: () => void }) {
     <div style={modalOverlayStyle} onClick={onClose}>
       <div style={modalCardStyle} onClick={e => e.stopPropagation()}>
         <div style={modalHeaderStyle}>
-          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
+          <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>
             {t('settings.screenshotWhitelist.modalTitle')}
           </h3>
-          <button type="button" onClick={onClose} style={closeBtnStyle}>
+          <Btn variant="ghost" size="sm" onClick={onClose} style={{ minWidth: 28, padding: '4px 6px' }}>
             ✕
-          </button>
+          </Btn>
         </div>
 
         {/* 开关 */}
         <div style={toggleRowStyle}>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>
+            <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ol-ink)' }}>
               {t('settings.screenshotWhitelist.toggleLabel')}
             </div>
             <div style={{ fontSize: 11.5, color: 'var(--ol-ink-3)', marginTop: 2 }}>
@@ -124,24 +123,7 @@ function WhitelistModal({ onClose }: { onClose: () => void }) {
                 : t('settings.screenshotWhitelist.toggleDescOff')}
             </div>
           </div>
-          <label style={{ position: 'relative', display: 'inline-block', width: 40, height: 22 }}>
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={e => handleToggle(e.target.checked)}
-              style={{ opacity: 0, width: 0, height: 0, position: 'absolute' }}
-            />
-            <span style={{
-              position: 'absolute', cursor: 'pointer', inset: 0,
-              background: enabled ? 'var(--ol-blue)' : 'var(--ol-ink-4)',
-              borderRadius: 22, transition: 'background 0.2s',
-            }}>
-              <span style={{
-                position: 'absolute', height: 16, width: 16, left: enabled ? 20 : 3, top: 3,
-                background: '#fff', borderRadius: '50%', transition: 'left 0.2s',
-              }} />
-            </span>
-          </label>
+          <Toggle on={enabled} onToggle={handleToggle} />
         </div>
 
         {/* 关闭白名单时的警告 */}
@@ -159,61 +141,63 @@ function WhitelistModal({ onClose }: { onClose: () => void }) {
         )}
 
         {/* 白名单列表 */}
-        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', margin: '10px 0' }}>
+        <div style={listContainerStyle}>
           {apps.length === 0 ? (
-            <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', padding: '16px 0', textAlign: 'center' }}>
+            <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', padding: '20px 0', textAlign: 'center' }}>
               {t('settings.screenshotWhitelist.emptyState')}
             </div>
           ) : (
-            <table style={tableStyle}>
-              <thead>
-                <tr>
-                  <th style={thStyle}>{t('settings.screenshotWhitelist.appName')}</th>
-                  <th style={thStyle}>{t('settings.screenshotWhitelist.processName')}</th>
-                  <th style={{ ...thStyle, width: 60 }}>{t('settings.screenshotWhitelist.source')}</th>
-                  <th style={{ ...thStyle, width: 50 }} />
-                </tr>
-              </thead>
-              <tbody>
-                {apps.map(app => (
-                  <tr key={app.id}>
-                    <td style={tdStyle}>{app.displayName || app.processName}</td>
-                    <td style={{ ...tdStyle, color: 'var(--ol-ink-4)', fontSize: 11.5 }}>
-                      {app.processName}
-                    </td>
-                    <td style={{ ...tdStyle, fontSize: 11, color: 'var(--ol-ink-4)' }}>
+            <div>
+              {/* 表头 */}
+              <div style={listHeaderStyle}>
+                <span style={{ flex: '1.2', minWidth: 0 }}>{t('settings.screenshotWhitelist.appName')}</span>
+                <span style={{ flex: '1', minWidth: 0 }}>{t('settings.screenshotWhitelist.processName')}</span>
+                <span style={{ width: 56, textAlign: 'center' }}>{t('settings.screenshotWhitelist.source')}</span>
+                <span style={{ width: 36 }} />
+              </div>
+              {/* 列表项 */}
+              {apps.map(app => (
+                <div key={app.id} style={listItemStyle}>
+                  <span style={{ flex: '1.2', minWidth: 0, fontSize: 12.5, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {app.displayName || app.processName}
+                  </span>
+                  <span style={{ flex: '1', minWidth: 0, fontSize: 11.5, color: 'var(--ol-ink-4)', fontFamily: 'var(--ol-font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {app.processName}
+                  </span>
+                  <span style={{ width: 56, textAlign: 'center' }}>
+                    <Pill size="sm" tone={app.source === 'default' ? 'outline' : 'blue'}>
                       {app.source === 'default'
                         ? t('settings.screenshotWhitelist.sourceDefault')
                         : t('settings.screenshotWhitelist.sourceUser')}
-                    </td>
-                    <td style={tdStyle}>
-                      <button
-                        type="button"
-                        onClick={() => handleDelete(app.processName)}
-                        style={deleteBtnStyle}
-                        title={t('settings.screenshotWhitelist.delete')}
-                      >
-                        ✕
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    </Pill>
+                  </span>
+                  <span style={{ width: 36, display: 'flex', justifyContent: 'center' }}>
+                    <Btn
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleDelete(app.processName)}
+                      style={{ minWidth: 24, padding: '3px 5px', fontSize: 11, color: 'var(--ol-ink-4)' }}
+                    >
+                      ✕
+                    </Btn>
+                  </span>
+                </div>
+              ))}
+            </div>
           )}
         </div>
 
         {/* 操作按钮 */}
         <div style={actionsStyle}>
-          <button type="button" onClick={() => setShowAddModal(true)} style={primaryBtnStyle}>
+          <Btn variant="blue" size="sm" onClick={() => setShowAddModal(true)}>
             {t('settings.screenshotWhitelist.addApp')}
-          </button>
-          <button type="button" onClick={handleRestoreDefaults} style={secondaryBtnStyle}>
+          </Btn>
+          <Btn variant="ghost" size="sm" onClick={handleRestoreDefaults}>
             {t('settings.screenshotWhitelist.restoreDefaults')}
-          </button>
-          <button type="button" onClick={onClose} style={secondaryBtnStyle}>
+          </Btn>
+          <Btn variant="ghost" size="sm" onClick={onClose}>
             {t('settings.screenshotWhitelist.close')}
-          </button>
+          </Btn>
         </div>
       </div>
 
@@ -282,75 +266,73 @@ function AddAppModal({
 
   return (
     <div style={modalOverlayStyle} onClick={onClose}>
-      <div style={{ ...modalCardStyle, maxWidth: 500 }} onClick={e => e.stopPropagation()}>
+      <div style={{ ...modalCardStyle, maxWidth: 520 }} onClick={e => e.stopPropagation()}>
         <div style={modalHeaderStyle}>
-          <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>
+          <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>
             {t('settings.screenshotWhitelist.addAppTitle')}
           </h3>
-          <button type="button" onClick={onClose} style={closeBtnStyle}>✕</button>
+          <Btn variant="ghost" size="sm" onClick={onClose} style={{ minWidth: 28, padding: '4px 6px' }}>
+            ✕
+          </Btn>
         </div>
         <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginBottom: 8 }}>
           {t('settings.screenshotWhitelist.addAppDesc')}
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-          <button type="button" onClick={loadApps} style={refreshBtnStyle} disabled={loading}>
+          <Btn variant="ghost" size="sm" onClick={loadApps} disabled={loading}>
             {t('settings.screenshotWhitelist.refresh')}
-          </button>
+          </Btn>
         </div>
         {error && (
           <div style={{ ...warningStyle, marginBottom: 8 }}>{error}</div>
         )}
-        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', maxHeight: 300 }}>
+        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', maxHeight: 320 }}>
           {loading ? (
-            <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', textAlign: 'center', padding: 20 }}>
+            <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', textAlign: 'center', padding: 24 }}>
               {t('common.loading')}
             </div>
           ) : openApps.length === 0 ? (
-            <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', textAlign: 'center', padding: 20 }}>
+            <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', textAlign: 'center', padding: 24 }}>
               {t('settings.screenshotWhitelist.noVisibleApps')}
             </div>
           ) : (
-            <table style={tableStyle}>
-              <thead>
-                <tr>
-                  <th style={thStyle}>{t('settings.screenshotWhitelist.appName')}</th>
-                  <th style={thStyle}>{t('settings.screenshotWhitelist.processName')}</th>
-                  <th style={{ ...thStyle, maxWidth: 120 }}>{t('settings.screenshotWhitelist.windowTitle')}</th>
-                  <th style={{ ...thStyle, width: 70 }} />
-                </tr>
-              </thead>
-              <tbody>
-                {openApps.map((app, idx) => {
-                  const alreadyAdded = existingProcessNames.has(app.processName.toLowerCase());
-                  return (
-                    <tr key={`${app.processName}-${app.processId}-${idx}`}>
-                      <td style={tdStyle}>{app.displayName}</td>
-                      <td style={{ ...tdStyle, color: 'var(--ol-ink-4)', fontSize: 11.5 }}>
-                        {app.processName}
-                      </td>
-                      <td style={{ ...tdStyle, fontSize: 11, color: 'var(--ol-ink-4)', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {app.windowTitle ?? ''}
-                      </td>
-                      <td style={tdStyle}>
-                        {alreadyAdded ? (
-                          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
-                            {t('settings.screenshotWhitelist.alreadyAdded')}
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => handleAdd(app)}
-                            style={addBtnStyle}
-                          >
-                            {t('settings.screenshotWhitelist.add')}
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            <div>
+              {/* 表头 */}
+              <div style={listHeaderStyle}>
+                <span style={{ flex: '1.2', minWidth: 0 }}>{t('settings.screenshotWhitelist.appName')}</span>
+                <span style={{ flex: '1', minWidth: 0 }}>{t('settings.screenshotWhitelist.processName')}</span>
+                <span style={{ flex: '1.2', minWidth: 0 }}>{t('settings.screenshotWhitelist.windowTitle')}</span>
+                <span style={{ width: 60, textAlign: 'center' }} />
+              </div>
+              {/* 列表项 */}
+              {openApps.map((app, idx) => {
+                const alreadyAdded = existingProcessNames.has(app.processName.toLowerCase());
+                return (
+                  <div key={`${app.processName}-${app.processId}-${idx}`} style={listItemStyle}>
+                    <span style={{ flex: '1.2', minWidth: 0, fontSize: 12.5, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {app.displayName}
+                    </span>
+                    <span style={{ flex: '1', minWidth: 0, fontSize: 11.5, color: 'var(--ol-ink-4)', fontFamily: 'var(--ol-font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {app.processName}
+                    </span>
+                    <span style={{ flex: '1.2', minWidth: 0, fontSize: 11, color: 'var(--ol-ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {app.windowTitle ?? ''}
+                    </span>
+                    <span style={{ width: 60, display: 'flex', justifyContent: 'center' }}>
+                      {alreadyAdded ? (
+                        <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
+                          {t('settings.screenshotWhitelist.alreadyAdded')}
+                        </span>
+                      ) : (
+                        <Btn variant="blue" size="sm" onClick={() => handleAdd(app)} style={{ padding: '3px 10px', fontSize: 11.5 }}>
+                          {t('settings.screenshotWhitelist.add')}
+                        </Btn>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
       </div>
@@ -359,18 +341,6 @@ function AddAppModal({
 }
 
 // ─── 样式 ──────────────────────────────────────────────────────────
-
-const manageBtnStyle: CSSProperties = {
-  padding: '5px 14px',
-  borderRadius: 8,
-  border: '0.5px solid var(--ol-line)',
-  background: 'var(--ol-surface)',
-  color: 'var(--ol-ink)',
-  fontSize: 12,
-  fontWeight: 500,
-  cursor: 'default',
-  fontFamily: 'inherit',
-};
 
 const modalOverlayStyle: CSSProperties = {
   position: 'fixed',
@@ -390,11 +360,11 @@ const modalCardStyle: CSSProperties = {
   maxWidth: 640,
   maxHeight: '80vh',
   background: 'var(--ol-surface)',
-  borderRadius: 14,
+  borderRadius: 'var(--ol-r-lg)',
   border: '0.5px solid var(--ol-line)',
   boxShadow: 'var(--ol-shadow-xl)',
   display: 'flex',
-  flexDirection: 'column',
+  flexDirection: 'column' as const,
   padding: 20,
   animation: 'ol-modal-card-in 0.24s var(--ol-motion-spring)',
 };
@@ -404,20 +374,6 @@ const modalHeaderStyle: CSSProperties = {
   alignItems: 'center',
   justifyContent: 'space-between',
   marginBottom: 14,
-};
-
-const closeBtnStyle: CSSProperties = {
-  width: 28,
-  height: 28,
-  border: 0,
-  borderRadius: 999,
-  background: 'transparent',
-  color: 'var(--ol-ink-3)',
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  cursor: 'default',
-  fontSize: 14,
 };
 
 const toggleRowStyle: CSSProperties = {
@@ -448,38 +404,34 @@ const browserWarningStyle: CSSProperties = {
   lineHeight: 1.5,
 };
 
-const tableStyle: CSSProperties = {
-  width: '100%',
-  borderCollapse: 'collapse',
-  fontSize: 12.5,
+const listContainerStyle: CSSProperties = {
+  flex: 1,
+  minHeight: 0,
+  overflow: 'auto',
+  margin: '10px 0',
+  borderRadius: 8,
+  border: '0.5px solid var(--ol-line-soft)',
 };
 
-const thStyle: CSSProperties = {
-  textAlign: 'left',
-  padding: '6px 8px',
-  fontWeight: 600,
-  fontSize: 11,
-  color: 'var(--ol-ink-4)',
-  borderBottom: '0.5px solid var(--ol-line-soft)',
-};
-
-const tdStyle: CSSProperties = {
-  padding: '6px 8px',
-  borderBottom: '0.5px solid var(--ol-line-soft)',
-};
-
-const deleteBtnStyle: CSSProperties = {
-  width: 22,
-  height: 22,
-  border: 0,
-  borderRadius: 999,
-  background: 'transparent',
-  color: 'var(--ol-ink-4)',
-  cursor: 'default',
-  fontSize: 11,
-  display: 'inline-flex',
+const listHeaderStyle: CSSProperties = {
+  display: 'flex',
   alignItems: 'center',
-  justifyContent: 'center',
+  gap: 8,
+  padding: '7px 10px',
+  fontSize: 11,
+  fontWeight: 600,
+  color: 'var(--ol-ink-4)',
+  background: 'var(--ol-surface-2)',
+  borderBottom: '0.5px solid var(--ol-line-soft)',
+};
+
+const listItemStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  padding: '7px 10px',
+  borderBottom: '0.5px solid var(--ol-line-soft)',
+  transition: 'background 0.12s',
 };
 
 const actionsStyle: CSSProperties = {
@@ -488,51 +440,4 @@ const actionsStyle: CSSProperties = {
   marginTop: 12,
   paddingTop: 12,
   borderTop: '0.5px solid var(--ol-line-soft)',
-};
-
-const primaryBtnStyle: CSSProperties = {
-  padding: '7px 16px',
-  borderRadius: 8,
-  border: 0,
-  background: 'var(--ol-blue)',
-  color: '#fff',
-  fontSize: 12.5,
-  fontWeight: 600,
-  cursor: 'default',
-  fontFamily: 'inherit',
-};
-
-const secondaryBtnStyle: CSSProperties = {
-  padding: '7px 16px',
-  borderRadius: 8,
-  border: '0.5px solid var(--ol-line)',
-  background: 'var(--ol-surface)',
-  color: 'var(--ol-ink)',
-  fontSize: 12.5,
-  fontWeight: 500,
-  cursor: 'default',
-  fontFamily: 'inherit',
-};
-
-const refreshBtnStyle: CSSProperties = {
-  padding: '4px 10px',
-  borderRadius: 6,
-  border: '0.5px solid var(--ol-line)',
-  background: 'var(--ol-surface)',
-  color: 'var(--ol-ink-3)',
-  fontSize: 11.5,
-  cursor: 'default',
-  fontFamily: 'inherit',
-};
-
-const addBtnStyle: CSSProperties = {
-  padding: '3px 10px',
-  borderRadius: 6,
-  border: 0,
-  background: 'var(--ol-blue)',
-  color: '#fff',
-  fontSize: 11.5,
-  fontWeight: 600,
-  cursor: 'default',
-  fontFamily: 'inherit',
 };

@@ -346,6 +346,10 @@ export const ja: typeof zhCN = {
     insertFailed: '入力失敗',
     confirmClear: '全 {{count}} 件の記録を削除しますか？この操作は取り消せません。',
     backToList: '一覧に戻る',
+    screenshotAggregation: {
+      pending: '集約中',
+      count: '枚',
+    },
   },
   vocab: {
     kicker: 'VOCABULARY',
@@ -610,6 +614,18 @@ export const ja: typeof zhCN = {
       source: 'ソース',
       windowTitle: 'ウィンドウタイトル',
       noVisibleApps: '表示中のウィンドウアプリが見つかりません',
+    },
+    screenshotAggregation: {
+      label: 'アプリ別に集約分析',
+      desc: '有効にすると、スクリーンショットはアプリ別に一時保存され、後で分析に送信されます。集約中の項目は履歴やレポートに表示されません。',
+    },
+    screenshotAnalysis: {
+      title: 'スクリーンショット分析',
+      contextCaptureHint: '現在のアクティブウィンドウのタイトルとスクリーンショットを取得し、音声入力やテキストリライト時のコンテキスト情報を自動的に記録します。',
+      visionAnalysisHint: 'スクリーンショットをAIで智能分析し、会話の要約やアクション項目などの構造化コンテンツを自動生成します。画像入力対応のマルチモーダルモデルが必要です。',
+    },
+    reportRecord: {
+      title: 'レポートと記録',
     },
     codingConsole: {
       title: 'Claude コンソール',

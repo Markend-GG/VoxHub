@@ -342,6 +342,10 @@ export const zhCN = {
     insertFailed: '插入失败',
     confirmClear: '确定清空全部 {{count}} 条记录？此操作不可恢复。',
     backToList: '返回列表',
+    screenshotAggregation: {
+      pending: '待聚合',
+      count: '张',
+    },
   },
   vocab: {
     kicker: 'VOCABULARY',
@@ -606,6 +610,18 @@ export const zhCN = {
       source: '来源',
       windowTitle: '窗口标题',
       noVisibleApps: '未发现可见窗口应用',
+    },
+    screenshotAggregation: {
+      label: '按应用聚合分析',
+      desc: '开启后，截图记录会先按应用暂存聚合，再提交分析。待聚合内容不会进入历史和报告。',
+    },
+    screenshotAnalysis: {
+      title: '截图分析',
+      contextCaptureHint: '采集当前前台应用的窗口标题和屏幕截图，用于录音/重写时自动记录上下文信息。',
+      visionAnalysisHint: '对截图进行 AI 智能分析，自动生成对话摘要、行动项等结构化内容。需配置支持图片输入的多模态模型。',
+    },
+    reportRecord: {
+      title: '报告记录',
     },
     codingConsole: {
       title: 'Claude 控制台',

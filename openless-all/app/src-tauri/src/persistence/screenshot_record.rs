@@ -293,6 +293,9 @@ mod tests {
             error_code: None,
             error_message: None,
             analysis: None,
+            aggregation_mode: None,
+            aggregation_bucket_id: None,
+            process_name: None,
         }
     }
 

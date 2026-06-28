@@ -235,4 +235,6 @@ export {
     addScreenshotWhitelistApp,
     removeScreenshotWhitelistApp,
     restoreDefaultScreenshotWhitelistApps,
+    setScreenshotAppAggregationEnabled,
+    getScreenshotAggregationStatus,
 } from "./whitelist"

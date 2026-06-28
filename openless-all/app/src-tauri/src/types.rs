@@ -303,6 +303,60 @@ pub struct ScreenshotRecord {
     pub error_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analysis: Option<ContextAnalysisResult>,
+    /// 聚合模式来源。`immediate` = 传统即时截图记录；`app` = 按应用聚合生成。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregation_mode: Option<String>,
+    /// 聚合桶 ID（仅 aggregation_mode = "app" 时存在）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregation_bucket_id: Option<String>,
+    /// 触发时的前台进程名（小写归一化）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_name: Option<String>,
+}
+
+/// 待聚合桶状态。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenshotAggregationBucketStatus {
+    Collecting,
+    Finalizing,
+    Failed,
+}
+
+/// 按应用聚合的截图缓冲桶。待聚合桶不是正式历史，不进入历史列表或报告。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotAggregationBucket {
+    pub id: String,
+    pub process_name: String,
+    pub app_display_name: Option<String>,
+    pub first_captured_at: String,
+    pub last_captured_at: String,
+    pub status: ScreenshotAggregationBucketStatus,
+    pub screenshot_ids: Vec<String>,
+    pub trigger_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// 前端查询用的聚合状态摘要。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotAggregationStatus {
+    pub buckets: Vec<ScreenshotAggregationStatusBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotAggregationStatusBucket {
+    pub id: String,
+    pub process_name: String,
+    pub app_display_name: Option<String>,
+    pub screenshot_count: usize,
+    pub first_captured_at: String,
+    pub last_captured_at: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1408,9 +1462,12 @@ pub struct UserPreferences {
     /// 截图白名单应用列表。默认包含常用工作应用。
     #[serde(default = "default_screenshot_whitelist_apps")]
     pub screenshot_whitelist_apps: Vec<ScreenshotWhitelistApp>,
-    /// 默认白名单版本号。升级时用于判断是否需要补充新增默认项。
+    /// 默认白名单版本号。升级时用以判断是否需要补充新增默认项。
     #[serde(default = "default_screenshot_whitelist_defaults_version")]
     pub screenshot_whitelist_defaults_version: u32,
+    /// 按应用聚合分析开关。默认关闭，作为高级选项。
+    #[serde(default)]
+    pub screenshot_app_aggregation_enabled: bool,
 }
 
 fn default_local_asr_model() -> String {
@@ -1630,6 +1687,8 @@ struct UserPreferencesWire {
     screenshot_whitelist_apps: Vec<ScreenshotWhitelistApp>,
     #[serde(default = "default_screenshot_whitelist_defaults_version")]
     screenshot_whitelist_defaults_version: u32,
+    #[serde(default)]
+    screenshot_app_aggregation_enabled: bool,
 }
 
 impl Default for UserPreferencesWire {
@@ -1730,6 +1789,7 @@ impl Default for UserPreferencesWire {
             screenshot_whitelist_enabled: prefs.screenshot_whitelist_enabled,
             screenshot_whitelist_apps: prefs.screenshot_whitelist_apps,
             screenshot_whitelist_defaults_version: prefs.screenshot_whitelist_defaults_version,
+            screenshot_app_aggregation_enabled: prefs.screenshot_app_aggregation_enabled,
         }
     }
 }
@@ -1884,6 +1944,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             screenshot_whitelist_enabled: wire.screenshot_whitelist_enabled,
             screenshot_whitelist_apps: wire.screenshot_whitelist_apps,
             screenshot_whitelist_defaults_version: wire.screenshot_whitelist_defaults_version,
+            screenshot_app_aggregation_enabled: wire.screenshot_app_aggregation_enabled,
         })
     }
 }
@@ -2702,6 +2763,7 @@ impl Default for UserPreferences {
             screenshot_whitelist_enabled: true,
             screenshot_whitelist_apps: default_screenshot_whitelist_apps_list(),
             screenshot_whitelist_defaults_version: DEFAULT_WHITELIST_VERSION,
+            screenshot_app_aggregation_enabled: false,
         }
     }
 }

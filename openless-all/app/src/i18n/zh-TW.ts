@@ -344,6 +344,10 @@ export const zhTW: typeof zhCN = {
     insertFailed: '插入失敗',
     confirmClear: '確定清空全部 {{count}} 條記錄？此操作不可恢復。',
     backToList: '返回列表',
+    screenshotAggregation: {
+      pending: '待聚合',
+      count: '張',
+    },
   },
   vocab: {
     kicker: 'VOCABULARY',
@@ -608,6 +612,18 @@ export const zhTW: typeof zhCN = {
       source: '來源',
       windowTitle: '窗口標題',
       noVisibleApps: '未發現可見窗口應用',
+    },
+    screenshotAggregation: {
+      label: '按應用聚合分析',
+      desc: '開啟後，截圖記錄會先按應用暫存聚合，再提交分析。待聚合內容不會進入歷史和報告。',
+    },
+    screenshotAnalysis: {
+      title: '截圖分析',
+      contextCaptureHint: '採集目前前台應用的窗口標題和屏幕截圖，用於錄音/重寫時自動記錄上下文資訊。',
+      visionAnalysisHint: '對截圖進行 AI 智能分析，自動生成對話摘要、行動項等結構化內容。需配置支援圖片輸入的多模態模型。',
+    },
+    reportRecord: {
+      title: '報告記錄',
     },
     codingConsole: {
       title: 'Claude 主控台',

@@ -1,7 +1,8 @@
 //! 截图白名单管理 IPC 命令。
 
 use super::*;
-use crate::types::OpenWindowApp;
+use crate::types::{OpenWindowApp, ScreenshotAggregationStatus};
+use std::sync::Arc;
 
 /// IPC 输入类型：添加白名单应用
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -101,4 +102,44 @@ pub fn restore_default_screenshot_whitelist_apps(
         .map_err(|e| e.to_string())?;
     let _ = app.emit("prefs:changed", &prefs);
     Ok(prefs)
+}
+
+/// 设置按应用聚合分析开关
+#[tauri::command]
+pub fn set_screenshot_app_aggregation_enabled(
+    coord: CoordinatorState<'_>,
+    app: AppHandle,
+    enabled: bool,
+) -> Result<UserPreferences, String> {
+    let mut prefs = coord.prefs().get();
+    prefs.screenshot_app_aggregation_enabled = enabled;
+    coord
+        .prefs()
+        .set(prefs.clone())
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("prefs:changed", &prefs);
+
+    // 运行时启用：先 finalize 遗留桶，再启动后台定时器
+    if enabled {
+        let inner = Arc::clone(&coord.inner);
+        std::thread::Builder::new()
+            .name("openless-agg-runtime-startup".into())
+            .spawn(move || {
+                crate::screenshot_aggregation::finalize_expired_buckets(&inner);
+            })
+            .ok();
+        crate::screenshot_aggregation::start_aggregation_timer(Arc::clone(&coord.inner));
+    }
+    Ok(prefs)
+}
+
+/// 查询当前聚合状态（待聚合桶列表）
+#[tauri::command]
+pub fn get_screenshot_aggregation_status(
+    coord: CoordinatorState<'_>,
+) -> Result<ScreenshotAggregationStatus, String> {
+    let status = crate::screenshot_aggregation::get_aggregation_status(
+        &coord.inner.screenshot_aggregation,
+    );
+    Ok(status)
 }

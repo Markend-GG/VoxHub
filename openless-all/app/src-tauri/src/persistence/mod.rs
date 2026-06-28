@@ -35,6 +35,7 @@ mod paths;
 mod preferences;
 mod report_template;
 mod rewrite_history;
+mod screenshot_aggregation;
 mod screenshot_record;
 mod style_pack;
 
@@ -49,6 +50,7 @@ pub use paths::*;
 pub use preferences::*;
 pub use report_template::*;
 pub use rewrite_history::*;
+pub use screenshot_aggregation::*;
 pub use screenshot_record::*;
 pub use style_pack::*;
 

@@ -110,6 +110,7 @@ const previousPrefs: UserPreferences = {
   screenshotWhitelistEnabled: true,
   screenshotWhitelistApps: [],
   screenshotWhitelistDefaultsVersion: 1,
+  screenshotAppAggregationEnabled: false,
 };
 
 const nextPrefs: UserPreferences = {

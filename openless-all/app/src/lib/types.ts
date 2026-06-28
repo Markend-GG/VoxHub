@@ -189,6 +189,37 @@ export interface ScreenshotRecord {
   errorCode: string | null;
   errorMessage: string | null;
   analysis?: ContextAnalysisResult | null;
+  aggregationMode?: string | null;
+  aggregationBucketId?: string | null;
+  processName?: string | null;
+}
+
+export type ScreenshotAggregationBucketStatus = 'collecting' | 'finalizing' | 'failed';
+
+export interface ScreenshotAggregationBucket {
+  id: string;
+  processName: string;
+  appDisplayName: string | null;
+  firstCapturedAt: string;
+  lastCapturedAt: string;
+  status: ScreenshotAggregationBucketStatus;
+  screenshotIds: string[];
+  triggerCount: number;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+}
+
+export interface ScreenshotAggregationStatus {
+  buckets: ScreenshotAggregationStatusBucket[];
+}
+
+export interface ScreenshotAggregationStatusBucket {
+  id: string;
+  processName: string;
+  appDisplayName: string | null;
+  screenshotCount: number;
+  firstCapturedAt: string;
+  lastCapturedAt: string;
 }
 
 export type ReportType = 'daily' | 'weekly' | 'monthly';
@@ -631,8 +662,10 @@ export interface UserPreferences {
   screenshotWhitelistEnabled: boolean;
   /** 截图白名单应用列表。默认包含常用工作应用。 */
   screenshotWhitelistApps: ScreenshotWhitelistApp[];
-  /** 默认白名单版本号。升级时用于判断是否需要补充新增默认项。 */
+  /** 默认白名单版本号。升级时用以判断是否需要补充新增默认项。 */
   screenshotWhitelistDefaultsVersion: number;
+  /** 按应用聚合分析开关。默认关闭，作为高级选项。 */
+  screenshotAppAggregationEnabled: boolean;
 }
 
 export interface MarketplaceListItem {

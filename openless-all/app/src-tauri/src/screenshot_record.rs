@@ -47,6 +47,14 @@ pub(crate) fn handle_screenshot_record_hotkey(inner: &Arc<Inner>) {
         return;
     }
 
+    // 按应用聚合分析模式：截图进入聚合队列而非立即创建正式记录
+    if prefs.screenshot_app_aggregation_enabled {
+        handle_aggregation_hotkey(inner);
+        return;
+    }
+
+    // 传统即时截图记录流程（以下不变）
+
     let now = chrono::Utc::now().to_rfc3339();
     let merge_window = Duration::from_secs(u64::from(
         prefs.screenshot_record_merge_window_seconds.clamp(10, 300),
@@ -92,6 +100,9 @@ pub(crate) fn handle_screenshot_record_hotkey(inner: &Arc<Inner>) {
             error_code: None,
             error_message: None,
             analysis: None,
+            aggregation_mode: Some("immediate".to_string()),
+            aggregation_bucket_id: None,
+            process_name: None,
         };
         if let Err(error) = inner.screenshot_records.upsert_with_retention(
             record,
@@ -321,6 +332,111 @@ fn capture_one(inner: Arc<Inner>, record_id: String) {
         prefs.history_max_entries,
     ) {
         log::warn!("[screenshot-record] append capture result failed: {error}");
+    }
+}
+
+// ─── 按应用聚合分析模式 ──────────────────────────────────────────────────────
+
+/// 聚合模式下的截图热键处理：
+/// 1. 读取前台进程名（无法识别则不进入队列）
+/// 2. 捕获截图
+/// 3. 截图进入聚合桶
+/// 4. 检查 finalize 条件
+fn handle_aggregation_hotkey(inner: &Arc<Inner>) {
+    // 读取前台进程名
+    #[cfg(target_os = "windows")]
+    let (process_name, app_display_name) = {
+        let Some(identity) = crate::screenshot_whitelist::current_foreground_app_identity() else {
+            log::debug!("[agg] foreground process unknown, skip");
+            return;
+        };
+        let name = identity.process_name.to_lowercase();
+        if crate::screenshot_whitelist::is_openless_process(&name) {
+            log::debug!("[agg] foreground is OpenLess, skip");
+            return;
+        }
+        (name, identity.display_name)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (process_name, app_display_name) = {
+        // 非 Windows：使用窗口标题作为应用名
+        let Some(identity) = crate::context_capture::current_window_identity() else {
+            log::debug!("[agg] window identity unknown, skip");
+            return;
+        };
+        let name = identity.context_app.unwrap_or_else(|| "unknown".to_string()).to_lowercase();
+        (name, identity.conversation_window)
+    };
+
+    if process_name.is_empty() {
+        log::debug!("[agg] empty process name, skip");
+        return;
+    }
+
+    let capture_inner = Arc::clone(inner);
+    let proc_name = process_name;
+    let app_name = app_display_name;
+    std::thread::Builder::new()
+        .name("openless-agg-capture".into())
+        .spawn(move || capture_and_aggregate(capture_inner, proc_name, app_name))
+        .ok();
+}
+
+/// 聚合模式下单次截图：捕获后追加到聚合桶，检查 finalize。
+fn capture_and_aggregate(inner: Arc<Inner>, process_name: String, app_display_name: Option<String>) {
+    let prefs = inner.prefs.get();
+    let context_id = Uuid::new_v4().to_string();
+
+    // 捕获截图
+    if let Err(error) = crate::context_capture::capture_and_store_with_id(
+        &inner.context_capture,
+        context_id.clone(),
+        ContextCaptureHistoryType::ScreenshotRecord,
+        "agg-pending".to_string(),
+        prefs.history_retention_days,
+        prefs.history_max_entries,
+    ) {
+        log::warn!("[agg] capture failed: {error}");
+        return;
+    }
+
+    // 检查截图文件是否存在
+    let contexts = match inner.context_capture.list() {
+        Ok(list) => list,
+        Err(e) => {
+            log::warn!("[agg] load contexts failed: {e}");
+            return;
+        }
+    };
+    let Some(context) = contexts.into_iter().find(|entry| entry.id == context_id) else {
+        log::warn!("[agg] context {} not found after capture", context_id);
+        return;
+    };
+    if context.screenshot_ref.is_none() {
+        log::debug!("[agg] capture {} has no screenshot file, skip", context_id);
+        return;
+    }
+
+    // 追加到聚合桶
+    let to_finalize = crate::screenshot_aggregation::append_screenshot(
+        &inner,
+        &process_name,
+        app_display_name.as_deref(),
+        &context_id,
+    );
+
+    // 通知前端聚合状态变化
+    inner.emit_event("aggregation:updated", serde_json::Value::Null);
+
+    // Finalize 已满足条件的桶
+    for bucket in to_finalize {
+        log::info!(
+            "[agg] finalizing bucket {} ({}, {} screenshots)",
+            bucket.id,
+            bucket.process_name,
+            bucket.screenshot_ids.len()
+        );
+        crate::screenshot_aggregation::finalize_bucket(&inner, &bucket);
     }
 }
 

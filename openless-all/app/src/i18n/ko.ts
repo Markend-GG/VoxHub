@@ -346,6 +346,10 @@ export const ko: typeof zhCN = {
     insertFailed: '입력 실패',
     confirmClear: '전체 {{count}}건의 기록을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
     backToList: '목록으로',
+    screenshotAggregation: {
+      pending: '집계 중',
+      count: '장',
+    },
   },
   vocab: {
     kicker: 'VOCABULARY',
@@ -610,6 +614,18 @@ export const ko: typeof zhCN = {
       source: '출처',
       windowTitle: '창 제목',
       noVisibleApps: '열려 있는 창 앱을 찾을 수 없습니다',
+    },
+    screenshotAggregation: {
+      label: '앱별 집계 분석',
+      desc: '활성화하면 스크린샷이 앱별로 임시 저장된 후 분석에 제출됩니다. 집계 중인 항목은 기록이나 보고서에 표시되지 않습니다.',
+    },
+    screenshotAnalysis: {
+      title: '스크린샷 분석',
+      contextCaptureHint: '현재 활성 창의 제목과 스크린샷을 캡처하여 음성 입력이나 텍스트 재작성 시 컨텍스트 정보를 자동으로 기록합니다.',
+      visionAnalysisHint: '스크린샷에 AI 분석을 수행하여 대화 요약, 액션 아이템 등 구조화된 콘텐츠를 자동 생성합니다. 이미지 입력을 지원하는 멀티모달 모델이 필요합니다.',
+    },
+    reportRecord: {
+      title: '보고서 및 기록',
     },
     codingConsole: {
       title: 'Claude 콘솔',

@@ -2,6 +2,7 @@
 
 import type {
   OpenWindowApp,
+  ScreenshotAggregationStatus,
   ScreenshotWhitelistAppInput,
   UserPreferences,
 } from "../types"
@@ -46,5 +47,23 @@ export function restoreDefaultScreenshotWhitelistApps(): Promise<UserPreferences
     "restore_default_screenshot_whitelist_apps",
     undefined,
     () => ({} as UserPreferences),
+  )
+}
+
+export function setScreenshotAppAggregationEnabled(
+  enabled: boolean,
+): Promise<UserPreferences> {
+  return invokeOrMock(
+    "set_screenshot_app_aggregation_enabled",
+    { enabled },
+    () => ({ screenshotAppAggregationEnabled: enabled } as UserPreferences),
+  )
+}
+
+export function getScreenshotAggregationStatus(): Promise<ScreenshotAggregationStatus> {
+  return invokeOrMock(
+    "get_screenshot_aggregation_status",
+    undefined,
+    () => ({ buckets: [] }),
   )
 }

@@ -7,7 +7,7 @@ import { listen } from '@tauri-apps/api/event';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
-import { clearHistory, clearRewriteHistory, clearScreenshotRecords, deleteHistoryEntry, deleteRewriteHistoryEntry, deleteScreenshotRecord, listHistory, listRewriteHistory, listScreenshotRecords, readAudioRecording, readContextScreenshot, reanalyzeContextHistory, reanalyzeScreenshotRecord, retranscribeRecording, setSettings } from '../lib/ipc';
+import { clearHistory, clearRewriteHistory, clearScreenshotRecords, deleteHistoryEntry, deleteRewriteHistoryEntry, deleteScreenshotRecord, getScreenshotAggregationStatus, listHistory, listRewriteHistory, listScreenshotRecords, readAudioRecording, readContextScreenshot, reanalyzeContextHistory, reanalyzeScreenshotRecord, retranscribeRecording, setSettings } from '../lib/ipc';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import type { ContextCaptureEntry, ContextAnalysisResult, DictationSession, PolishMode, ScreenshotRecord } from '../lib/types';
 import type { RewriteHistoryEntry } from '../lib/ipc/rewrite';
@@ -1219,6 +1219,7 @@ function ScreenshotRecordHistoryView() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [aggBuckets, setAggBuckets] = useState<{ processName: string; appDisplayName: string | null; screenshotCount: number }[]>([]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -1248,6 +1249,34 @@ function ScreenshotRecordHistoryView() {
     }).then(fn => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, [refresh]);
+
+  // 轮询待聚合状态（5 秒间隔） + 监听后端 aggregation:updated 事件即时刷新
+  const pollAggregation = useCallback(async () => {
+    try {
+      const status = await getScreenshotAggregationStatus();
+      setAggBuckets(status.buckets.map(b => ({
+        processName: b.processName,
+        appDisplayName: b.appDisplayName,
+        screenshotCount: b.screenshotCount,
+      })));
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    void pollAggregation();
+    const id = window.setInterval(pollAggregation, 5000);
+    return () => window.clearInterval(id);
+  }, [pollAggregation]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void listen<unknown>('aggregation:updated', () => {
+      void pollAggregation();
+    }).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [pollAggregation]);
 
   const selected = items.find(entry => entry.id === selectedId) ?? items[0] ?? null;
 
@@ -1294,18 +1323,36 @@ function ScreenshotRecordHistoryView() {
   if (error) {
     return <Card><div style={{ fontSize: 12, color: 'var(--ol-err)' }}>{t('history.loadFailed', { err: error })}</div></Card>;
   }
+  // 待聚合状态条（只在有待聚合桶时展示）
+  const aggStatusBar = aggBuckets.length > 0 ? (
+    <div style={{ padding: '8px 12px', marginBottom: 10, borderRadius: 8, background: 'rgba(59,130,246,0.06)', fontSize: 12, color: 'var(--ol-ink-3)' }}>
+      <span style={{ fontWeight: 500 }}>{t('history.screenshotAggregation.pending', '待聚合')}：</span>
+      {aggBuckets.map((b, i) => (
+        <span key={i}>
+          {b.appDisplayName ?? b.processName} {b.screenshotCount} {t('history.screenshotAggregation.count', '张')}
+          {i < aggBuckets.length - 1 ? '，' : ''}
+        </span>
+      ))}
+    </div>
+  ) : null;
+
   if (items.length === 0) {
     return (
-      <Card>
-        <div style={{ padding: 40, textAlign: 'center', fontSize: 13, color: 'var(--ol-ink-4)' }}>
-          {t('history.screenshotRecord.empty', '暂无截图记录')}
-        </div>
-      </Card>
+      <>
+        {aggStatusBar}
+        <Card>
+          <div style={{ padding: 40, textAlign: 'center', fontSize: 13, color: 'var(--ol-ink-4)' }}>
+            {t('history.screenshotRecord.empty', '暂无截图记录')}
+          </div>
+        </Card>
+      </>
     );
   }
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
+    <>
+      {aggStatusBar}
+      <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
       {(!mobile || !mobileDetailOpen) && (
         <Card padding={0} style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ padding: '12px 14px', borderBottom: '0.5px solid var(--ol-line)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
@@ -1380,8 +1427,8 @@ function ScreenshotRecordHistoryView() {
             </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 12 }}>
-            <ContextMeta label={t('history.contextCapture.app', '获取应用')} value={selected.contextApp} />
-            <ContextMeta label={t('history.contextCapture.window', '对话窗口')} value={selected.conversationWindow} />
+            <ContextMeta label={t('history.contextCapture.app', '获取应用')} value={selected.contextApp || selected.processName || null} />
+            <ContextMeta label={t('history.contextCapture.window', '对话窗口')} value={selected.conversationWindow || selected.windowTitle || null} />
             <ContextMeta label={t('history.contextAnalysis.status', '分析状态')} value={screenshotRecordStatusLabel(selected.status, t)} />
             <ContextMeta label={t('history.contextAnalysis.duration', '分析耗时')} value={selected.analysis ? formatContextAnalysisDuration(selected.analysis) : null} />
             <ContextMeta label={t('history.screenshotRecord.submitted', '提交截图')} value={`${selected.submittedScreenshotIds.length}/${selected.screenshotIds.length}`} />
@@ -1391,29 +1438,70 @@ function ScreenshotRecordHistoryView() {
               {selected.windowTitle}
             </div>
           )}
-          {selected.analysis && (
-            <div style={{ marginBottom: 14, padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
-              <ContextAnalysisSummary analysis={selected.analysis} />
-            </div>
-          )}
           {selected.errorCode && (
             <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--ol-err)' }}>
               {contextAnalysisStatusLabel(selected.analysis?.status ?? 'failed', selected.errorCode, t)}
               {selected.errorMessage ? `：${selected.errorMessage}` : ''}
             </div>
           )}
+          {selected.analysis && (
+            <div style={{ marginBottom: 14, padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
+              <Pill size="sm" tone="blue" style={{ marginBottom: 10 }}>{t('history.contextAnalysis.title', 'AI 上下文分析')}</Pill>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 10 }}>
+                <ContextMeta label={t('history.contextAnalysis.conversationName', '对话名称')} value={selected.analysis.conversationName} />
+                <ContextMeta label={t('history.contextAnalysis.topic', '主题')} value={selected.analysis.topic} />
+                <ContextMeta label={t('history.contextAnalysis.workStatus', '工作状态')} value={contextAnalysisWorkStatusLabel(selected.analysis.workStatus, t)} />
+                <ContextMeta label={t('history.contextAnalysis.evidenceLevel', '证据强度')} value={contextAnalysisEvidenceLevelLabel(selected.analysis.evidenceLevel, t)} />
+                <ContextMeta label={t('history.contextAnalysis.confidence', '置信度')} value={formatConfidence(selected.analysis.confidence)} />
+              </div>
+              {selected.analysis.briefSummary && (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 10, color: 'var(--ol-ink-4)', marginBottom: 4 }}>{t('history.contextAnalysis.briefSummary', '简要摘要')}</div>
+                  <div style={{ fontSize: 12, color: 'var(--ol-ink-2)', lineHeight: 1.6 }}>{selected.analysis.briefSummary}</div>
+                </div>
+              )}
+              <details style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>
+                <summary style={{ cursor: 'default', color: 'var(--ol-ink-3)', marginBottom: 8 }}>
+                  {t('history.contextAnalysis.details', '完整分析')}
+                </summary>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, lineHeight: 1.6 }}>
+                  {selected.analysis.fullSummary && <AnalysisBlock label={t('history.contextAnalysis.fullSummary', '完整摘要')} value={selected.analysis.fullSummary} />}
+                  {selected.analysis.userIntent && <AnalysisBlock label={t('history.contextAnalysis.userIntent', '用户意图')} value={selected.analysis.userIntent} />}
+                  {selected.analysis.decision && <AnalysisBlock label={t('history.contextAnalysis.decision', '决策/结论')} value={selected.analysis.decision} />}
+                  {selected.analysis.actionItems.length > 0 && (
+                    <AnalysisBlock
+                      label={t('history.contextAnalysis.actionItems', '待办事项')}
+                      value={selected.analysis.actionItems.map(item => `${item.text}${item.owner ? `（${item.owner}）` : ''}`).join('\n')}
+                    />
+                  )}
+                  {selected.analysis.relatedPeople.length > 0 && <AnalysisBlock label={t('history.contextAnalysis.relatedPeople', '相关人员')} value={selected.analysis.relatedPeople.join('、')} />}
+                  {selected.analysis.projectOrDomain && <AnalysisBlock label={t('history.contextAnalysis.projectOrDomain', '项目/领域')} value={selected.analysis.projectOrDomain} />}
+                  {selected.analysis.visualEvidence.length > 0 && <AnalysisBlock label={t('history.contextAnalysis.visualEvidence', '视觉依据')} value={selected.analysis.visualEvidence.join('\n')} />}
+                  <AnalysisBlock label={t('history.contextAnalysis.contextType', '上下文类型')} value={selected.analysis.detectedContextType} />
+                  <AnalysisBlock label={t('history.contextAnalysis.activityType', '活动类型')} value={selected.analysis.activityType} />
+                  {contextAnalysisWorkStatusLabel(selected.analysis.workStatus, t) && (
+                    <AnalysisBlock label={t('history.contextAnalysis.workStatus', '工作状态')} value={contextAnalysisWorkStatusLabel(selected.analysis.workStatus, t)!} />
+                  )}
+                  {contextAnalysisEvidenceLevelLabel(selected.analysis.evidenceLevel, t) && (
+                    <AnalysisBlock label={t('history.contextAnalysis.evidenceLevel', '证据强度')} value={contextAnalysisEvidenceLevelLabel(selected.analysis.evidenceLevel, t)!} />
+                  )}
+                  <AnalysisBlock label={t('history.contextAnalysis.sensitive', '敏感信息')} value={selected.analysis.sensitiveContentVisible ? t('common.yes', '是') : t('common.no', '否')} />
+                  {selected.analysis.uncertaintyReason && <AnalysisBlock label={t('history.contextAnalysis.uncertaintyReason', '不确定原因')} value={selected.analysis.uncertaintyReason} />}
+                  {selected.analysis.model && <AnalysisBlock label={t('history.contextAnalysis.model', '模型')} value={selected.analysis.model} />}
+                  <AnalysisBlock label={t('history.contextAnalysis.promptVersion', '提示词版本')} value={selected.analysis.promptVersion} />
+                </div>
+              </details>
+            </div>
+          )}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {selected.screenshotIds.map(contextId => (
-              <ContextCapturePanel
-                key={contextId}
-                context={screenshotContextFromRecord(selected, contextId)}
-                onReanalyze={() => void onReanalyze(selected.id)}
-              />
+              <ScreenshotImagePanel key={contextId} contextId={contextId} windowTitle={selected.windowTitle} />
             ))}
           </div>
         </Card>
       )}
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -1788,46 +1876,84 @@ function ContextAnalysisPanel({
   );
 }
 
-function ContextAnalysisSummary({ analysis }: { analysis: ContextAnalysisResult }) {
+// 截图记录详情页的简化截图展示组件：仅显示截图图片和预览，不含冗余元数据和 AI 分析。
+function ScreenshotImagePanel({ contextId, windowTitle }: { contextId: string; windowTitle: string | null }) {
   const { t } = useTranslation();
+  const [url, setUrl] = useState<string | null>(null);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'missing'>('idle');
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  useEffect(() => {
+    setPreviewOpen(false);
+    const cachedUrl = retainCachedContextScreenshotUrl(contextId);
+    if (cachedUrl) {
+      setUrl(cachedUrl);
+      setStatus('ready');
+      return () => releaseContextScreenshotUrl(contextId);
+    }
+    setUrl(null);
+    setStatus('loading');
+    let cancelled = false;
+    let retained = false;
+    void retainContextScreenshotUrl(contextId)
+      .then(objectUrl => {
+        retained = true;
+        if (cancelled) { releaseContextScreenshotUrl(contextId); return; }
+        setUrl(objectUrl);
+        setStatus('ready');
+      })
+      .catch(error => {
+        console.warn('[history] screenshot unavailable', error);
+        if (!cancelled) setStatus('missing');
+      });
+    return () => {
+      cancelled = true;
+      if (retained) releaseContextScreenshotUrl(contextId);
+    };
+  }, [contextId]);
+
+  useEffect(() => {
+    if (!previewOpen) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setPreviewOpen(false); }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [previewOpen]);
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
-        <ContextMeta label={t('history.contextAnalysis.conversationName', '对话名称')} value={analysis.conversationName} />
-        <ContextMeta label={t('history.contextAnalysis.topic', '主题')} value={analysis.topic} />
-        <ContextMeta label={t('history.contextAnalysis.workStatus', '工作状态')} value={contextAnalysisWorkStatusLabel(analysis.workStatus, t)} />
-        <ContextMeta label={t('history.contextAnalysis.evidenceLevel', '证据强度')} value={contextAnalysisEvidenceLevelLabel(analysis.evidenceLevel, t)} />
-        <ContextMeta label={t('history.contextAnalysis.confidence', '置信度')} value={formatConfidence(analysis.confidence)} />
-      </div>
-      {analysis.briefSummary && <AnalysisBlock label={t('history.contextAnalysis.briefSummary', '简要摘要')} value={analysis.briefSummary} />}
-      {analysis.fullSummary && <AnalysisBlock label={t('history.contextAnalysis.fullSummary', '完整摘要')} value={analysis.fullSummary} />}
-      {analysis.decision && <AnalysisBlock label={t('history.contextAnalysis.decision', '决策/结论')} value={analysis.decision} />}
-      {analysis.actionItems.length > 0 && (
-        <AnalysisBlock
-          label={t('history.contextAnalysis.actionItems', '待办事项')}
-          value={analysis.actionItems.map(item => `${item.text}${item.owner ? `（${item.owner}）` : ''}`).join('\n')}
-        />
+    <div style={{ padding: 10, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
+      {status === 'ready' && url ? (
+        <>
+          <button
+            type="button"
+            onClick={() => setPreviewOpen(true)}
+            style={{ display: 'block', width: '100%', padding: 0, border: 0, background: 'transparent', cursor: 'zoom-in', fontFamily: 'inherit' }}
+            aria-label={t('history.contextCapture.preview', '预览截图')}
+          >
+            <img
+              src={url}
+              alt={t('history.contextCapture.screenshotAlt', '上下文截图')}
+              style={{ display: 'block', width: '100%', maxHeight: 360, objectFit: 'contain', borderRadius: 8, border: '0.5px solid var(--ol-line)' }}
+            />
+          </button>
+          {previewOpen && (
+            <ContextScreenshotPreview
+              url={url}
+              title={windowTitle || t('history.contextCapture.screenshotAlt', '上下文截图')}
+              onClose={() => setPreviewOpen(false)}
+            />
+          )}
+        </>
+      ) : (
+        <div style={{ height: 92, borderRadius: 8, border: '0.5px dashed var(--ol-line-strong)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--ol-ink-4)', fontSize: 12 }}>
+          {status === 'loading'
+            ? t('common.loading')
+            : t('history.contextCapture.screenshotUnavailable', '截图不可用')}
+        </div>
       )}
-      {analysis.promptHash && <AnalysisBlock label={t('history.contextAnalysis.promptHash', '提示词哈希')} value={analysis.promptHash.slice(0, 12)} />}
     </div>
   );
-}
-
-function screenshotContextFromRecord(record: ScreenshotRecord, contextId: string): ContextCaptureEntry {
-  return {
-    id: contextId,
-    createdAt: record.createdAt,
-    contextApp: record.contextApp,
-    conversationWindow: record.conversationWindow,
-    windowTitle: record.windowTitle,
-    captureStatus: 'success',
-    captureSource: null,
-    screenshotRef: `${contextId}.bmp`,
-    linkedHistoryType: 'screenshotRecord',
-    linkedHistoryId: record.id,
-    errorCode: null,
-    analysis: null,
-  };
 }
 
 function screenshotRecordStatusLabel(
