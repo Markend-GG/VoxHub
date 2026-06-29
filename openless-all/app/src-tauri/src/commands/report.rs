@@ -16,11 +16,23 @@ pub struct GenerateReportRequest {
     pub schedule_key: Option<String>,
 }
 
+/// 调度器专用入口：同步创建 pending 记录，后台异步完成 LLM 生成。
 pub async fn generate_report_for_scheduler(
     coord: &crate::coordinator::Coordinator,
     request: GenerateReportRequest,
 ) -> Result<GeneratedReport, String> {
-    generate_report_inner(coord, request).await
+    let report = create_pending_report(coord, &request)?;
+    if report.status != ReportGenerationStatus::Pending {
+        return Ok(report);
+    }
+    let report_id = report.id.clone();
+    complete_report_generation(coord, report_id.clone(), request).await?;
+    // 重新获取包含最终状态的报告（Success/Failed）
+    coord
+        .generated_reports()
+        .get(&report_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("report {report_id} not found after generation"))
 }
 
 #[tauri::command]
@@ -164,16 +176,33 @@ pub fn update_generated_report(
 }
 
 #[tauri::command]
-pub async fn generate_report(
+pub fn generate_report(
     coord: CoordinatorState<'_>,
     request: GenerateReportRequest,
 ) -> Result<GeneratedReport, String> {
-    generate_report_inner(&coord, request).await
+    let report = create_pending_report(&coord, &request)?;
+    if report.status != ReportGenerationStatus::Pending {
+        return Ok(report);
+    }
+    // 后台 spawn LLM 生成，前端通过 report:updated 事件感知完成
+    let coord_clone: std::sync::Arc<crate::coordinator::Coordinator> =
+        std::sync::Arc::clone(&*coord);
+    let report_id = report.id.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = complete_report_generation(
+            &coord_clone, report_id, request,
+        ).await {
+            log::warn!("[report] background generation failed: {e}");
+        }
+    });
+    Ok(report)
 }
 
-async fn generate_report_inner(
+/// 第一阶段（同步）：校验模板 + 创建 pending 记录并持久化，立即返回。
+/// 素材收集（I/O 密集）延迟到异步阶段，避免同步阶段阻塞。
+pub fn create_pending_report(
     coord: &crate::coordinator::Coordinator,
-    request: GenerateReportRequest,
+    request: &GenerateReportRequest,
 ) -> Result<GeneratedReport, String> {
     let range_start = parse_report_time(&request.range_start)?;
     let range_end = parse_report_time(&request.range_end)?;
@@ -189,19 +218,8 @@ async fn generate_report_inner(
         return Err("报告模板为空".into());
     }
 
-    let material = build_report_material(&coord, range_start, range_end, request.user_main_work.as_deref())?;
-    if material.source_stats.voice_count == 0
-        && material.source_stats.rewrite_count == 0
-        && material.source_stats.screenshot_record_count == 0
-        && request.user_main_work.as_deref().unwrap_or("").trim().is_empty()
-    {
-        let report = skipped_report(request, template, material.source_stats, "skipped:noContent");
-        coord.generated_reports().append(report.clone()).map_err(|e| e.to_string())?;
-        return Ok(report);
-    }
-
     let now = chrono::Utc::now().to_rfc3339();
-    let mut report = GeneratedReport {
+    let report = GeneratedReport {
         id: uuid::Uuid::new_v4().to_string(),
         report_type: request.report_type,
         title: format!("{} {}", report_type_label(request.report_type), range_start.format("%Y-%m-%d")),
@@ -213,7 +231,7 @@ async fn generate_report_inner(
         user_main_work: request.user_main_work.clone(),
         status: ReportGenerationStatus::Pending,
         content: None,
-        source_stats: material.source_stats.clone(),
+        source_stats: GeneratedReportSourceStats::default(),
         error_code: None,
         error_message: None,
         schedule_key: request.schedule_key.clone(),
@@ -221,6 +239,71 @@ async fn generate_report_inner(
         updated_at: now,
     };
     coord.generated_reports().append(report.clone()).map_err(|e| e.to_string())?;
+    Ok(report)
+}
+
+/// 第二阶段（异步）：收集素材、调用 LLM 生成内容、更新记录并 emit report:updated 事件。
+/// 所有退出路径（成功/失败/无内容跳过）都会更新报告状态并 emit 事件。
+pub async fn complete_report_generation(
+    coord: &crate::coordinator::Coordinator,
+    report_id: String,
+    request: GenerateReportRequest,
+) -> Result<(), String> {
+    let mut report = coord
+        .generated_reports()
+        .get(&report_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("report {report_id} not found"))?;
+
+    // 收集素材（后台异步执行，不阻塞主线程）
+    let range_start = parse_report_time(&report.range_start)?;
+    let range_end = parse_report_time(&report.range_end)?;
+    let material = match build_report_material(
+        coord, range_start, range_end, request.user_main_work.as_deref(),
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            report.status = ReportGenerationStatus::Failed;
+            report.error_code = Some("failed:buildMaterial".into());
+            report.error_message = Some(e.clone());
+            report.updated_at = chrono::Utc::now().to_rfc3339();
+            let _ = coord.generated_reports().replace(report.clone());
+            coord.inner.emit_event("report:updated", serde_json::json!({
+                "id": report.id, "status": "failed",
+            }));
+            return Err(e);
+        }
+    };
+
+    // 无内容检查：所有来源为空且无用户主要工作 → 标记为 Skipped
+    if material.source_stats.voice_count == 0
+        && material.source_stats.rewrite_count == 0
+        && material.source_stats.screenshot_record_count == 0
+        && request.user_main_work.as_deref().unwrap_or("").trim().is_empty()
+    {
+        report.status = ReportGenerationStatus::Skipped;
+        report.source_stats = material.source_stats;
+        report.error_code = Some("skipped:noContent".into());
+        report.updated_at = chrono::Utc::now().to_rfc3339();
+        coord.generated_reports().replace(report.clone()).map_err(|e| e.to_string())?;
+        coord.inner.emit_event("report:updated", serde_json::json!({
+            "id": report.id, "status": "skipped",
+        }));
+        return Ok(());
+    }
+
+    // 更新素材统计到报告（clone 避免 move 后无法借用 material）
+    report.source_stats = material.source_stats.clone();
+
+    let template = ReportTemplate {
+        id: report.template_id.clone(),
+        name: report.template_name.clone(),
+        content: report.template_content.clone(),
+        report_type: report.report_type,
+        is_builtin: false,
+        created_at: report.created_at.clone(),
+        updated_at: String::new(),
+    };
 
     let content = request_report_generation(&request, &template, &material)
         .await
@@ -238,7 +321,21 @@ async fn generate_report_inner(
     }
     report.updated_at = chrono::Utc::now().to_rfc3339();
     coord.generated_reports().replace(report.clone()).map_err(|e| e.to_string())?;
-    Ok(report)
+
+    // 广播事件，前端收到后通过 listGeneratedReports() 拉取最新列表
+    coord.inner.emit_event(
+        "report:updated",
+        serde_json::json!({
+            "id": report.id,
+            "status": match report.status {
+                ReportGenerationStatus::Success => "completed",
+                ReportGenerationStatus::Failed => "failed",
+                ReportGenerationStatus::Skipped => "skipped",
+                _ => "unknown",
+            },
+        }),
+    );
+    Ok(())
 }
 
 struct ReportMaterial {
@@ -560,34 +657,6 @@ async fn request_report_generation(
         anyhow::bail!("报告生成结果为空");
     }
     Ok(content)
-}
-
-fn skipped_report(
-    request: GenerateReportRequest,
-    template: ReportTemplate,
-    source_stats: GeneratedReportSourceStats,
-    error_code: &str,
-) -> GeneratedReport {
-    let now = chrono::Utc::now().to_rfc3339();
-    GeneratedReport {
-        id: uuid::Uuid::new_v4().to_string(),
-        report_type: request.report_type,
-        title: format!("{} {}", report_type_label(request.report_type), now),
-        range_start: request.range_start,
-        range_end: request.range_end,
-        template_id: template.id,
-        template_name: template.name,
-        template_content: template.content,
-        user_main_work: request.user_main_work,
-        status: ReportGenerationStatus::Skipped,
-        content: None,
-        source_stats,
-        error_code: Some(error_code.into()),
-        error_message: None,
-        schedule_key: request.schedule_key,
-        created_at: now.clone(),
-        updated_at: now,
-    }
 }
 
 fn report_type_label(report_type: ReportType) -> &'static str {

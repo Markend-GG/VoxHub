@@ -75,6 +75,38 @@ export function Reports() {
     void refresh();
   }, []);
 
+  // 监听后端 report:updated 事件，异步生成完成后自动刷新报告列表
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      if (cancelled) return;
+      const un = await listen<{ id: string; status: string }>('report:updated', async (event) => {
+        // 只刷新报告列表，不执行模板选择逻辑（避免闭包捕获过期的 reportType/prefs）
+        try {
+          const list = await listGeneratedReports();
+          setReports(list);
+          setSelectedReportId(prev =>
+            prev && list.some(r => r.id === prev) ? prev : list[0]?.id ?? null,
+          );
+        } catch (err) {
+          setError(errorMessage(err));
+        }
+        if (event.payload.status === 'completed') {
+          emitSaved('saved', t('reports.generateSuccess', '报告生成完成'));
+        } else if (event.payload.status === 'failed') {
+          emitSaved('failed', t('reports.generateFailed', '报告生成失败'));
+        } else if (event.payload.status === 'skipped') {
+          emitSaved('failed', t('reports.generateSkipped', '无可生成内容'));
+        }
+      });
+      // 如果 cleanup 已执行，立即取消订阅；否则保存 unlisten 引用
+      if (cancelled) { un(); } else { unlisten = un; }
+    })();
+    return () => { cancelled = true; if (unlisten) unlisten(); };
+  }, []);
+
   useEffect(() => {
     const preferred = preferredTemplateId(reportType, prefs);
     const next =
@@ -134,62 +166,23 @@ export function Reports() {
     // 2. Toast 提示
     emitSaved('saving', t('reports.generatingToast', '报告生成中，请稍后再看'));
 
-    // 3. 生成占位记录 ID 并插入本地列表
-    const placeholderId = crypto.randomUUID();
-    const now = new Date().toISOString();
-    const placeholder: GeneratedReport = {
-      id: placeholderId,
-      reportType,
-      title: `${reportTypeLabel(reportType)} ${new Date().toLocaleDateString()}`,
-      rangeStart: new Date(rangeStart).toISOString(),
-      rangeEnd: new Date(rangeEnd).toISOString(),
-      templateId,
-      templateName: selectedTemplate?.name ?? '',
-      templateContent: selectedTemplate?.content ?? '',
-      userMainWork: mainWork.trim() || null,
-      status: 'pending',
-      content: null,
-      sourceStats: { voiceCount: 0, rewriteCount: 0, screenshotRecordCount: 0, analyzedScreenshotRecordCount: 0 },
-      errorCode: null,
-      errorMessage: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    setReports(prev => [placeholder, ...prev]);
-    setSelectedReportId(placeholderId);
-
-    // 4. 后台执行生成（fire-and-forget）
-    generateReport({
-      reportType,
-      rangeStart: new Date(rangeStart).toISOString(),
-      rangeEnd: new Date(rangeEnd).toISOString(),
-      templateId,
-      userMainWork: mainWork.trim() || null,
-    }).then(async (result) => {
-      // 生成完成，刷新报告列表
-      try {
-        const list = await listGeneratedReports();
-        setReports(list);
-        // 如果后端返回的 ID 与占位不同，选中新记录
-        setSelectedReportId(result.id);
-        if (result.status === 'success') {
-          emitSaved('saved', t('reports.generateSuccess', '报告生成完成'));
-        } else if (result.status === 'failed') {
-          emitSaved('failed', result.errorMessage ?? t('reports.generateFailed', '报告生成失败'));
-        }
-      } catch (err) {
-        setError(errorMessage(err));
-      }
-    }).catch((err) => {
-      // 生成异常：移除占位记录，同步修正选中项（避免闭包中 reports 过期）
-      setReports(prev => {
-        const next = prev.filter(r => r.id !== placeholderId);
-        setSelectedReportId(cur => cur === placeholderId ? (next[0]?.id ?? null) : cur);
-        return next;
+    // 3. 调用后端创建 pending 记录（同步返回），后台异步生成 LLM 内容
+    try {
+      const pendingReport = await generateReport({
+        reportType,
+        rangeStart: new Date(rangeStart).toISOString(),
+        rangeEnd: new Date(rangeEnd).toISOString(),
+        templateId,
+        userMainWork: mainWork.trim() || null,
       });
+      // 刷新列表展示后端创建的 pending 记录
+      const list = await listGeneratedReports();
+      setReports(list);
+      setSelectedReportId(pendingReport.id);
+    } catch (err) {
       setError(errorMessage(err));
       emitSaved('failed', t('reports.generateFailed', '报告生成失败'));
-    });
+    }
   };
 
   const onDeleteReport = async (id: string) => {
