@@ -29,7 +29,6 @@ export function Reports() {
   const [mainWork, setMainWork] = useState('');
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [templateDraft, setTemplateDraft] = useState('');
   const [templateNameDraft, setTemplateNameDraft] = useState('');
@@ -127,25 +126,70 @@ export function Reports() {
 
   const onGenerate = async () => {
     if (!templateId) return;
-    setBusy(true);
     setError(null);
-    try {
-      const report = await generateReport({
-        reportType,
-        rangeStart: new Date(rangeStart).toISOString(),
-        rangeEnd: new Date(rangeEnd).toISOString(),
-        templateId,
-        userMainWork: mainWork.trim() || null,
+
+    // 1. 立即关闭弹窗
+    setShowGenerateModal(false);
+
+    // 2. Toast 提示
+    emitSaved('saving', t('reports.generatingToast', '报告生成中，请稍后再看'));
+
+    // 3. 生成占位记录 ID 并插入本地列表
+    const placeholderId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const placeholder: GeneratedReport = {
+      id: placeholderId,
+      reportType,
+      title: `${reportTypeLabel(reportType)} ${new Date().toLocaleDateString()}`,
+      rangeStart: new Date(rangeStart).toISOString(),
+      rangeEnd: new Date(rangeEnd).toISOString(),
+      templateId,
+      templateName: selectedTemplate?.name ?? '',
+      templateContent: selectedTemplate?.content ?? '',
+      userMainWork: mainWork.trim() || null,
+      status: 'pending',
+      content: null,
+      sourceStats: { voiceCount: 0, rewriteCount: 0, screenshotRecordCount: 0, analyzedScreenshotRecordCount: 0 },
+      errorCode: null,
+      errorMessage: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    setReports(prev => [placeholder, ...prev]);
+    setSelectedReportId(placeholderId);
+
+    // 4. 后台执行生成（fire-and-forget）
+    generateReport({
+      reportType,
+      rangeStart: new Date(rangeStart).toISOString(),
+      rangeEnd: new Date(rangeEnd).toISOString(),
+      templateId,
+      userMainWork: mainWork.trim() || null,
+    }).then(async (result) => {
+      // 生成完成，刷新报告列表
+      try {
+        const list = await listGeneratedReports();
+        setReports(list);
+        // 如果后端返回的 ID 与占位不同，选中新记录
+        setSelectedReportId(result.id);
+        if (result.status === 'success') {
+          emitSaved('saved', t('reports.generateSuccess', '报告生成完成'));
+        } else if (result.status === 'failed') {
+          emitSaved('failed', result.errorMessage ?? t('reports.generateFailed', '报告生成失败'));
+        }
+      } catch (err) {
+        setError(errorMessage(err));
+      }
+    }).catch((err) => {
+      // 生成异常：移除占位记录，同步修正选中项（避免闭包中 reports 过期）
+      setReports(prev => {
+        const next = prev.filter(r => r.id !== placeholderId);
+        setSelectedReportId(cur => cur === placeholderId ? (next[0]?.id ?? null) : cur);
+        return next;
       });
-      const list = await listGeneratedReports();
-      setReports(list);
-      setSelectedReportId(report.id);
-      setShowGenerateModal(false);
-    } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
+      emitSaved('failed', t('reports.generateFailed', '报告生成失败'));
+    });
   };
 
   const onDeleteReport = async (id: string) => {
@@ -217,8 +261,11 @@ export function Reports() {
               >
                 <div style={{ fontSize: 12, color: 'var(--ol-ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{report.title}</div>
                 <div style={{ display: 'flex', gap: 6, marginTop: 5, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <Pill size="sm" tone={report.status === 'success' ? 'blue' : 'outline'}>{reportStatusLabel(report.status)}</Pill>
+                  <Pill size="sm" tone={report.status === 'success' ? 'blue' : report.status === 'pending' ? 'outline' : 'outline'}>
+                    {reportStatusLabel(report.status)}
+                  </Pill>
                   <span style={{ fontSize: 10, color: 'var(--ol-ink-4)' }}>{formatDate(report.createdAt)}</span>
+                  {report.status === 'pending' && <span style={pendingDotStyle} />}
                 </div>
               </button>
             ))}
@@ -256,7 +303,6 @@ export function Reports() {
           onDeleteTemplate={() => void onDeleteTemplate()}
           mainWork={mainWork}
           setMainWork={setMainWork}
-          busy={busy}
           onGenerate={() => void onGenerate()}
           onClose={() => setShowGenerateModal(false)}
         />
@@ -286,7 +332,6 @@ function GenerateReportModal({
   onDeleteTemplate,
   mainWork,
   setMainWork,
-  busy,
   onGenerate,
   onClose,
 }: {
@@ -308,7 +353,6 @@ function GenerateReportModal({
   onDeleteTemplate: () => void;
   mainWork: string;
   setMainWork: (value: string) => void;
-  busy: boolean;
   onGenerate: () => void;
   onClose: () => void;
 }) {
@@ -391,8 +435,8 @@ function GenerateReportModal({
         {/* Footer — 固定操作栏 */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 16, marginTop: 8, borderTop: '0.5px solid var(--ol-line-soft)', flexShrink: 0 }}>
           <Btn variant="ghost" size="sm" onClick={onClose}>{t('common.cancel', '取消')}</Btn>
-          <Btn variant="blue" icon="sparkle" disabled={busy || !templateId} onClick={onGenerate}>
-            {busy ? t('reports.generating', '生成中') : t('reports.generate', '生成报告')}
+          <Btn variant="blue" icon="sparkle" disabled={!templateId} onClick={onGenerate}>
+            {t('reports.generate', '生成报告')}
           </Btn>
         </div>
       </div>
@@ -483,6 +527,7 @@ function ReportDetail({
             </div>
           </div>
         )}
+        {report.status !== 'pending' && (
         <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
           {editing ? (
             <>
@@ -505,15 +550,24 @@ function ReportDetail({
             </>
           )}
         </div>
+        )}
       </div>
+      {report.status !== 'pending' && (
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10, marginBottom: 14, flexShrink: 0 }}>
         <Meta label="语音历史" value={String(report.sourceStats.voiceCount)} />
         <Meta label="重写历史" value={String(report.sourceStats.rewriteCount)} />
         <Meta label="截图记录" value={String(report.sourceStats.screenshotRecordCount)} />
         <Meta label="已分析截图" value={String(report.sourceStats.analyzedScreenshotRecordCount)} />
       </div>
-      {report.userMainWork && <div style={{ flexShrink: 0 }}><Block label="主要工作" value={report.userMainWork} /></div>}
-      {editing ? (
+      )}
+      {report.status !== 'pending' && report.userMainWork && <div style={{ flexShrink: 0 }}><Block label="主要工作" value={report.userMainWork} /></div>}
+      {report.status === 'pending' ? (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'var(--ol-ink-4)' }}>
+          <div style={pendingSpinnerStyle} />
+          <div style={{ fontSize: 13 }}>{t('reports.generating', '生成中')}</div>
+          <div style={{ fontSize: 11 }}>{t('reports.generatingHint', '报告正在生成中，完成后将自动刷新')}</div>
+        </div>
+      ) : editing ? (
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, marginBottom: 14 }}>
           <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginBottom: 6, flexShrink: 0 }}>{t('reports.contentLabel', '报告正文')}</div>
           <textarea
@@ -616,6 +670,24 @@ function errorMessage(error: unknown): string {
 }
 
 // ─── 弹窗样式常量 ─────────────────────────────────────────────────
+
+const pendingDotStyle: CSSProperties = {
+  width: 6,
+  height: 6,
+  borderRadius: '50%',
+  background: 'var(--ol-blue)',
+  animation: 'ol-report-pending-pulse 1.4s ease-in-out infinite',
+  flexShrink: 0,
+};
+
+const pendingSpinnerStyle: CSSProperties = {
+  width: 28,
+  height: 28,
+  border: '2.5px solid var(--ol-line)',
+  borderTopColor: 'var(--ol-blue)',
+  borderRadius: '50%',
+  animation: 'ol-spin 0.8s linear infinite',
+};
 
 const modalOverlayStyle: CSSProperties = {
   position: 'fixed',

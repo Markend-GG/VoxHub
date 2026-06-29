@@ -1387,7 +1387,7 @@ function ScreenshotRecordHistoryView() {
                 }}
               >
                 <div style={{ fontSize: 12, color: 'var(--ol-ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {entry.conversationWindow || entry.windowTitle || t('history.screenshotRecord.unknownWindow', '未知窗口')}
+                  {entry.conversationWindow || entry.windowTitle || entry.contextApp || entry.processName || t('history.screenshotRecord.unknownWindow', '未知窗口')}
                 </div>
                 <div style={{ display: 'flex', gap: 6, marginTop: 4, alignItems: 'center', flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 10, color: 'var(--ol-ink-4)' }}>{formatTime(entry.createdAt)}</span>
@@ -1428,7 +1428,7 @@ function ScreenshotRecordHistoryView() {
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 12 }}>
             <ContextMeta label={t('history.contextCapture.app', '获取应用')} value={selected.contextApp || selected.processName || null} />
-            <ContextMeta label={t('history.contextCapture.window', '对话窗口')} value={selected.conversationWindow || selected.windowTitle || null} />
+            <ContextMeta label={t('history.contextCapture.window', '对话窗口')} value={selected.conversationWindow || selected.windowTitle || selected.contextApp || selected.processName || null} />
             <ContextMeta label={t('history.contextAnalysis.status', '分析状态')} value={screenshotRecordStatusLabel(selected.status, t)} />
             <ContextMeta label={t('history.contextAnalysis.duration', '分析耗时')} value={selected.analysis ? formatContextAnalysisDuration(selected.analysis) : null} />
             <ContextMeta label={t('history.screenshotRecord.submitted', '提交截图')} value={`${selected.submittedScreenshotIds.length}/${selected.screenshotIds.length}`} />

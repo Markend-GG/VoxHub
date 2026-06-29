@@ -122,6 +122,12 @@ a { color: inherit; text-decoration: none; }
   to { transform: rotate(360deg); }
 }
 
+/* 报告生成中状态：列表项脉动圆点。 */
+@keyframes ol-report-pending-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50%      { opacity: 1;   transform: scale(1.2); }
+}
+
 @keyframes ol-modal-drawer-in {
   from {
     opacity: 0;
