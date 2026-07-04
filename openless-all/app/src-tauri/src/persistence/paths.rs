@@ -248,6 +248,49 @@ pub fn recording_path_for_session(session_id: &str) -> Result<PathBuf> {
     Ok(recordings_root()?.join(format!("{session_id}.wav")))
 }
 
+pub fn meeting_recordings_root() -> Result<PathBuf> {
+    let dir = data_dir()?.join("meeting-recordings");
+    ensure_dir(&dir)?;
+    Ok(dir)
+}
+
+pub fn meeting_recording_path_for_id(meeting_id: &str) -> Result<PathBuf> {
+    Ok(meeting_recordings_root()?.join(format!("{meeting_id}.wav")))
+}
+
+pub fn meeting_recording_dir_for_id(meeting_id: &str) -> Result<PathBuf> {
+    meeting_recording_dir_path_for_id(meeting_id).and_then(|dir| {
+        ensure_dir(&dir)?;
+        Ok(dir)
+    })
+}
+
+pub fn meeting_recording_part_path_for_id(meeting_id: &str, part_index: u64) -> Result<PathBuf> {
+    Ok(meeting_recording_dir_for_id(meeting_id)?.join(format!("part-{part_index:04}.wav")))
+}
+
+pub fn meeting_recording_dir_for_id_with_root(
+    root: &std::path::Path,
+    meeting_id: &str,
+) -> Result<PathBuf> {
+    let dir = root.join(meeting_id);
+    ensure_dir(&dir)?;
+    Ok(dir)
+}
+
+pub fn meeting_recording_part_path_for_id_with_root(
+    root: &std::path::Path,
+    meeting_id: &str,
+    part_index: u64,
+) -> Result<PathBuf> {
+    Ok(meeting_recording_dir_for_id_with_root(root, meeting_id)?
+        .join(format!("part-{part_index:04}.wav")))
+}
+
+pub fn meeting_recording_dir_path_for_id(meeting_id: &str) -> Result<PathBuf> {
+    Ok(meeting_recordings_root()?.join(meeting_id))
+}
+
 /// Foundry Local 下载与缓存根目录。DLL 和模型都不打进安装包，和 Qwen3-ASR
 /// 一样放在 OpenLess 的 models 目录下，卸载清理用户数据时可以一起删除。
 #[cfg(target_os = "windows")]
@@ -294,7 +337,9 @@ pub fn foundry_logs_root() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{migrate_models_root, models_root_for_base_dir};
+    use super::{
+        meeting_recording_part_path_for_id_with_root, migrate_models_root, models_root_for_base_dir,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -340,6 +385,27 @@ mod tests {
             b"old"
         );
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn meeting_recording_part_path_uses_segment_directory() {
+        let tmp: PathBuf =
+            std::env::temp_dir().join(format!("openless-meeting-parts-{}", uuid::Uuid::new_v4()));
+
+        let path = meeting_recording_part_path_for_id_with_root(
+            &tmp,
+            "550e8400-e29b-41d4-a716-446655440000",
+            2,
+        )
+        .expect("build meeting part path");
+
+        assert_eq!(
+            path,
+            tmp.join("550e8400-e29b-41d4-a716-446655440000")
+                .join("part-0002.wav")
+        );
+        assert!(path.parent().expect("part dir").is_dir());
         let _ = fs::remove_dir_all(&tmp);
     }
 }

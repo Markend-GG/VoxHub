@@ -55,7 +55,8 @@ use crate::selection::capture_selection;
 use crate::types::PasteShortcut;
 use crate::types::{
     CapsulePayload, CapsuleState, ChineseScriptPreference, DictationSession, HotkeyCapability,
-    HotkeyStatus, HotkeyStatusState, InsertStatus, OutputLanguagePreference, PolishMode,
+    HotkeyStatus, HotkeyStatusState, InsertStatus, MeetingRecord, MeetingRecordingSnapshot,
+    OutputLanguagePreference, PolishMode,
 };
 #[cfg(target_os = "windows")]
 use crate::windows_ime_ipc::ImeSubmitTarget;
@@ -66,6 +67,7 @@ mod asr_wiring;
 mod capsule_focus;
 mod dictation;
 mod hotkey_loops;
+mod meeting;
 mod polish_flow;
 mod qa;
 mod qa_session;
@@ -74,6 +76,7 @@ mod resources;
 use asr_wiring::*;
 use capsule_focus::*;
 use hotkey_loops::*;
+use meeting::*;
 use polish_flow::*;
 use qa_session::*;
 
@@ -308,6 +311,14 @@ struct Inner {
     qa_asr: Mutex<Option<ActiveAsr>>,
     /// QA 用的 Recorder 句柄。
     qa_recorder: Mutex<Option<Recorder>>,
+    /// 会议录音 V1-2：与短口述 SessionState 分离，只共享 Coordinator 的 ASR/provider/prefs。
+    meeting_session: Mutex<Option<MeetingSession>>,
+    meeting_asr: Mutex<Option<ActiveAsr>>,
+    meeting_recorder: Mutex<Option<Recorder>>,
+    meeting_next_part_index: Mutex<u64>,
+    meeting_segment_count_at_asr_start: Mutex<usize>,
+    meeting_audio_archive_active: AtomicBool,
+    meeting_asr_release_token: Mutex<Option<String>>,
     /// QA SSE 流取消标志。begin_qa_session 重置为 false；cancel_qa_session 设 true；
     /// polish::chat_completion_history_streaming 的 loop 每帧检查，true 时 break loop
     /// 避免取消后 LLM 仍 drain HTTP body 烧 token。详见 issue #161。
@@ -415,6 +426,13 @@ impl Coordinator {
                     capsule_layout: Mutex::new(None),
                     qa_asr: Mutex::new(None),
                     qa_recorder: Mutex::new(None),
+                    meeting_session: Mutex::new(None),
+                    meeting_asr: Mutex::new(None),
+                    meeting_recorder: Mutex::new(None),
+                    meeting_next_part_index: Mutex::new(1),
+                    meeting_segment_count_at_asr_start: Mutex::new(0),
+                    meeting_audio_archive_active: AtomicBool::new(false),
+                    meeting_asr_release_token: Mutex::new(None),
                     qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                     local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                     shutdown: AtomicBool::new(false),
@@ -507,6 +525,13 @@ impl Coordinator {
                 capsule_layout: Mutex::new(None),
                 qa_asr: Mutex::new(None),
                 qa_recorder: Mutex::new(None),
+                meeting_session: Mutex::new(None),
+                meeting_asr: Mutex::new(None),
+                meeting_recorder: Mutex::new(None),
+                meeting_next_part_index: Mutex::new(1),
+                meeting_segment_count_at_asr_start: Mutex::new(0),
+                meeting_audio_archive_active: AtomicBool::new(false),
+                meeting_asr_release_token: Mutex::new(None),
                 qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                 local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                 foundry_local_runtime,
@@ -1187,6 +1212,32 @@ impl Coordinator {
         begin_session(&self.inner).await
     }
 
+    pub async fn start_meeting_recording(&self) -> Result<MeetingRecordingSnapshot, String> {
+        meeting::start_meeting_recording(&self.inner).await
+    }
+
+    pub async fn pause_meeting_recording(
+        &self,
+        id: String,
+    ) -> Result<MeetingRecordingSnapshot, String> {
+        meeting::pause_meeting_recording(&self.inner, &id).await
+    }
+
+    pub async fn resume_meeting_recording(
+        &self,
+        id: String,
+    ) -> Result<MeetingRecordingSnapshot, String> {
+        meeting::resume_meeting_recording(&self.inner, &id).await
+    }
+
+    pub async fn stop_meeting_recording(&self, id: String) -> Result<MeetingRecord, String> {
+        meeting::stop_meeting_recording(&self.inner, &id).await
+    }
+
+    pub fn active_meeting_recording(&self) -> Result<Option<MeetingRecordingSnapshot>, String> {
+        meeting::active_meeting_recording(&self.inner)
+    }
+
     pub async fn start_dictation_with_translation(&self) -> Result<(), String> {
         begin_session(&self.inner).await?;
         self.inner
@@ -1861,8 +1912,6 @@ mod non_tsf_fallback_tests {
 
 // ─────────────────────────── helpers ───────────────────────────
 
-
-
 fn read_whisper_credentials() -> (String, String, String) {
     let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
         .ok()
@@ -1958,7 +2007,6 @@ fn enabled_hotwords(inner: &Arc<Inner>) -> Vec<DictionaryHotword> {
         })
         .collect()
 }
-
 
 /// 读 Gemini 凭据。所有 LLM provider 共用 ark.* 槽位（persistence 没做 per-provider
 /// 隔离），所以这里也是从 `ArkApiKey` / `ArkModelId` / `ArkEndpoint` 三个槽读，
@@ -2438,6 +2486,29 @@ mod tests {
         assert!(!asr_release_session_is_current(
             &coordinator.inner,
             AsrReleaseSession::Qa(old_session_id)
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn local_asr_release_guard_uses_meeting_asr_token() {
+        let runtime = Arc::new(crate::asr::local::FoundryLocalRuntime::new());
+        let coordinator = Coordinator::new_with_foundry_runtime(runtime);
+        let token = "550e8400-e29b-41d4-a716-446655440000".to_string();
+
+        *coordinator.inner.meeting_asr_release_token.lock() = Some(token.clone());
+
+        assert!(asr_release_session_is_current(
+            &coordinator.inner,
+            AsrReleaseSession::Meeting(token.clone())
+        ));
+
+        *coordinator.inner.meeting_asr_release_token.lock() =
+            Some("550e8400-e29b-41d4-a716-446655440001".to_string());
+
+        assert!(!asr_release_session_is_current(
+            &coordinator.inner,
+            AsrReleaseSession::Meeting(token)
         ));
     }
 
@@ -3075,7 +3146,6 @@ fn schedule_capsule_idle(inner: &Arc<Inner>, delay_ms: u64) {
         }
     });
 }
-
 
 // ─────────────────────────── audio bridge ───────────────────────────
 

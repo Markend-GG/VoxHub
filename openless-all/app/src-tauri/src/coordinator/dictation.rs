@@ -1047,10 +1047,10 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
 
 /// begin_session 的带参版本，voice_agent=true 时在 Starting 阶段就标记好，
 /// 防止 finish_starting_session 处理 pending_stop 时丢失标志。
-pub(super) async fn begin_session_as(
-    inner: &Arc<Inner>,
-    voice_agent: bool,
-) -> Result<(), String> {
+pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> Result<(), String> {
+    if super::meeting::has_active_meeting(inner) {
+        return Err("meeting recording is active".to_string());
+    }
     let current_session_id = {
         let mut state = inner.state.lock();
         let Some(session_id) =
@@ -1714,7 +1714,14 @@ fn fail_dictation(
     err: String,
 ) -> Result<(), String> {
     write_transcribe_failed_history(inner, session_id, elapsed);
-    emit_capsule(inner, CapsuleState::Error, 0.0, elapsed, Some(user_msg), None);
+    emit_capsule(
+        inner,
+        CapsuleState::Error,
+        0.0,
+        elapsed,
+        Some(user_msg),
+        None,
+    );
     restore_prepared_windows_ime_session(inner, session_id);
     inner.state.lock().phase = SessionPhase::Idle;
     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
@@ -1980,7 +1987,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         inner,
                         AsrReleaseSession::Dictation(current_session_id),
                     );
-                    Err(TranscribeFail::new(format!("本地识别失败: {e}"), e.to_string()))
+                    Err(TranscribeFail::new(
+                        format!("本地识别失败: {e}"),
+                        e.to_string(),
+                    ))
                 }
             }
         }
@@ -2018,7 +2028,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         inner,
                         AsrReleaseSession::Dictation(current_session_id),
                     );
-                    Err(TranscribeFail::new(format!("本地识别失败: {e}"), e.to_string()))
+                    Err(TranscribeFail::new(
+                        format!("本地识别失败: {e}"),
+                        e.to_string(),
+                    ))
                 }
             }
         }
@@ -2044,7 +2057,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 Ok(Ok(r)) => Ok(r),
                 Ok(Err(e)) => {
                     log::error!("[coord] local Qwen3-ASR transcribe failed: {e:#}");
-                    Err(TranscribeFail::new(format!("本地识别失败: {e}"), e.to_string()))
+                    Err(TranscribeFail::new(
+                        format!("本地识别失败: {e}"),
+                        e.to_string(),
+                    ))
                 }
                 Err(_) => {
                     log::error!(
@@ -2083,7 +2099,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         return Ok(());
                     }
                     log::error!("[coord] Apple Speech transcribe failed: {e:#}");
-                    Err(TranscribeFail::new(format!("本地识别失败: {e}"), e.to_string()))
+                    Err(TranscribeFail::new(
+                        format!("本地识别失败: {e}"),
+                        e.to_string(),
+                    ))
                 }
                 Err(_) => {
                     log::error!(
@@ -2125,13 +2144,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         Err(fail) => match try_silent_retranscribe(inner, current_session_id).await {
             Some(raw) => raw,
             None => {
-                return fail_dictation(
-                    inner,
-                    current_session_id,
-                    elapsed,
-                    fail.user_msg,
-                    fail.err,
-                )
+                return fail_dictation(inner, current_session_id, elapsed, fail.user_msg, fail.err)
             }
         },
     };

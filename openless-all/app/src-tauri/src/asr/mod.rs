@@ -5,6 +5,8 @@
 //! `frame.rs` (binary frame codec) and the session lifecycle in
 //! `volcengine.rs`.
 
+use std::sync::Arc;
+
 pub mod bailian;
 mod frame;
 pub mod local;
@@ -33,6 +35,16 @@ pub struct RawTranscript {
     pub text: String,
     pub duration_ms: u64,
 }
+
+/// Provider-neutral final segment emitted before the whole ASR session closes.
+#[derive(Debug, Clone)]
+pub struct AsrFinalSegment {
+    pub text: String,
+    pub start_ms: Option<u64>,
+    pub end_ms: Option<u64>,
+}
+
+pub type AsrFinalSegmentSink = Arc<dyn Fn(AsrFinalSegment) + Send + Sync>;
 
 /// User-defined hotword the ASR provider may use to bias decoding.
 #[derive(Debug, Clone)]

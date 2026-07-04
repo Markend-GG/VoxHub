@@ -44,7 +44,7 @@ pub(crate) use crate::net;
 pub(crate) use crate::permissions::{self, PermissionStatus};
 pub(crate) use crate::persistence::{
     sync_style_pack_preferences, CredentialAccount, CredentialsSnapshot, CredentialsVault,
-    PreferencesStore,
+    MeetingStore, PreferencesStore,
 };
 pub(crate) use crate::polish::{
     http_client_builder, CodexOAuthConfig, CodexOAuthCredentials, CodexOAuthLLMProvider, LLMError,
@@ -58,9 +58,10 @@ pub(crate) use crate::types::WindowsImeStatus;
 pub(crate) use crate::types::{
     builtin_style_pack_id, default_active_style_pack_id, AndroidAccessibilityStatus,
     AndroidOverlayStatus, ChineseScriptPreference, ComboBinding, CorrectionRule, CredentialsStatus,
-    DictationSession, DictionaryEntry, HotkeyCapability, HotkeyStatus, OutputLanguagePreference,
-    PolishMode, ShortcutBinding, StylePack, StylePackKind, StylePackRuntimeDiagnostics,
-    StyleSystemPrompts, UpdateChannel, UserPreferences, VocabPresetStore,
+    DictationSession, DictionaryEntry, HotkeyCapability, HotkeyStatus, MeetingRecord,
+    MeetingRecordingSnapshot, OutputLanguagePreference, PolishMode, ShortcutBinding, StylePack,
+    StylePackKind, StylePackRuntimeDiagnostics, StyleSystemPrompts, UpdateChannel, UserPreferences,
+    VocabPresetStore,
 };
 
 mod credentials;
@@ -74,6 +75,7 @@ mod hotkeys;
 #[cfg(not(mobile))]
 mod local_asr;
 mod marketplace;
+mod meetings;
 mod misc;
 mod permissions_cmds;
 mod providers;
@@ -96,6 +98,7 @@ pub use hotkeys::*;
 #[cfg(not(mobile))]
 pub use local_asr::*;
 pub use marketplace::*;
+pub use meetings::*;
 pub use misc::*;
 pub use permissions_cmds::*;
 pub use providers::*;

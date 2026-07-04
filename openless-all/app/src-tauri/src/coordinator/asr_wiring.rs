@@ -205,17 +205,24 @@ pub(super) fn foundry_local_asr_release_keep_secs(inner: &Arc<Inner>) -> u32 {
 }
 
 #[cfg(target_os = "windows")]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum AsrReleaseSession {
     Dictation(SessionId),
     Qa(SessionId),
+    Meeting(String),
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn asr_release_session_is_current(inner: &Arc<Inner>, session: AsrReleaseSession) -> bool {
+pub(super) fn asr_release_session_is_current(
+    inner: &Arc<Inner>,
+    session: AsrReleaseSession,
+) -> bool {
     match session {
         AsrReleaseSession::Dictation(session_id) => inner.state.lock().session_id == session_id,
         AsrReleaseSession::Qa(session_id) => inner.qa_state.lock().session_id == session_id,
+        AsrReleaseSession::Meeting(token) => {
+            inner.meeting_asr_release_token.lock().as_ref() == Some(&token)
+        }
     }
 }
 
@@ -412,7 +419,18 @@ impl QaAsrStart {
     }
 }
 
-pub(super) async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> Result<QaAsrStart, String> {
+pub(super) async fn build_qa_asr_start(
+    inner: &Arc<Inner>,
+    active_asr: &str,
+) -> Result<QaAsrStart, String> {
+    build_qa_asr_start_with_final_segment_sink(inner, active_asr, None).await
+}
+
+pub(super) async fn build_qa_asr_start_with_final_segment_sink(
+    inner: &Arc<Inner>,
+    active_asr: &str,
+    final_segment_sink: Option<crate::asr::AsrFinalSegmentSink>,
+) -> Result<QaAsrStart, String> {
     #[cfg(target_os = "windows")]
     if foundry::is_foundry_local_whisper(active_asr) {
         let prefs = inner.prefs.get();
@@ -492,10 +510,18 @@ pub(super) async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> 
     }
 
     match active_asr_provider_kind(active_asr) {
-        ActiveAsrProviderKind::Bailian => Ok(QaAsrStart::Bailian {
-            asr: Arc::new(BailianRealtimeASR::new(read_bailian_credentials())),
-            bridge: Arc::new(DeferredAsrBridge::new()),
-        }),
+        ActiveAsrProviderKind::Bailian => {
+            let asr = BailianRealtimeASR::new(read_bailian_credentials());
+            let asr = if let Some(sink) = final_segment_sink.clone() {
+                asr.with_final_segment_sink(sink)
+            } else {
+                asr
+            };
+            Ok(QaAsrStart::Bailian {
+                asr: Arc::new(asr),
+                bridge: Arc::new(DeferredAsrBridge::new()),
+            })
+        }
         ActiveAsrProviderKind::Mimo => {
             let (api_key, base_url, model) = read_mimo_credentials();
             let mimo = Arc::new(MimoBatchASR::new(api_key, base_url, model));
@@ -522,12 +548,17 @@ pub(super) async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> 
             let consumer: Arc<dyn crate::recorder::AudioConsumer> = whisper;
             Ok(QaAsrStart::Ready { active, consumer })
         }
-        ActiveAsrProviderKind::Volcengine => Ok(QaAsrStart::Volcengine {
-            asr: Arc::new(VolcengineStreamingASR::new(
-                read_volc_credentials(),
-                enabled_hotwords(inner),
-            )),
-            bridge: Arc::new(DeferredAsrBridge::new()),
-        }),
+        ActiveAsrProviderKind::Volcengine => {
+            let asr = VolcengineStreamingASR::new(read_volc_credentials(), enabled_hotwords(inner));
+            let asr = if let Some(sink) = final_segment_sink {
+                asr.with_final_segment_sink(sink)
+            } else {
+                asr
+            };
+            Ok(QaAsrStart::Volcengine {
+                asr: Arc::new(asr),
+                bridge: Arc::new(DeferredAsrBridge::new()),
+            })
+        }
     }
 }
