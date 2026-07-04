@@ -12,6 +12,7 @@ import { AudioCueListener } from "./AudioCue";
 import { SettingsModal } from './SettingsModal';
 import { Overview } from '../pages/Overview';
 import { History } from '../pages/History';
+import { Meetings } from '../pages/Meetings';
 import { Vocab } from '../pages/Vocab';
 import { Style } from '../pages/Style';
 import { Translation } from '../pages/Translation';
@@ -36,7 +37,7 @@ import { MobileMoreSheet } from './MobileMoreSheet';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import { useAppState, type AppTab } from '../state/useAppState';
 
-const MORE_TAB_IDS: AppTab[] = ['vocab', 'translation', 'selectionAsk'];
+const MORE_TAB_IDS: AppTab[] = ['meetings', 'vocab', 'translation', 'selectionAsk'];
 
 interface NavItem {
   id: AppTab;
@@ -48,6 +49,7 @@ interface NavItem {
 const NAV_BASE: Array<Omit<NavItem, 'name'>> = [
   { id: 'overview', icon: 'overview', cmp: Overview },
   { id: 'history', icon: 'history', cmp: History },
+  { id: 'meetings', icon: 'mic', cmp: Meetings },
   { id: 'vocab', icon: 'vocab', cmp: Vocab },
   { id: 'style', icon: 'style', cmp: Style },
   { id: 'translation', icon: 'translate', cmp: Translation },
