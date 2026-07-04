@@ -22,8 +22,9 @@ use crate::types::{
 use super::{
     acquire_recording_mute, asr_transcribe_uses_global_timeout,
     build_qa_asr_start_with_final_segment_sink, cancel_active_asr, ensure_asr_credentials,
-    ensure_microphone_permission, release_recording_mute, selected_microphone_device_name,
-    stop_microphone_preview_monitor, ActiveAsr, Inner, QaAsrStart, COORDINATOR_GLOBAL_TIMEOUT_SECS,
+    ensure_microphone_permission, prepare_and_spawn_auto_meeting_summary, release_recording_mute,
+    selected_microphone_device_name, stop_microphone_preview_monitor, ActiveAsr, Inner, QaAsrStart,
+    COORDINATOR_GLOBAL_TIMEOUT_SECS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,7 +427,7 @@ pub(super) async fn stop_meeting_recording(
     let flush_result = flush_current_meeting_asr(inner).await;
 
     let now = Utc::now();
-    let record = {
+    let mut record = {
         let mut session_guard = inner.meeting_session.lock();
         let session = session_guard
             .as_mut()
@@ -474,6 +475,17 @@ pub(super) async fn stop_meeting_recording(
     }
 
     clear_active_meeting_runtime(inner);
+    if record.status == MeetingStatus::Completed {
+        if let Err(error) = prepare_and_spawn_auto_meeting_summary(inner, &mut record) {
+            emit_meeting_error(
+                inner,
+                Some(meeting_id.to_string()),
+                "summaryPrepareFailed",
+                &error,
+            );
+            log::warn!("[meeting] summary prepare failed: {error}");
+        }
+    }
     emit_meeting_state(
         inner,
         &MeetingRecordingSnapshot {

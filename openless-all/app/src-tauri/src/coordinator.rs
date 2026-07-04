@@ -9,6 +9,7 @@
 //! insertion, persists history, emits `capsule:state` events to the capsule
 //! window.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -68,6 +69,7 @@ mod capsule_focus;
 mod dictation;
 mod hotkey_loops;
 mod meeting;
+mod meeting_summary;
 mod polish_flow;
 mod qa;
 mod qa_session;
@@ -77,6 +79,7 @@ use asr_wiring::*;
 use capsule_focus::*;
 use hotkey_loops::*;
 use meeting::*;
+use meeting_summary::*;
 use polish_flow::*;
 use qa_session::*;
 
@@ -319,6 +322,7 @@ struct Inner {
     meeting_segment_count_at_asr_start: Mutex<usize>,
     meeting_audio_archive_active: AtomicBool,
     meeting_asr_release_token: Mutex<Option<String>>,
+    meeting_summary_jobs: Mutex<HashSet<String>>,
     /// QA SSE 流取消标志。begin_qa_session 重置为 false；cancel_qa_session 设 true；
     /// polish::chat_completion_history_streaming 的 loop 每帧检查，true 时 break loop
     /// 避免取消后 LLM 仍 drain HTTP body 烧 token。详见 issue #161。
@@ -433,6 +437,7 @@ impl Coordinator {
                     meeting_segment_count_at_asr_start: Mutex::new(0),
                     meeting_audio_archive_active: AtomicBool::new(false),
                     meeting_asr_release_token: Mutex::new(None),
+                    meeting_summary_jobs: Mutex::new(HashSet::new()),
                     qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                     local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                     shutdown: AtomicBool::new(false),
@@ -532,6 +537,7 @@ impl Coordinator {
                 meeting_segment_count_at_asr_start: Mutex::new(0),
                 meeting_audio_archive_active: AtomicBool::new(false),
                 meeting_asr_release_token: Mutex::new(None),
+                meeting_summary_jobs: Mutex::new(HashSet::new()),
                 qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                 local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                 foundry_local_runtime,
@@ -1236,6 +1242,24 @@ impl Coordinator {
 
     pub fn active_meeting_recording(&self) -> Result<Option<MeetingRecordingSnapshot>, String> {
         meeting::active_meeting_recording(&self.inner)
+    }
+
+    pub async fn generate_meeting_summary(&self, id: String) -> Result<MeetingRecord, String> {
+        meeting_summary::generate_meeting_summary(
+            &self.inner,
+            &id,
+            meeting_summary::MeetingSummaryMode::Generate,
+        )
+        .await
+    }
+
+    pub async fn retry_meeting_summary(&self, id: String) -> Result<MeetingRecord, String> {
+        meeting_summary::generate_meeting_summary(
+            &self.inner,
+            &id,
+            meeting_summary::MeetingSummaryMode::Retry,
+        )
+        .await
     }
 
     pub async fn start_dictation_with_translation(&self) -> Result<(), String> {

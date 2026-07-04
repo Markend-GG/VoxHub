@@ -225,6 +225,17 @@ impl ActiveLLMProvider {
         }
     }
 
+    pub async fn complete_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LLMError> {
+        match self {
+            Self::OpenAI(provider) => provider.complete_text(system_prompt, user_prompt).await,
+            Self::Codex(provider) => provider.complete_text(system_prompt, user_prompt).await,
+        }
+    }
+
     pub async fn answer_chat_streaming<F, C>(
         &self,
         messages: &[QaChatMessage],
@@ -437,6 +448,14 @@ impl OpenAICompatibleLLMProvider {
             front_app,
         );
         self.chat_completion(&system_prompt, &user_prompt).await
+    }
+
+    pub async fn complete_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LLMError> {
+        self.chat_completion(system_prompt, user_prompt).await
     }
 
     /// 多轮对话感知的 polish 路径。`prior_turns` 是按时间倒序（最新在前）的
@@ -982,6 +1001,18 @@ impl CodexOAuthLLMProvider {
         let messages = vec![
             json!({ "role": "system", "content": system_prompt }),
             json!({ "role": "user", "content": prompts::user_prompt(raw_text) }),
+        ];
+        self.codex_responses(messages, |_| {}, || false).await
+    }
+
+    pub async fn complete_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LLMError> {
+        let messages = vec![
+            json!({ "role": "system", "content": system_prompt }),
+            json!({ "role": "user", "content": user_prompt }),
         ];
         self.codex_responses(messages, |_| {}, || false).await
     }
@@ -1663,7 +1694,6 @@ fn openai_chat_reasoning_effort(model: &str, thinking_enabled: bool) -> Option<&
     }
 }
 
-
 fn extract_assistant_content(body: &str) -> Result<String, LLMError> {
     let json: Value = serde_json::from_str(body)
         .map_err(|e| LLMError::ParseError(format!("not valid JSON: {}", e)))?;
@@ -1681,7 +1711,6 @@ fn extract_assistant_content(body: &str) -> Result<String, LLMError> {
         .ok_or_else(|| LLMError::ParseError("message.content is not a string".into()))?;
     Ok(clean_polish_output(content))
 }
-
 
 pub mod prompts {
     use crate::types::PolishMode;

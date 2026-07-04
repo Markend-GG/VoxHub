@@ -12,6 +12,7 @@ import { Icon } from '../components/Icon';
 import {
   getActiveMeetingRecording,
   getMeeting,
+  retryMeetingSummary,
   listMeetings,
   pauseMeetingRecording,
   resumeMeetingRecording,
@@ -25,6 +26,7 @@ import type {
   MeetingRecordingPhase,
   MeetingRecordingSnapshot,
   MeetingStatus,
+  MeetingSummaryEvent,
   MeetingTranscriptSegmentEvent,
   TranscriptSegment,
   TranscriptSegmentSource,
@@ -32,7 +34,7 @@ import type {
 import { useMobileLayout } from '../lib/useMobileLayout';
 import { Btn, Card, PageHeader, Pill, type PillTone } from './_atoms';
 
-type ActionLoading = 'start' | 'pause' | 'resume' | 'stop' | null;
+type ActionLoading = 'start' | 'pause' | 'resume' | 'stop' | 'summary' | null;
 type ActiveControlMode = 'recording' | 'paused';
 
 export function Meetings() {
@@ -114,6 +116,7 @@ export function Meetings() {
     let unlistenState: (() => void) | undefined;
     let unlistenSegment: (() => void) | undefined;
     let unlistenError: (() => void) | undefined;
+    let unlistenSummary: (() => void) | undefined;
 
     (async () => {
       try {
@@ -152,15 +155,26 @@ export function Meetings() {
           if (cancelled) return;
           setEventError(event.payload);
         });
+        const summaryHandle = await listen<MeetingSummaryEvent>('meeting:summary', event => {
+          if (cancelled) return;
+          const payload = event.payload;
+          if (payload.meeting) {
+            setMeetings(prev => upsertMeeting(prev, payload.meeting!));
+            setSelectedId(prev => prev ?? payload.meeting!.id);
+          }
+          if (payload.error) setEventError(payload.error);
+        });
 
         if (cancelled) {
           stateHandle();
           segmentHandle();
           errorHandle();
+          summaryHandle();
         } else {
           unlistenState = stateHandle;
           unlistenSegment = segmentHandle;
           unlistenError = errorHandle;
+          unlistenSummary = summaryHandle;
         }
       } catch (error) {
         console.warn('[meetings] event listener setup failed', error);
@@ -172,6 +186,7 @@ export function Meetings() {
       unlistenState?.();
       unlistenSegment?.();
       unlistenError?.();
+      unlistenSummary?.();
     };
   }, [syncActiveSnapshot]);
 
@@ -291,6 +306,22 @@ export function Meetings() {
     }
   };
 
+  const runRetrySummary = async (id: string) => {
+    setActionLoading('summary');
+    setActionError(null);
+    setEventError(null);
+    try {
+      const record = await retryMeetingSummary(id);
+      setMeetings(prev => upsertMeeting(prev, record));
+      setSelectedId(record.id);
+    } catch (error) {
+      console.error('[meetings] retry summary failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const activePill = activeSnapshot ? (
     <Pill tone={statusTone(activeSnapshot.meeting.status)} size="sm">
       {phaseLabel(activeSnapshot.phase, t)}
@@ -393,6 +424,11 @@ export function Meetings() {
                     {t('meetings.asrInterrupted')}
                   </ErrorBanner>
                 )}
+                <SummarySection
+                  record={detailMeeting}
+                  actionLoading={actionLoading}
+                  onRetry={() => void runRetrySummary(detailMeeting.id)}
+                />
                 <TranscriptList
                   record={detailMeeting}
                   scrollRef={transcriptScrollRef}
@@ -626,6 +662,110 @@ function TranscriptList({
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function SummarySection({
+  record,
+  actionLoading,
+  onRetry,
+}: {
+  record: MeetingRecord;
+  actionLoading: ActionLoading;
+  onRetry: () => void;
+}) {
+  const { t } = useTranslation();
+  const summary = record.summary;
+  const hasSummary = Boolean(
+    summary.overview.trim()
+    || summary.keyDecisions.length
+    || summary.todos.length
+    || summary.risksAndOpenQuestions.length,
+  );
+  return (
+    <div style={{
+      flexShrink: 0,
+      marginBottom: 14,
+      padding: 12,
+      border: '0.5px solid var(--ol-line)',
+      borderRadius: 8,
+      background: 'var(--ol-surface-2)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
+          {t('meetings.summaryTitle')}
+        </span>
+        {record.status === 'summary_failed' && (
+          <Btn icon="refresh" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onRetry}>
+            {actionLoading === 'summary' ? t('meetings.actions.summaryRetrying') : t('meetings.actions.summaryRetry')}
+          </Btn>
+        )}
+      </div>
+      {record.status === 'summarizing' ? (
+        <div style={{ fontSize: 12.5, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>
+          {t('meetings.summaryLoading')}
+        </div>
+      ) : record.status === 'summary_failed' ? (
+        <div style={{ fontSize: 12.5, color: 'var(--ol-red, #ef4444)', lineHeight: 1.55 }}>
+          {t('meetings.summaryFailed')}
+        </div>
+      ) : hasSummary ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {summary.overview.trim() && (
+            <div style={{ fontSize: 13, color: 'var(--ol-ink)', lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>
+              {summary.overview}
+            </div>
+          )}
+          <SummaryList title={t('meetings.keyDecisions')} items={summary.keyDecisions} />
+          <TodoList todos={summary.todos} />
+          <SummaryList title={t('meetings.risksAndOpenQuestions')} items={summary.risksAndOpenQuestions} />
+        </div>
+      ) : (
+        <div style={{ fontSize: 12.5, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>
+          {t('meetings.summaryEmpty')}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SummaryList({ title, items }: { title: string; items: string[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--ol-ink-3)', marginBottom: 5 }}>
+        {title}
+      </div>
+      <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--ol-ink)', fontSize: 12.5, lineHeight: 1.6 }}>
+        {items.map((item, index) => (
+          <li key={`${item}-${index}`}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function TodoList({ todos }: { todos: MeetingRecord['summary']['todos'] }) {
+  const { t } = useTranslation();
+  if (todos.length === 0) return null;
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--ol-ink-3)', marginBottom: 5 }}>
+        {t('meetings.todos')}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {todos.map(todo => (
+          <div key={todo.id} style={{ border: '0.5px solid var(--ol-line-soft)', borderRadius: 8, padding: '8px 9px', background: 'var(--ol-surface)' }}>
+            <div style={{ fontSize: 12.5, color: 'var(--ol-ink)', lineHeight: 1.55 }}>{todo.content}</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 5, fontSize: 11, color: 'var(--ol-ink-4)' }}>
+              {todo.owner && <span>{t('meetings.todoOwner')}: {todo.owner}</span>}
+              {todo.dueDate && <span>{t('meetings.todoDueDate')}: {todo.dueDate}</span>}
+              {todo.sourceQuote && <span>{t('meetings.todoSource')}: {todo.sourceQuote}</span>}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

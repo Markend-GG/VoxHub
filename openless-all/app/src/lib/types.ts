@@ -135,6 +135,13 @@ export interface MeetingErrorEvent {
   message: string;
 }
 
+export interface MeetingSummaryEvent {
+  meetingId: string;
+  status: MeetingStatus;
+  meeting: MeetingRecord | null;
+  error: MeetingErrorEvent | null;
+}
+
 export interface DictionaryEntry {
   id: string;
   phrase: string;

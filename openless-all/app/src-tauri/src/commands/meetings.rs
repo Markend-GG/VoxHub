@@ -101,6 +101,24 @@ pub fn get_active_meeting_recording(
     coord.active_meeting_recording()
 }
 
+#[tauri::command]
+pub async fn generate_meeting_summary(
+    id: String,
+    coord: CoordinatorState<'_>,
+) -> Result<MeetingRecord, String> {
+    validate_meeting_id(&id)?;
+    coord.generate_meeting_summary(id).await
+}
+
+#[tauri::command]
+pub async fn retry_meeting_summary(
+    id: String,
+    coord: CoordinatorState<'_>,
+) -> Result<MeetingRecord, String> {
+    validate_meeting_id(&id)?;
+    coord.retry_meeting_summary(id).await
+}
+
 fn prune_with_current_preference(store: &MeetingStore) -> Result<(), String> {
     let retention_count = PreferencesStore::new()
         .unwrap_or_else(|_| PreferencesStore::new_fallback())

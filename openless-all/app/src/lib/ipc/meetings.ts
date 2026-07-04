@@ -84,3 +84,19 @@ export function stopMeetingRecording(id: string): Promise<MeetingRecord> {
 export function getActiveMeetingRecording(): Promise<MeetingRecordingSnapshot | null> {
     return invokeOrMock("get_active_meeting_recording", undefined, () => null)
 }
+
+export function generateMeetingSummary(id: string): Promise<MeetingRecord> {
+    return invokeOrMock("generate_meeting_summary", { id }, () => ({
+        ...mockMeetings[0],
+        id,
+        status: "completed",
+    }))
+}
+
+export function retryMeetingSummary(id: string): Promise<MeetingRecord> {
+    return invokeOrMock("retry_meeting_summary", { id }, () => ({
+        ...mockMeetings[0],
+        id,
+        status: "completed",
+    }))
+}

@@ -260,6 +260,51 @@ pub struct MeetingErrorEvent {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingSummaryEvent {
+    pub meeting_id: String,
+    pub status: MeetingStatus,
+    pub meeting: Option<MeetingRecord>,
+    pub error: Option<MeetingErrorEvent>,
+}
+
+#[cfg(test)]
+mod meeting_summary_event_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn meeting_summary_event_serializes_camel_case_and_snake_case_status() {
+        let event = MeetingSummaryEvent {
+            meeting_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            status: MeetingStatus::SummaryFailed,
+            meeting: None,
+            error: Some(MeetingErrorEvent {
+                meeting_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+                code: "summaryInvalidJson".to_string(),
+                message: "invalid summary json".to_string(),
+            }),
+        };
+
+        let value = serde_json::to_value(event).expect("serialize summary event");
+
+        assert_eq!(
+            value,
+            json!({
+                "meetingId": "550e8400-e29b-41d4-a716-446655440000",
+                "status": "summary_failed",
+                "meeting": null,
+                "error": {
+                    "meetingId": "550e8400-e29b-41d4-a716-446655440000",
+                    "code": "summaryInvalidJson",
+                    "message": "invalid summary json"
+                }
+            })
+        );
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictionaryEntry {

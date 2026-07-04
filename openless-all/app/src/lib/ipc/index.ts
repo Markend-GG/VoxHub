@@ -53,6 +53,8 @@ export {
     resumeMeetingRecording,
     stopMeetingRecording,
     getActiveMeetingRecording,
+    generateMeetingSummary,
+    retryMeetingSummary,
 } from "./meetings"
 
 // vocab
