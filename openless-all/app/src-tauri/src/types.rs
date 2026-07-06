@@ -269,6 +269,20 @@ pub struct MeetingSummaryEvent {
     pub error: Option<MeetingErrorEvent>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingCloseRequestIntent {
+    Hide,
+    Exit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingCloseRequestEvent {
+    pub snapshot: MeetingRecordingSnapshot,
+    pub intent: MeetingCloseRequestIntent,
+}
+
 #[cfg(test)]
 mod meeting_summary_event_tests {
     use super::*;

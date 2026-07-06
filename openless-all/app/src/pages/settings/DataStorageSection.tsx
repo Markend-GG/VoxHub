@@ -32,6 +32,11 @@ export function DataStorageSection() {
     if (Number.isNaN(parsed)) return;
     void savePrefs({ ...prefs, polishContextWindowMinutes: clamp(parsed, 0, 60) });
   };
+  const onMeetingAudioRetentionChange = (raw: string) => {
+    const parsed = raw === '' ? 0 : Number.parseInt(raw, 10);
+    if (Number.isNaN(parsed)) return;
+    void savePrefs({ ...prefs, meetingAudioRetentionCount: clamp(parsed, 0, 100) });
+  };
   // 历史条数 200 是当前 HISTORY_CAP（persistence.rs:32），下限 5 是避免用户填 0 导致
   // 写一条就立刻被清光；空字符串视为不限制，落回 null → 后端走 200 默认。
   const onHistoryMaxEntriesChange = (raw: string) => {
@@ -68,6 +73,19 @@ export function DataStorageSection() {
           onChange={e => onHistoryMaxEntriesChange(e.target.value)}
           style={{ ...inputStyle, width: 80, textAlign: 'right' }}
         />
+      </SettingRow>
+      <SettingRow label={t('settings.recording.meetingAudioRetentionLabel')}>
+        <input
+          type="number"
+          min={0}
+          max={100}
+          value={prefs.meetingAudioRetentionCount}
+          onChange={e => onMeetingAudioRetentionChange(e.target.value)}
+          style={{ ...inputStyle, width: 80, textAlign: 'right' }}
+        />
+        <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.4 }}>
+          {t('settings.recording.meetingAudioRetentionDesc')}
+        </span>
       </SettingRow>
       <SettingRow label={t('settings.recording.polishContextWindowLabel')}>
         <input

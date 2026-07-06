@@ -55,6 +55,10 @@ export {
     getActiveMeetingRecording,
     generateMeetingSummary,
     retryMeetingSummary,
+    exportMeetingMarkdown,
+    retranscribeMeeting,
+    hideMainWindowAfterMeetingGuard,
+    exitAppAfterMeetingGuard,
 } from "./meetings"
 
 // vocab

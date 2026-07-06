@@ -100,3 +100,26 @@ export function retryMeetingSummary(id: string): Promise<MeetingRecord> {
         status: "completed",
     }))
 }
+
+export function exportMeetingMarkdown(id: string, targetPath: string): Promise<void> {
+    return invokeOrMock("export_meeting_markdown", { id, targetPath }, () => undefined)
+}
+
+export function retranscribeMeeting(id: string): Promise<MeetingRecord> {
+    return invokeOrMock("retranscribe_meeting", { id }, () => ({
+        ...mockMeetings[0],
+        id,
+        transcriptSegments: mockMeetings[0].transcriptSegments.map((segment) => ({
+            ...segment,
+            source: "retranscribed_asr",
+        })),
+    }))
+}
+
+export function hideMainWindowAfterMeetingGuard(): Promise<void> {
+    return invokeOrMock("hide_main_window_after_meeting_guard", undefined, () => undefined)
+}
+
+export function exitAppAfterMeetingGuard(): Promise<void> {
+    return invokeOrMock("exit_app_after_meeting_guard", undefined, () => undefined)
+}

@@ -179,9 +179,17 @@ async fn finish_summarizing_record(
             record.status = MeetingStatus::SummaryFailed;
             record.updated_at = Utc::now().to_rfc3339();
             persist_summary_record(&store, &record)?;
-            emit_meeting_summary_failed(inner, &record, "summaryLlmFailed", &error);
+            emit_meeting_summary_failed(inner, &record, summary_error_code(&error), &error);
             Ok(record)
         }
+    }
+}
+
+fn summary_error_code(error: &str) -> &'static str {
+    if error.starts_with("invalid summary json") {
+        "summaryInvalidJson"
+    } else {
+        "summaryLlmFailed"
     }
 }
 
@@ -230,15 +238,8 @@ fn validate_summary_mode(record: &MeetingRecord, mode: MeetingSummaryMode) -> Re
             _,
         ) => Err("meeting recording is active".to_string()),
         (MeetingStatus::Summarizing, _) => Err("meeting summary already running".to_string()),
-        (MeetingStatus::Completed, MeetingSummaryMode::Generate)
-            if !has_summary(&record.summary) =>
-        {
-            Ok(())
-        }
+        (MeetingStatus::Completed, MeetingSummaryMode::Generate) => Ok(()),
         (MeetingStatus::SummaryFailed, MeetingSummaryMode::Retry) => Ok(()),
-        (MeetingStatus::Completed, MeetingSummaryMode::Generate) => {
-            Err("meeting summary already exists".to_string())
-        }
         (MeetingStatus::SummaryFailed, MeetingSummaryMode::Generate) => {
             Err("meeting summary retry required".to_string())
         }
@@ -247,13 +248,6 @@ fn validate_summary_mode(record: &MeetingRecord, mode: MeetingSummaryMode) -> Re
         }
         (MeetingStatus::Draft, _) => Err("meeting is not completed".to_string()),
     }
-}
-
-fn has_summary(summary: &MeetingSummary) -> bool {
-    !summary.overview.trim().is_empty()
-        || !summary.key_decisions.is_empty()
-        || !summary.todos.is_empty()
-        || !summary.risks_and_open_questions.is_empty()
 }
 
 pub(super) fn prepare_summary_record(record: &mut MeetingRecord) -> Result<(), String> {
@@ -312,7 +306,7 @@ fn build_meeting_summary_chunk_prompt(
     output_language: &str,
 ) -> MeetingSummaryPrompt {
     MeetingSummaryPrompt {
-        system: build_summary_system_prompt(output_language),
+        system: build_summary_notes_system_prompt(output_language),
         user: format!(
             "这是一场长会议的第 {index}/{total} 个 transcript chunk（原文分块）。\n\
              请基于 previous notes（前文累计笔记）和当前 chunk 更新累计笔记。\n\
@@ -323,6 +317,13 @@ fn build_meeting_summary_chunk_prompt(
             record.id, previous_notes, chunk
         ),
     }
+}
+
+fn build_summary_notes_system_prompt(output_language: &str) -> String {
+    format!(
+        "你是 OpenLess 的会议总结助手。请输出纯文本 rolling context notes（滚动上下文笔记），不要输出 JSON、Markdown 或解释。\n\
+         不要编造原文没有的信息。输出语言偏好：{output_language}。"
+    )
 }
 
 fn build_meeting_summary_final_prompt(
@@ -401,9 +402,10 @@ fn format_transcript_segments(record: &MeetingRecord) -> String {
 
 fn format_segment_timestamp(ms: u64) -> String {
     let total_secs = ms / 1000;
-    let minutes = total_secs / 60;
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
     let seconds = total_secs % 60;
-    format!("{minutes:02}:{seconds:02}")
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
 pub(super) fn transcript_chunks(record: &MeetingRecord) -> Vec<String> {
@@ -714,8 +716,13 @@ mod tests {
         let prompt = build_meeting_summary_prompt(&record, &[], "auto");
 
         assert!(prompt.system.contains("只输出 JSON"));
-        assert!(prompt.user.contains("[seg-000001][未区分][00:12]"));
+        assert!(prompt.user.contains("[seg-000001][未区分][00:00:12]"));
         assert!(prompt.user.contains("确认 V1-4 做总结生成。"));
+    }
+
+    #[test]
+    fn meeting_summary_formats_segment_timestamp_as_hh_mm_ss() {
+        assert_eq!(format_segment_timestamp(3_723_000), "01:02:03");
     }
 
     #[test]
@@ -772,6 +779,27 @@ mod tests {
     }
 
     #[test]
+    fn meeting_summary_invalid_json_uses_parse_error_code() {
+        assert_eq!(
+            summary_error_code("invalid summary json: expected value"),
+            "summaryInvalidJson"
+        );
+        assert_eq!(summary_error_code("network failed"), "summaryLlmFailed");
+    }
+
+    #[test]
+    fn meeting_summary_chunk_prompt_uses_notes_system_prompt() {
+        let record = record_with_segments(vec![segment("seg-000001", "内容")]);
+
+        let prompt =
+            build_meeting_summary_chunk_prompt(&record, "previous notes", "chunk", 1, 2, "auto");
+
+        assert!(prompt.system.contains("rolling context notes"));
+        assert!(!prompt.system.contains("只输出 JSON"));
+        assert!(prompt.user.contains("不要输出最终 JSON"));
+    }
+
+    #[test]
     fn meeting_summary_filters_unknown_source_segment_ids() {
         let parsed = parse_meeting_summary_response(
             r#"{
@@ -820,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn meeting_summary_generate_rejects_existing_summary_and_retry_only_allows_failed() {
+    fn meeting_summary_generate_allows_existing_summary_rewrite_and_retry_only_allows_failed() {
         let mut completed = record_with_segments(vec![segment("seg-000001", "内容")]);
         completed.summary.overview = "已有总结".to_string();
         let mut failed = completed.clone();
@@ -828,7 +856,7 @@ mod tests {
 
         assert_eq!(
             validate_summary_mode(&completed, MeetingSummaryMode::Generate),
-            Err("meeting summary already exists".to_string())
+            Ok(())
         );
         assert_eq!(
             validate_summary_mode(&completed, MeetingSummaryMode::Retry),

@@ -142,6 +142,20 @@ export interface MeetingSummaryEvent {
   error: MeetingErrorEvent | null;
 }
 
+export type MeetingCloseRequestIntent = 'hide' | 'exit';
+
+export interface MeetingCloseRequestEvent {
+  snapshot: MeetingRecordingSnapshot;
+  intent: MeetingCloseRequestIntent;
+}
+
+export function normalizeMeetingCloseRequest(
+  payload: MeetingCloseRequestEvent | MeetingRecordingSnapshot,
+): MeetingCloseRequestEvent {
+  if ('snapshot' in payload) return payload;
+  return { snapshot: payload, intent: 'hide' };
+}
+
 export interface DictionaryEntry {
   id: string;
   phrase: string;

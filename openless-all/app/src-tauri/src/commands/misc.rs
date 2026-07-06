@@ -76,6 +76,16 @@ pub fn set_shortcut_recording_active(coord: CoordinatorState<'_>, active: bool) 
 }
 
 #[tauri::command]
+pub fn hide_main_window_after_meeting_guard(app: AppHandle) {
+    crate::hide_main_window(&app);
+}
+
+#[tauri::command]
+pub fn exit_app_after_meeting_guard(app: AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command]
 #[cfg(not(mobile))]
 pub fn get_windows_ime_status() -> WindowsImeStatus {
     crate::windows_ime_profile::get_windows_ime_status()

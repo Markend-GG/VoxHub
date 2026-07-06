@@ -4,22 +4,29 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type MutableRefObject,
   type ReactNode,
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import {
+  deleteMeetingRecord,
+  exportMeetingMarkdown,
+  generateMeetingSummary,
   getActiveMeetingRecording,
   getMeeting,
   retryMeetingSummary,
   listMeetings,
   pauseMeetingRecording,
   resumeMeetingRecording,
+  retranscribeMeeting,
   startMeetingRecording,
   stopMeetingRecording,
+  updateMeetingRecord,
 } from '../lib/ipc';
 import type {
+  MeetingCloseRequestEvent,
   MeetingAudioState,
   MeetingErrorEvent,
   MeetingRecord,
@@ -31,11 +38,30 @@ import type {
   TranscriptSegment,
   TranscriptSegmentSource,
 } from '../lib/types';
+import { normalizeMeetingCloseRequest } from '../lib/types';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import { Btn, Card, PageHeader, Pill, type PillTone } from './_atoms';
 
-type ActionLoading = 'start' | 'pause' | 'resume' | 'stop' | 'summary' | null;
+type ActionLoading = 'start' | 'pause' | 'resume' | 'stop' | 'summary' | 'save' | 'delete' | 'export' | 'retranscribe' | null;
 type ActiveControlMode = 'recording' | 'paused';
+
+interface MeetingEditDraft {
+  id: string;
+  title: string;
+  overview: string;
+  keyDecisions: string;
+  todos: MeetingTodoDraft[];
+  risksAndOpenQuestions: string;
+}
+
+interface MeetingTodoDraft {
+  id: string;
+  content: string;
+  owner: string;
+  dueDate: string;
+  sourceQuote: string;
+  sourceSegmentIds: string[];
+}
 
 export function Meetings() {
   const { t } = useTranslation();
@@ -50,6 +76,9 @@ export function Meetings() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [eventError, setEventError] = useState<MeetingErrorEvent | null>(null);
+  const [editDraft, setEditDraft] = useState<MeetingEditDraft | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [rewriteConfirmId, setRewriteConfirmId] = useState<string | null>(null);
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const transcriptStickToBottomRef = useRef(true);
@@ -117,6 +146,7 @@ export function Meetings() {
     let unlistenSegment: (() => void) | undefined;
     let unlistenError: (() => void) | undefined;
     let unlistenSummary: (() => void) | undefined;
+    let unlistenClose: (() => void) | undefined;
 
     (async () => {
       try {
@@ -164,17 +194,29 @@ export function Meetings() {
           }
           if (payload.error) setEventError(payload.error);
         });
+        const closeHandle = await listen<MeetingCloseRequestEvent | MeetingRecordingSnapshot>('meeting:close-requested', event => {
+          if (cancelled) return;
+          const { snapshot } = normalizeMeetingCloseRequest(event.payload);
+          setActiveSnapshot(snapshot);
+          setActiveControlMode(controlModeForSnapshot(snapshot));
+          setMeetings(prev => upsertMeeting(prev, snapshot.meeting));
+          setSelectedId(snapshot.meeting.id);
+          setActionError(t('meetings.closeGuard.message'));
+          if (mobile) setMobileDetailOpen(true);
+        });
 
         if (cancelled) {
           stateHandle();
           segmentHandle();
           errorHandle();
           summaryHandle();
+          closeHandle();
         } else {
           unlistenState = stateHandle;
           unlistenSegment = segmentHandle;
           unlistenError = errorHandle;
           unlistenSummary = summaryHandle;
+          unlistenClose = closeHandle;
         }
       } catch (error) {
         console.warn('[meetings] event listener setup failed', error);
@@ -187,16 +229,14 @@ export function Meetings() {
       unlistenSegment?.();
       unlistenError?.();
       unlistenSummary?.();
+      unlistenClose?.();
     };
-  }, [syncActiveSnapshot]);
+  }, [mobile, syncActiveSnapshot, t]);
 
   const filteredMeetings = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return meetings;
-    return meetings.filter(record => {
-      if (record.title.toLowerCase().includes(q)) return true;
-      return record.transcriptSegments.some(segment => segment.text.toLowerCase().includes(q));
-    });
+    return meetings.filter(record => meetingSearchText(record).includes(q));
   }, [meetings, query]);
 
   const selectedMeeting = useMemo(() => {
@@ -225,6 +265,9 @@ export function Meetings() {
   const selectMeeting = async (id: string) => {
     setSelectedId(id);
     setActionError(null);
+    setEditDraft(null);
+    setDeleteConfirmId(null);
+    setRewriteConfirmId(null);
     if (mobile) setMobileDetailOpen(true);
     try {
       const record = await getMeeting(id);
@@ -249,6 +292,96 @@ export function Meetings() {
     } catch (error) {
       console.error('[meetings] start failed', error);
       setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runSaveEdit = async (record: MeetingRecord) => {
+    if (!editDraft || editDraft.id !== record.id || !canEditMeeting(record, selectedActiveSnapshot)) return;
+    setActionLoading('save');
+    setActionError(null);
+    try {
+      const updated = await updateMeetingRecord({
+        ...record,
+        title: editDraft.title.trim() || t('meetings.untitled'),
+        summary: {
+          overview: editDraft.overview.trim(),
+          keyDecisions: linesFromDraft(editDraft.keyDecisions),
+          todos: todosFromDraft(editDraft.todos, record),
+          risksAndOpenQuestions: linesFromDraft(editDraft.risksAndOpenQuestions),
+        },
+      });
+      setMeetings(prev => upsertMeeting(prev, updated));
+      setSelectedId(updated.id);
+      setEditDraft(null);
+      setActionError(null);
+    } catch (error) {
+      console.error('[meetings] save edit failed', error);
+      setActionError(t('meetings.edit.saveFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runDelete = async (record: MeetingRecord) => {
+    if (!canDeleteMeeting(record, activeSnapshot)) return;
+    if (deleteConfirmId !== record.id) {
+      setDeleteConfirmId(record.id);
+      setActionError(null);
+      return;
+    }
+    setActionLoading('delete');
+    setActionError(null);
+    try {
+      await deleteMeetingRecord(record.id);
+      const remaining = meetingsRef.current.filter(item => item.id !== record.id);
+      setMeetings(remaining);
+      setEditDraft(null);
+      setDeleteConfirmId(null);
+      setEventError(prev => (prev?.meetingId === record.id ? null : prev));
+      setSelectedId(current => {
+        if (current !== record.id) return current;
+        return remaining[0]?.id ?? null;
+      });
+      if (mobile && remaining.length === 0) setMobileDetailOpen(false);
+    } catch (error) {
+      console.error('[meetings] delete failed', error);
+      setActionError(t('meetings.deleteFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runExportMarkdown = async (record: MeetingRecord) => {
+    setActionLoading('export');
+    setActionError(null);
+    try {
+      const targetPath = await chooseMarkdownExportPath(record);
+      if (!targetPath) return;
+      await exportMeetingMarkdown(record.id, targetPath);
+      setActionError(t('meetings.exportSuccess', { path: targetPath }));
+    } catch (error) {
+      console.error('[meetings] export failed', error);
+      setActionError(t('meetings.exportFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runRetranscribe = async (record: MeetingRecord) => {
+    if (!canRetranscribeMeeting(record, activeSnapshot)) return;
+    setActionLoading('retranscribe');
+    setActionError(null);
+    setEventError(null);
+    try {
+      const updated = await retranscribeMeeting(record.id);
+      setMeetings(prev => upsertMeeting(prev, updated));
+      setSelectedId(updated.id);
+      setActionError(t('meetings.retranscribeSuccess'));
+    } catch (error) {
+      console.error('[meetings] retranscribe failed', error);
+      setActionError(t('meetings.retranscribeFailed', { err: errorMessage(error) }));
     } finally {
       setActionLoading(null);
     }
@@ -316,6 +449,28 @@ export function Meetings() {
       setSelectedId(record.id);
     } catch (error) {
       console.error('[meetings] retry summary failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runGenerateSummary = async (id: string) => {
+    if (rewriteConfirmId !== id) {
+      setRewriteConfirmId(id);
+      setActionError(null);
+      return;
+    }
+    setActionLoading('summary');
+    setActionError(null);
+    setEventError(null);
+    try {
+      const record = await generateMeetingSummary(id);
+      setMeetings(prev => upsertMeeting(prev, record));
+      setSelectedId(record.id);
+      setRewriteConfirmId(null);
+    } catch (error) {
+      console.error('[meetings] generate summary failed', error);
       setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
     } finally {
       setActionLoading(null);
@@ -405,39 +560,71 @@ export function Meetings() {
                 <MeetingDetailHeader
                   record={detailMeeting}
                   snapshot={selectedActiveSnapshot}
+                  draft={editDraft?.id === detailMeeting.id ? editDraft : null}
+                  onDraftChange={setEditDraft}
                   controlMode={selectedControlMode}
                   actionLoading={actionLoading}
+                  editing={editDraft?.id === detailMeeting.id}
+                  deleteConfirming={deleteConfirmId === detailMeeting.id}
+                  canEdit={canEditMeeting(detailMeeting, selectedActiveSnapshot)}
+                  canDelete={canDeleteMeeting(detailMeeting, activeSnapshot)}
+                  onEdit={() => setEditDraft(createEditDraft(detailMeeting))}
+                  onCancelEdit={() => setEditDraft(null)}
+                  onSaveEdit={() => void runSaveEdit(detailMeeting)}
+                  onDelete={() => void runDelete(detailMeeting)}
+                  onCancelDelete={() => setDeleteConfirmId(null)}
+                  onExport={() => void runExportMarkdown(detailMeeting)}
                   onPause={() => void runPause(detailMeeting.id)}
                   onResume={() => void runResume(detailMeeting.id)}
                   onStop={() => void runStop(detailMeeting.id)}
                 />
-                {actionError && (
-                  <ErrorBanner tone="error">{actionError}</ErrorBanner>
-                )}
-                {eventError && (!eventError.meetingId || eventError.meetingId === detailMeeting.id) && (
-                  <ErrorBanner tone="error">
-                    {t('meetings.eventError', { message: eventError.message })}
-                  </ErrorBanner>
-                )}
-                {(detailMeeting.status === 'transcribing_interrupted' || selectedActiveSnapshot?.asrInterrupted) && (
-                  <ErrorBanner tone="warning">
-                    {t('meetings.asrInterrupted')}
-                  </ErrorBanner>
-                )}
-                <SummarySection
-                  record={detailMeeting}
-                  actionLoading={actionLoading}
-                  onRetry={() => void runRetrySummary(detailMeeting.id)}
-                />
-                <TranscriptList
-                  record={detailMeeting}
-                  scrollRef={transcriptScrollRef}
-                  onScroll={() => {
-                    const el = transcriptScrollRef.current;
-                    if (!el) return;
-                    transcriptStickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-                  }}
-                />
+                <div className="ol-thinscroll" style={{ flex: 1, minHeight: 0, overflow: 'auto', paddingRight: 2 }}>
+                  {actionError && (
+                    <ErrorBanner tone="error">{actionError}</ErrorBanner>
+                  )}
+                  {eventError && (!eventError.meetingId || eventError.meetingId === detailMeeting.id) && (
+                    <ErrorBanner tone="error">
+                      {t('meetings.eventError', { message: eventError.message })}
+                    </ErrorBanner>
+                  )}
+                  {deleteConfirmId === detailMeeting.id && (
+                    <ErrorBanner tone="warning">
+                      {t('meetings.deleteConfirm', { title: detailMeeting.title || t('meetings.untitled') })}
+                    </ErrorBanner>
+                  )}
+                  {rewriteConfirmId === detailMeeting.id && (
+                    <ErrorBanner tone="warning">
+                      {t('meetings.rewriteConfirm')}
+                    </ErrorBanner>
+                  )}
+                  {(detailMeeting.status === 'transcribing_interrupted' || selectedActiveSnapshot?.asrInterrupted) && (
+                    <ErrorBanner tone="warning">
+                      {t('meetings.asrInterrupted')}
+                    </ErrorBanner>
+                  )}
+                  <SummarySection
+                    record={detailMeeting}
+                    draft={editDraft?.id === detailMeeting.id ? editDraft : null}
+                    onDraftChange={setEditDraft}
+                    actionLoading={actionLoading}
+                    onRetry={() => void runRetrySummary(detailMeeting.id)}
+                    onRewrite={() => void runGenerateSummary(detailMeeting.id)}
+                    rewriteConfirming={rewriteConfirmId === detailMeeting.id}
+                    onCancelRewrite={() => setRewriteConfirmId(null)}
+                  />
+                  <TranscriptList
+                    record={detailMeeting}
+                    scrollRef={transcriptScrollRef}
+                    onScroll={() => {
+                      const el = transcriptScrollRef.current;
+                      if (!el) return;
+                      transcriptStickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+                    }}
+                    actionLoading={actionLoading}
+                    canRetranscribe={editDraft?.id !== detailMeeting.id && canRetranscribeMeeting(detailMeeting, activeSnapshot)}
+                    onRetranscribe={() => void runRetranscribe(detailMeeting)}
+                  />
+                </div>
               </>
             ) : (
               <div style={{ padding: 40, textAlign: 'center', fontSize: 13, color: 'var(--ol-ink-4)' }}>
@@ -562,16 +749,40 @@ function MeetingListItem({
 function MeetingDetailHeader({
   record,
   snapshot,
+  draft,
+  onDraftChange,
   controlMode,
   actionLoading,
+  editing,
+  deleteConfirming,
+  canEdit,
+  canDelete,
+  onEdit,
+  onCancelEdit,
+  onSaveEdit,
+  onDelete,
+  onCancelDelete,
+  onExport,
   onPause,
   onResume,
   onStop,
 }: {
   record: MeetingRecord;
   snapshot: MeetingRecordingSnapshot | null;
+  draft: MeetingEditDraft | null;
+  onDraftChange: (draft: MeetingEditDraft) => void;
   controlMode: ActiveControlMode | null;
   actionLoading: ActionLoading;
+  editing: boolean;
+  deleteConfirming: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
+  onEdit: () => void;
+  onCancelEdit: () => void;
+  onSaveEdit: () => void;
+  onDelete: () => void;
+  onCancelDelete: () => void;
+  onExport: () => void;
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
@@ -587,9 +798,19 @@ function MeetingDetailHeader({
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: 'var(--ol-ink)', lineHeight: 1.25 }}>
-              {record.title || t('meetings.untitled')}
-            </h2>
+            {draft ? (
+              <input
+                value={draft.title}
+                onChange={event => onDraftChange({ ...draft, title: event.target.value })}
+                aria-label={t('meetings.edit.titleLabel')}
+                placeholder={t('meetings.untitled')}
+                style={{ ...editorInputStyle, maxWidth: 420, fontSize: 16, fontWeight: 600 }}
+              />
+            ) : (
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: 'var(--ol-ink)', lineHeight: 1.25 }}>
+                {record.title || t('meetings.untitled')}
+              </h2>
+            )}
             <Pill size="sm" tone={statusTone(record.status)}>{statusLabel(record.status, t)}</Pill>
             <Pill size="sm" tone="outline">{audioLabel(record.audio.state, t)}</Pill>
           </div>
@@ -601,8 +822,27 @@ function MeetingDetailHeader({
             )}
           </div>
         </div>
-        {(showPause || showResume || showStop) && (
+        {(showPause || showResume || showStop || canEdit || canDelete || editing) && (
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            {editing ? (
+              <>
+                <Btn icon="check" variant="blue" size="sm" disabled={actionLoading !== null} onClick={onSaveEdit}>
+                  {actionLoading === 'save' ? t('meetings.edit.saving') : t('meetings.edit.save')}
+                </Btn>
+                <Btn icon="x" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onCancelEdit}>
+                  {t('common.cancel')}
+                </Btn>
+              </>
+            ) : canEdit && (
+              <Btn icon="doc" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onEdit}>
+                {t('meetings.edit.edit')}
+              </Btn>
+            )}
+            {!editing && (
+              <Btn icon="download" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onExport}>
+                {actionLoading === 'export' ? t('meetings.actions.exporting') : t('meetings.actions.exportMarkdown')}
+              </Btn>
+            )}
             {showPause && (
               <Btn icon="mic" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onPause}>
                 {actionLoading === 'pause' ? t('meetings.actions.pausing') : t('meetings.actions.pause')}
@@ -618,6 +858,21 @@ function MeetingDetailHeader({
                 {actionLoading === 'stop' ? t('meetings.actions.stopping') : t('meetings.actions.stop')}
               </Btn>
             )}
+            {!editing && canDelete && deleteConfirming && (
+              <>
+                <Btn icon="trash" variant="blue" size="sm" disabled={actionLoading !== null} onClick={onDelete}>
+                  {actionLoading === 'delete' ? t('meetings.actions.deleting') : t('meetings.actions.deleteConfirm')}
+                </Btn>
+                <Btn icon="x" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onCancelDelete}>
+                  {t('common.cancel')}
+                </Btn>
+              </>
+            )}
+            {!editing && canDelete && !deleteConfirming && (
+              <Btn icon="trash" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onDelete}>
+                {t('common.delete')}
+              </Btn>
+            )}
           </div>
         )}
       </div>
@@ -629,27 +884,40 @@ function TranscriptList({
   record,
   scrollRef,
   onScroll,
+  actionLoading,
+  canRetranscribe,
+  onRetranscribe,
 }: {
   record: MeetingRecord;
   scrollRef: MutableRefObject<HTMLDivElement | null>;
   onScroll: () => void;
+  actionLoading: ActionLoading;
+  canRetranscribe: boolean;
+  onRetranscribe: () => void;
 }) {
   const { t } = useTranslation();
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 260 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexShrink: 0 }}>
         <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
           {t('meetings.transcriptTitle')}
         </span>
-        <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
-          {t('meetings.segmentCount', { count: record.transcriptSegments.length })}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
+            {t('meetings.segmentCount', { count: record.transcriptSegments.length })}
+          </span>
+          {canRetranscribe && (
+            <Btn icon="refresh" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onRetranscribe}>
+              {actionLoading === 'retranscribe' ? t('meetings.actions.retranscribing') : t('meetings.actions.retranscribe')}
+            </Btn>
+          )}
+        </div>
       </div>
       <div
         ref={scrollRef}
         onScroll={onScroll}
         className="ol-thinscroll"
-        style={{ flex: 1, minHeight: 0, overflow: 'auto', paddingRight: 2 }}
+        style={{ maxHeight: 'min(46vh, 520px)', overflow: 'auto', paddingRight: 2 }}
       >
         {record.transcriptSegments.length === 0 ? (
           <div style={{ padding: 18, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)', color: 'var(--ol-ink-4)', fontSize: 12.5, lineHeight: 1.55 }}>
@@ -669,12 +937,22 @@ function TranscriptList({
 
 function SummarySection({
   record,
+  draft,
+  onDraftChange,
   actionLoading,
   onRetry,
+  onRewrite,
+  rewriteConfirming,
+  onCancelRewrite,
 }: {
   record: MeetingRecord;
+  draft: MeetingEditDraft | null;
+  onDraftChange: (draft: MeetingEditDraft) => void;
   actionLoading: ActionLoading;
   onRetry: () => void;
+  onRewrite: () => void;
+  rewriteConfirming: boolean;
+  onCancelRewrite: () => void;
 }) {
   const { t } = useTranslation();
   const summary = record.summary;
@@ -684,9 +962,9 @@ function SummarySection({
     || summary.todos.length
     || summary.risksAndOpenQuestions.length,
   );
+  const canRewrite = !draft && record.status === 'completed' && hasSummary;
   return (
     <div style={{
-      flexShrink: 0,
       marginBottom: 14,
       padding: 12,
       border: '0.5px solid var(--ol-line)',
@@ -697,13 +975,31 @@ function SummarySection({
         <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
           {t('meetings.summaryTitle')}
         </span>
-        {record.status === 'summary_failed' && (
+        {!draft && record.status === 'summary_failed' && (
           <Btn icon="refresh" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onRetry}>
             {actionLoading === 'summary' ? t('meetings.actions.summaryRetrying') : t('meetings.actions.summaryRetry')}
           </Btn>
         )}
+        {canRewrite && (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <Btn icon="refresh" variant={rewriteConfirming ? 'blue' : 'ghost'} size="sm" disabled={actionLoading !== null} onClick={onRewrite}>
+              {actionLoading === 'summary'
+                ? t('meetings.actions.summaryRewriting')
+                : rewriteConfirming
+                  ? t('meetings.actions.summaryRewriteConfirm')
+                  : t('meetings.actions.summaryRewrite')}
+            </Btn>
+            {rewriteConfirming && (
+              <Btn icon="x" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onCancelRewrite}>
+                {t('common.cancel')}
+              </Btn>
+            )}
+          </div>
+        )}
       </div>
-      {record.status === 'summarizing' ? (
+      {draft ? (
+        <SummaryEditor draft={draft} onDraftChange={onDraftChange} />
+      ) : record.status === 'summarizing' ? (
         <div style={{ fontSize: 12.5, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>
           {t('meetings.summaryLoading')}
         </div>
@@ -728,6 +1024,168 @@ function SummarySection({
         </div>
       )}
     </div>
+  );
+}
+
+function SummaryEditor({
+  draft,
+  onDraftChange,
+}: {
+  draft: MeetingEditDraft;
+  onDraftChange: (draft: MeetingEditDraft) => void;
+}) {
+  const { t } = useTranslation();
+  const update = (patch: Partial<MeetingEditDraft>) => onDraftChange({ ...draft, ...patch });
+  const updateTodo = (index: number, patch: Partial<MeetingTodoDraft>) => {
+    update({
+      todos: draft.todos.map((todo, todoIndex) => (
+        todoIndex === index ? { ...todo, ...patch } : todo
+      )),
+    });
+  };
+  const addTodo = () => {
+    update({
+      todos: [
+        ...draft.todos,
+        {
+          id: `manual-${Date.now()}`,
+          content: '',
+          owner: '',
+          dueDate: '',
+          sourceQuote: '',
+          sourceSegmentIds: [],
+        },
+      ],
+    });
+  };
+  const removeTodo = (index: number) => {
+    update({ todos: draft.todos.filter((_, todoIndex) => todoIndex !== index) });
+  };
+  return (
+    <div
+      className="ol-thinscroll"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        maxHeight: 'min(58vh, 620px)',
+        overflow: 'auto',
+        paddingRight: 2,
+      }}
+    >
+      <EditorField label={t('meetings.edit.overviewLabel')}>
+        <textarea
+          value={draft.overview}
+          onChange={event => update({ overview: event.target.value })}
+          rows={4}
+          style={editorTextareaStyle}
+        />
+      </EditorField>
+      <EditorField label={t('meetings.keyDecisions')} hint={t('meetings.edit.lineHint')}>
+        <textarea
+          value={draft.keyDecisions}
+          onChange={event => update({ keyDecisions: event.target.value })}
+          rows={4}
+          style={editorTextareaStyle}
+        />
+      </EditorField>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--ol-ink-3)' }}>
+            {t('meetings.todos')}
+          </span>
+          <Btn icon="plus" variant="ghost" size="sm" onClick={addTodo}>
+            {t('meetings.edit.addTodo')}
+          </Btn>
+        </div>
+        {draft.todos.length === 0 ? (
+          <div style={{ fontSize: 12, color: 'var(--ol-ink-4)' }}>{t('meetings.edit.noTodos')}</div>
+        ) : draft.todos.map((todo, index) => (
+          <div key={todo.id} style={{ border: '0.5px solid var(--ol-line-soft)', borderRadius: 8, padding: 10, background: 'var(--ol-surface)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('meetings.edit.todoNumber', { index: index + 1 })}</span>
+              <Btn icon="trash" variant="ghost" size="sm" onClick={() => removeTodo(index)}>
+                {t('common.delete')}
+              </Btn>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 8 }}>
+              <EditorField label={t('meetings.edit.todoContentLabel')}>
+                <textarea
+                  value={todo.content}
+                  onChange={event => updateTodo(index, { content: event.target.value })}
+                  rows={2}
+                  style={editorTextareaStyle}
+                />
+              </EditorField>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8 }}>
+                <EditorField label={t('meetings.todoOwner')}>
+                  <input
+                    value={todo.owner}
+                    onChange={event => updateTodo(index, { owner: event.target.value })}
+                    style={editorInputStyle}
+                  />
+                </EditorField>
+                <EditorField label={t('meetings.todoDueDate')}>
+                  <input
+                    value={todo.dueDate}
+                    onChange={event => updateTodo(index, { dueDate: event.target.value })}
+                    style={editorInputStyle}
+                  />
+                </EditorField>
+              </div>
+              <EditorField label={t('meetings.todoSource')}>
+                <textarea
+                  value={todo.sourceQuote}
+                  onChange={event => updateTodo(index, { sourceQuote: event.target.value })}
+                  rows={2}
+                  style={editorTextareaStyle}
+                />
+              </EditorField>
+              {todo.sourceSegmentIds.length > 0 && (
+                <div style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
+                  {t('meetings.todoSourceSegments')}: {todo.sourceSegmentIds.join(', ')}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+        <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.45 }}>
+          {t('meetings.edit.todoHint')}
+        </span>
+      </div>
+      <EditorField label={t('meetings.risksAndOpenQuestions')} hint={t('meetings.edit.lineHint')}>
+        <textarea
+          value={draft.risksAndOpenQuestions}
+          onChange={event => update({ risksAndOpenQuestions: event.target.value })}
+          rows={4}
+          style={editorTextareaStyle}
+        />
+      </EditorField>
+    </div>
+  );
+}
+
+function EditorField({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+      <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--ol-ink-3)' }}>
+        {label}
+      </span>
+      {children}
+      {hint && (
+        <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.45 }}>
+          {hint}
+        </span>
+      )}
+    </label>
   );
 }
 
@@ -762,6 +1220,9 @@ function TodoList({ todos }: { todos: MeetingRecord['summary']['todos'] }) {
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 5, fontSize: 11, color: 'var(--ol-ink-4)' }}>
               {todo.owner && <span>{t('meetings.todoOwner')}: {todo.owner}</span>}
               {todo.dueDate && <span>{t('meetings.todoDueDate')}: {todo.dueDate}</span>}
+              {todo.sourceSegmentIds.length > 0 && (
+                <span>{t('meetings.todoSourceSegments')}: {todo.sourceSegmentIds.join(', ')}</span>
+              )}
               {todo.sourceQuote && <span>{t('meetings.todoSource')}: {todo.sourceQuote}</span>}
             </div>
           </div>
@@ -832,8 +1293,84 @@ function hasSegment(record: MeetingRecord, segmentId: string): boolean {
   return record.transcriptSegments.some(segment => segment.id === segmentId);
 }
 
+function canEditMeeting(record: MeetingRecord, snapshot: MeetingRecordingSnapshot | null): boolean {
+  if (snapshot?.meeting.id === record.id) return false;
+  return record.status !== 'recording'
+    && record.status !== 'paused'
+    && record.status !== 'summarizing';
+}
+
+function canDeleteMeeting(record: MeetingRecord, snapshot: MeetingRecordingSnapshot | null): boolean {
+  if (snapshot?.meeting.id === record.id) return false;
+  return record.status !== 'recording'
+    && record.status !== 'paused'
+    && record.status !== 'summarizing';
+}
+
+function canRetranscribeMeeting(record: MeetingRecord, snapshot: MeetingRecordingSnapshot | null): boolean {
+  if (snapshot) return false;
+  return record.audio.state === 'retained'
+    && record.status !== 'recording'
+    && record.status !== 'paused'
+    && record.status !== 'summarizing';
+}
+
+function createEditDraft(record: MeetingRecord): MeetingEditDraft {
+  return {
+    id: record.id,
+    title: record.title,
+    overview: record.summary.overview,
+    keyDecisions: record.summary.keyDecisions.join('\n'),
+    todos: record.summary.todos.map(todo => ({
+      id: todo.id,
+      content: todo.content,
+      owner: todo.owner ?? '',
+      dueDate: todo.dueDate ?? '',
+      sourceQuote: todo.sourceQuote ?? '',
+      sourceSegmentIds: todo.sourceSegmentIds,
+    })),
+    risksAndOpenQuestions: record.summary.risksAndOpenQuestions.join('\n'),
+  };
+}
+
+function linesFromDraft(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+}
+
+function todosFromDraft(value: MeetingTodoDraft[], record: MeetingRecord): MeetingRecord['summary']['todos'] {
+  return value
+    .map((todo, index) => ({
+      id: todo.id || `manual-${record.id}-${index + 1}`,
+      content: todo.content.trim(),
+      owner: emptyToNull(todo.owner),
+      dueDate: emptyToNull(todo.dueDate),
+      sourceSegmentIds: todo.sourceSegmentIds,
+      sourceQuote: emptyToNull(todo.sourceQuote),
+    }))
+    .filter(todo => todo.content.length > 0);
+}
+
 function meetingPreview(record: MeetingRecord): string {
   return record.transcriptSegments.find(segment => segment.text.trim().length > 0)?.text.trim() ?? '';
+}
+
+function meetingSearchText(record: MeetingRecord): string {
+  return [
+    record.title,
+    record.summary.overview,
+    ...record.summary.keyDecisions,
+    ...record.summary.risksAndOpenQuestions,
+    ...record.summary.todos.flatMap(todo => [
+      todo.content,
+      todo.owner ?? '',
+      todo.dueDate ?? '',
+      todo.sourceQuote ?? '',
+    ]),
+    ...record.transcriptSegments.map(segment => segment.text),
+  ].join('\n').toLowerCase();
 }
 
 function statusLabel(status: MeetingStatus, t: ReturnType<typeof useTranslation>['t']): string {
@@ -899,9 +1436,10 @@ function sourceLabel(source: TranscriptSegmentSource, t: ReturnType<typeof useTr
 
 function formatTimestamp(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
 function formatDateTime(iso: string): string {
@@ -931,3 +1469,60 @@ function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
 }
+
+function emptyToNull(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+async function chooseMarkdownExportPath(record: MeetingRecord): Promise<string | null> {
+  const suggestedFileName = `${safeFileName(record.title || 'meeting')}.md`;
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
+    return `~/Downloads/${suggestedFileName}`;
+  }
+  const { save } = await import('@tauri-apps/plugin-dialog');
+  return save({
+    defaultPath: suggestedFileName,
+    filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
+  });
+}
+
+function safeFileName(value: string): string {
+  const normalized = value
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .slice(0, 80)
+    .trim();
+  return normalized || 'meeting';
+}
+
+const editorInputStyle: CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box',
+  minHeight: 36,
+  padding: '8px 10px',
+  borderRadius: 8,
+  border: '0.5px solid var(--ol-line-strong)',
+  background: 'var(--ol-surface)',
+  color: 'var(--ol-ink)',
+  fontFamily: 'inherit',
+  outline: 'none',
+};
+
+const editorTextareaStyle: CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box',
+  padding: '9px 10px',
+  borderRadius: 8,
+  border: '0.5px solid var(--ol-line-strong)',
+  background: 'var(--ol-surface)',
+  color: 'var(--ol-ink)',
+  fontFamily: 'inherit',
+  fontSize: 12.5,
+  lineHeight: 1.6,
+  maxWidth: '100%',
+  minHeight: 76,
+  resize: 'vertical',
+  outline: 'none',
+};

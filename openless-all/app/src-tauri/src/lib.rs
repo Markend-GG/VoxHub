@@ -153,6 +153,8 @@ macro_rules! app_invoke_handler_desktop {
             commands::get_android_accessibility_status,
             commands::request_android_accessibility_permission,
             commands::open_external_url,
+            commands::hide_main_window_after_meeting_guard,
+            commands::exit_app_after_meeting_guard,
             commands::list_microphone_devices,
             commands::start_microphone_level_monitor,
             commands::stop_microphone_level_monitor,
@@ -175,6 +177,8 @@ macro_rules! app_invoke_handler_desktop {
             commands::get_active_meeting_recording,
             commands::generate_meeting_summary,
             commands::retry_meeting_summary,
+            commands::export_meeting_markdown,
+            commands::retranscribe_meeting,
             commands::marketplace_list,
             commands::marketplace_detail,
             commands::marketplace_install,
@@ -323,6 +327,8 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::get_android_accessibility_status,
             $crate::commands::request_android_accessibility_permission,
             $crate::commands::open_external_url,
+            $crate::commands::hide_main_window_after_meeting_guard,
+            $crate::commands::exit_app_after_meeting_guard,
             $crate::commands::list_microphone_devices,
             $crate::commands::start_microphone_level_monitor,
             $crate::commands::stop_microphone_level_monitor,
@@ -350,6 +356,8 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::get_active_meeting_recording,
             $crate::commands::generate_meeting_summary,
             $crate::commands::retry_meeting_summary,
+            $crate::commands::export_meeting_markdown,
+            $crate::commands::retranscribe_meeting,
             $crate::commands::marketplace_list,
             $crate::commands::marketplace_detail,
             $crate::commands::marketplace_install,
@@ -647,7 +655,14 @@ fn run_desktop() {
                     .show_menu_on_left_click(false)
                     .on_menu_event(move |app, event| match event.id.as_ref() {
                         "toggle" => show_main_window(app),
-                        "quit" => app.exit(0),
+                        "quit" => {
+                            if !emit_meeting_close_requested_if_active(
+                                app,
+                                crate::types::MeetingCloseRequestIntent::Exit,
+                            ) {
+                                app.exit(0);
+                            }
+                        }
                         id => {
                             if handle_style_tray_menu_event(app, id) {
                                 return;
@@ -715,7 +730,12 @@ fn run_desktop() {
                 if label == "main" {
                     if let tauri::WindowEvent::CloseRequested { ref api, .. } = event {
                         api.prevent_close();
-                        hide_main_window(app);
+                        if !emit_meeting_close_requested_if_active(
+                            app,
+                            crate::types::MeetingCloseRequestIntent::Hide,
+                        ) {
+                            hide_main_window(app);
+                        }
                     }
                 }
             }
@@ -1313,6 +1333,25 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     activate_app(app);
 }
 
+fn emit_meeting_close_requested_if_active<R: Runtime>(
+    app: &AppHandle<R>,
+    intent: crate::types::MeetingCloseRequestIntent,
+) -> bool {
+    let Some(snapshot) = app
+        .try_state::<Arc<coordinator::Coordinator>>()
+        .and_then(|coord| coord.active_meeting_recording().ok())
+        .flatten()
+    else {
+        return false;
+    };
+    show_main_window(app);
+    let _ = app.emit(
+        "meeting:close-requested",
+        crate::types::MeetingCloseRequestEvent { snapshot, intent },
+    );
+    true
+}
+
 /// 把 CLI intent 路由到 coordinator。两个入口共用：
 /// 1. 首次启动（lib.rs setup 末尾）
 /// 2. single-instance 回调（第二个进程被拦截后转发 argv）
@@ -1385,7 +1424,7 @@ pub(crate) fn request_microphone_from_foreground<R: Runtime>(
     permissions::request_microphone()
 }
 
-fn hide_main_window<R: Runtime>(app: &AppHandle<R>) {
+pub(crate) fn hide_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
     }
