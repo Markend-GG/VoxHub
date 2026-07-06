@@ -84,6 +84,18 @@ mod tests {
     use super::*;
     use crate::types::InsertStatus;
 
+    fn temp_store(name: &str) -> RewriteHistoryStore {
+        let path = std::env::temp_dir().join(format!(
+            "openless_rewrite_history_test_{name}_{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        RewriteHistoryStore {
+            path,
+            lock: Mutex::new(()),
+        }
+    }
+
     fn entry(id: &str, source: &str) -> RewriteHistoryEntry {
         RewriteHistoryEntry {
             id: id.into(),
@@ -102,8 +114,7 @@ mod tests {
 
     #[test]
     fn append_then_list_is_newest_first() {
-        let store = RewriteHistoryStore::new_fallback();
-        let _ = store.clear();
+        let store = temp_store("append_then_list_is_newest_first");
         store.append(entry("a", "one")).unwrap();
         store.append(entry("b", "two")).unwrap();
         let list = store.list().unwrap();
@@ -114,8 +125,7 @@ mod tests {
 
     #[test]
     fn delete_removes_matching_entry() {
-        let store = RewriteHistoryStore::new_fallback();
-        let _ = store.clear();
+        let store = temp_store("delete_removes_matching_entry");
         store.append(entry("a", "one")).unwrap();
         store.append(entry("b", "two")).unwrap();
         store.delete("a").unwrap();
@@ -126,7 +136,7 @@ mod tests {
 
     #[test]
     fn clear_empties_all_entries() {
-        let store = RewriteHistoryStore::new_fallback();
+        let store = temp_store("clear_empties_all_entries");
         store.append(entry("a", "one")).unwrap();
         store.clear().unwrap();
         let list = store.list().unwrap();
@@ -135,8 +145,7 @@ mod tests {
 
     #[test]
     fn truncate_at_history_cap() {
-        let store = RewriteHistoryStore::new_fallback();
-        let _ = store.clear();
+        let store = temp_store("truncate_at_history_cap");
         // 直接批量写入 HISTORY_CAP 条记录（避免逐条 append 的 O(n²) 性能问题）
         let pre_entries: Vec<RewriteHistoryEntry> = (0..HISTORY_CAP)
             .map(|i| entry(&format!("pre-{i}"), "text"))
