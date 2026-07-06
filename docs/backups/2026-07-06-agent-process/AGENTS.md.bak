@@ -1,0 +1,283 @@
+# VoxHub / OpenLess AI Coding Guide
+
+这份文件是本仓库的 AI coding 常驻规则。任何 AI 代理进入本项目后，先读本文件，再读任务相关代码和文档。
+
+目标不是让 AI 一次性做完所有事情，而是让每次 vibe coding 都可控、可验证、可回退。
+
+## 1. 项目定位
+
+- 项目名称：VoxHub，基于 OpenLess 做二次开发。
+- 当前主要应用目录：`openless-all/app/`。
+- 技术栈：Tauri 2、Rust、React、TypeScript、Windows/macOS，当前开发重点偏 Windows。
+- 核心产品链路：录音 -> ASR 转文字 -> 文本润色 -> 插入到光标位置 -> 历史记录。
+- 本地 ASR 是高风险区域，包含 Foundry、sherpa-onnx、Qwen、Apple Speech、FunASR/模型相关能力。除非任务明确要求，不要顺手改这些链路。
+
+## 2. 默认沟通方式
+
+- 默认使用简体中文。
+- 用户偏产品视角时，用产品语言解释：用户看见什么、能点什么、失败时怎么提示、接入后有什么变化。
+- 技术细节要给，但先讲结论，再讲影响，最后讲验证方式。
+- 如果需求不清楚，先明确假设；如果会影响已有功能，必须先说风险。
+
+## 3. 工作模式
+
+### 计划模式
+
+当用户要求“计划模式”“先出目标文档”“先分析方案”时：
+
+1. 只读代码、日志、文档和当前 Git 状态。
+2. 输出目标、范围、成功标准、不要改动项、实现路径、测试计划和风险。
+3. 不改代码，除非用户明确允许生成文档。
+4. 计划要能直接交给下一轮目标模式执行。
+
+### 目标模式
+
+当用户要求“实现”“PLEASE IMPLEMENT”“目标模式开发”时：
+
+1. 先确认已有计划和成功标准。
+2. 读相关代码，不凭记忆改。
+3. 做最小可用改动。
+4. 跑能跑的验证。
+5. 总结改动、验证结果、未完成项和风险。
+
+## 4. 每次开发前必须做
+
+1. 查看工作区：
+
+```powershell
+git status --short
+```
+
+2. 如果有未提交改动：
+
+- 判断哪些是本任务相关，哪些是用户或历史工作留下的。
+- 不要回滚用户改动。
+- 不要用 `git reset --hard`、`git checkout -- <file>` 之类命令清理现场，除非用户明确要求。
+
+3. 定位代码：
+
+```powershell
+rg "关键词"
+rg --files
+```
+
+4. 先读入口文件，再读调用链。不要只看一个文件就下结论。
+
+## 5. 实现原则
+
+- 只做用户当前目标需要的最小改动。
+- 优先沿用现有模块、命名、IPC、事件、状态结构和 UI 风格。
+- 不引入新框架、新下载器、新状态管理方案，除非现有结构无法支持。
+- 不做“大而全”方案，不提前实现未确认的商业化能力。
+- 不顺手重构、不顺手格式化全文件、不顺手删除无关代码。
+- 新增逻辑要有清晰边界：正常路径、失败提示、取消/重试、回退方式。
+- 对用户可见文案要自然、简短、可执行。
+
+## 6. 本项目重点边界
+
+### ASR
+
+- 现有本地 ASR 不要因为新增 provider 或下载能力被破坏。
+- 新 ASR 能力要接入现有主链路：录音结果 -> `RawTranscript` -> 润色 -> 插入 -> 历史。
+- 不要绕开现有录音、润色、插入、历史记录流程另起一套。
+- 模型缺失、运行时缺失、网络失败、权限失败，都要能显示明确原因。
+- 下载能力必须支持失败后重试，不影响其他 ASR。
+
+### Windows 本地开发
+
+- Windows 优先使用 MSVC 工具链。
+- 如果 GNU/MinGW 链接出错，不要直接把问题归因到业务代码，先确认工具链。
+- 路径可能包含中文，命令和脚本要避免对路径编码做脆弱假设。
+- 常见日志位置：
+  - 应用日志：`%LOCALAPPDATA%\OpenLess\Logs\openless.log`
+  - Tauri dev 临时日志：`openless-all/app/tauri-dev.out.log`、`openless-all/app/tauri-dev.err.log`
+
+### 下载与网络
+
+- 国内网络可能无法直接访问 GitHub、Hugging Face、Microsoft、Rust 官方源。
+- 如果下载失败，先确认本机访问是否可达，再考虑镜像或 fallback。
+- 镜像要有明确优先级和失败回退，不要静默换源。
+- 不要把下载缓存、模型目录、构建产物提交进 Git。
+
+## 7. 常用命令
+
+### 前端
+
+在 `openless-all/app/` 下：
+
+```powershell
+npm ci
+npm run build
+.\node_modules\.bin\tsc.CMD --noEmit
+```
+
+### Tauri dev
+
+在 `openless-all/app/` 下：
+
+```powershell
+npm run tauri dev
+```
+
+如果裸 `npm` 或 `tauri` 命令在当前环境不可用，先检查 `node_modules` 和 `package.json`，不要盲目全局安装。
+
+### Rust 后端
+
+在 `openless-all/app/src-tauri/` 下：
+
+```powershell
+cargo check
+cargo test
+cargo fmt --check
+```
+
+Windows MSVC 环境可按需要设置：
+
+```powershell
+$env:RUSTUP_TOOLCHAIN='stable-x86_64-pc-windows-msvc'
+$env:CARGO_TARGET_DIR='D:\openless-deps\cargo-target-openless-msvc'
+$env:TMP='D:\openless-deps\tmp'
+$env:TEMP='D:\openless-deps\tmp'
+cargo check
+```
+
+如果 `cargo fmt --check` 提示缺少 `rustfmt`，可以尝试：
+
+```powershell
+rustup component add --toolchain stable-x86_64-pc-windows-msvc rustfmt
+```
+
+如果安装失败并出现 `os error 10013` 或访问 `static.rust-lang.org` 失败，要在交付说明中如实说明，不要假装格式化已验证。
+
+### 项目脚本
+
+在 `openless-all/app/` 下按需运行：
+
+```powershell
+npm run check:hotkey-injection
+npm run check:windows-startup-lifecycle
+npm run check:android-updater-pubkey
+```
+
+## 8. 测试策略
+
+每次改动都要选择和风险匹配的验证，不是所有任务都必须跑全量测试。
+
+### 文档或文案改动
+
+- 检查链接、路径、命令是否真实存在。
+- 检查中文是否通顺，是否能被产品经理看懂。
+
+### 前端 UI 改动
+
+- 跑 TypeScript 检查或 `npm run build`。
+- 启动 Tauri dev，人工检查核心交互。
+- 检查按钮状态、禁用状态、错误提示、loading/取消/重试。
+- 检查中英文/多语言 key 是否完整，避免只改中文。
+
+### Rust 后端改动
+
+- 至少跑 `cargo check`。
+- 如果改了纯函数、状态机、解析、下载、provider 选择，补或跑相关 `cargo test`。
+- 如果涉及平台能力、录音、热键、插入、系统权限，要说明哪些只能人工验证。
+
+### ASR 或模型下载改动
+
+- 检测：缺模型、缺依赖、完整环境三种状态。
+- 下载：开始、进度、失败、取消、重试、删除、打开目录。
+- 识别：选择目标 ASR 后录中文短句，确认能进入现有润色和插入流程。
+- 回归：确认其他 ASR 仍能显示、切换、下载或使用。
+
+## 9. 审查流程
+
+实现后必须自查一次，再交给用户。
+
+### 自查清单
+
+- 改动是否直接对应用户目标？
+- 是否有无关重构或格式化？
+- 是否误删、误改了用户已有改动？
+- 是否新增了未解释的依赖、下载地址、后台进程或本地目录？
+- 错误边界是否清楚：失败时用户知道该怎么做吗？
+- 是否跑了与风险匹配的验证？
+- 如果验证没跑，原因是否明确？
+
+### Diff 说明
+
+交付前看 diff：
+
+```powershell
+git diff --stat
+git diff -- <相关文件>
+```
+
+总结时说明：
+
+- 改了哪些文件。
+- 每个文件为什么必须改。
+- 验证命令和结果。
+- 未完成项和剩余风险。
+
+## 10. Git 规则
+
+- 不要自动 commit。
+- 不要自动 push。
+- 用户明确说“提交”“commit”后，才可以执行 `git add` 和 `git commit`。
+- 用户明确说“push 到 GitHub”后，才可以执行 `git push`。
+- 不要默认 `git add .`，优先精确 stage 文件。
+- 提交前必须输出：
+  - 当前分支
+  - `git status --short`
+  - 将要提交的文件
+  - commit message 建议
+
+推荐分支命名：
+
+```text
+codex/<feature-name>
+```
+
+## 11. 安全与隐私
+
+- 不读取、不展示、不提交密钥、token、账号、证书、隐私音频。
+- 不把 `.env`、缓存、日志、模型、构建产物提交到仓库。
+- 处理日志时只摘关键错误，不大段复制用户隐私内容。
+- 涉及系统安装、权限变更、删除目录、清空缓存、修改注册表，必须先说明影响并取得用户确认。
+
+## 12. 文档规则
+
+- 需求、目标、计划类文档优先放在 `docs/`。
+- 常驻 AI 工作规则只放在本文件。
+- 文档要写给未来执行者看：目标、范围、成功标准、测试、风险、下一步。
+- 如果文档和代码不一致，以当前代码和最新用户确认优先，并在交付说明中指出文档可能过期。
+
+## 13. 交付模板
+
+完成任务后，用简短中文交付：
+
+```text
+已完成：一句话说明结果。
+
+改动：
+- 文件 A：做了什么
+- 文件 B：做了什么
+
+验证：
+- 命令/人工验证：结果
+
+注意：
+- 未完成项或风险，没有就写“暂无”
+```
+
+不要用很长的技术复盘淹没用户。用户需要继续开发时，给出下一步最小建议。
+
+## 14. 参考原则来源
+
+本文件借鉴了几类成熟 AI coding 规则的共识：
+
+- OpenAI Codex 的 `AGENTS.md` 思路：把仓库级工作约定放进项目根目录，让代理自动获得上下文。
+- agents.md 社区格式：项目概览、构建测试命令、代码风格、测试说明、安全注意事项。
+- Cursor agent 实践：给 AI 明确、可验证的目标，使用类型检查、lint 和测试提供反馈信号。
+- Aider conventions：把项目约定作为持续加载的上下文，减少每次重复解释。
+
+这些参考只提供方法论；本项目执行时以本文件、当前代码和用户最新要求为准。
