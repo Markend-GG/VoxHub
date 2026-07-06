@@ -14,6 +14,7 @@ import type {
     WindowsImeStatus,
     CredentialsStatus,
     MicrophoneDevice,
+    MeetingRecord,
 } from "../types"
 import { OL_DATA } from "../mockData"
 import {
@@ -94,6 +95,7 @@ export let mockSettings: UserPreferences = {
     sherpaOnnxLanguageHint: "",
     sherpaOnnxKeepLoadedSecs: 300,
     historyRetentionDays: 7,
+    meetingAudioRetentionCount: 20,
     polishContextWindowMinutes: 5,
     startMinimized: false,
     themeMode: "system",
@@ -471,6 +473,40 @@ export const mockHistory: DictationSession[] = OL_DATA.history.map((h, i) => ({
     hasAudioRecording: null,
     contextCapture: null,
 }))
+
+export const mockMeetings: MeetingRecord[] = [
+    {
+        id: "00000000-0000-4000-8000-000000000001",
+        title: "示例会议记录",
+        status: "completed",
+        startedAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        endedAt: new Date().toISOString(),
+        durationMs: 30 * 60 * 1000,
+        transcriptSegments: [
+            {
+                id: "seg-1",
+                speakerLabel: "未区分",
+                startMs: 0,
+                endMs: 8000,
+                text: "我们先确认 V1 只做会议录音、原文和总结。",
+                source: "realtime_asr",
+            },
+        ],
+        summary: {
+            overview: "",
+            keyDecisions: [],
+            todos: [],
+            risksAndOpenQuestions: [],
+        },
+        audio: {
+            state: "retained",
+            retained: true,
+            path: null,
+        },
+        createdAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        updatedAt: new Date().toISOString(),
+    },
+]
 
 export const mockVocab: DictionaryEntry[] = OL_DATA.vocab.map((v, i) => ({
     id: `vocab-${i}`,

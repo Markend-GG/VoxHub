@@ -43,6 +43,26 @@ export {
     retranscribeRecording,
 } from "./history"
 
+// meetings
+export {
+    listMeetings,
+    getMeeting,
+    createMeetingRecord,
+    updateMeetingRecord,
+    deleteMeetingRecord,
+    startMeetingRecording,
+    pauseMeetingRecording,
+    resumeMeetingRecording,
+    stopMeetingRecording,
+    getActiveMeetingRecording,
+    generateMeetingSummary,
+    retryMeetingSummary,
+    exportMeetingMarkdown,
+    retranscribeMeeting,
+    hideMainWindowAfterMeetingGuard,
+    exitAppAfterMeetingGuard,
+} from "./meetings"
+
 // vocab
 export {
     listVocab,

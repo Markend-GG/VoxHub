@@ -81,6 +81,7 @@ const previousPrefs: UserPreferences = {
   sherpaOnnxLanguageHint: '',
   sherpaOnnxKeepLoadedSecs: 300,
   historyRetentionDays: 7,
+  meetingAudioRetentionCount: 20,
   polishContextWindowMinutes: 5,
   startMinimized: false,
   themeMode: 'system',

@@ -13,6 +13,7 @@ import { SettingsModal } from './SettingsModal';
 import { Overview } from '../pages/Overview';
 import { History } from '../pages/History';
 import { Reports } from '../pages/Reports';
+import { Meetings } from '../pages/Meetings';
 import { Vocab } from '../pages/Vocab';
 import { Style } from '../pages/Style';
 import { Translation } from '../pages/Translation';
@@ -27,7 +28,20 @@ import {
   shouldShowHotkeyModeMigrationPrompt,
 } from '../lib/hotkeyMigration';
 import { applyFontScale, readFontScale } from '../lib/fontScale';
-import { getCredentials } from '../lib/ipc';
+import {
+  exitAppAfterMeetingGuard,
+  getCredentials,
+  getMeeting,
+  hideMainWindowAfterMeetingGuard,
+  stopMeetingRecording,
+} from '../lib/ipc';
+import {
+  normalizeMeetingCloseRequest,
+  type MeetingCloseRequestEvent,
+  type MeetingCloseRequestIntent,
+  type MeetingRecordingSnapshot,
+} from '../lib/types';
+import { Btn } from '../pages/_atoms';
 import {
   PROVIDER_SETUP_PROMPT_DEFERRED_KEY,
   shouldShowProviderSetupPrompt,
@@ -37,7 +51,7 @@ import { MobileMoreSheet } from './MobileMoreSheet';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import { useAppState, type AppTab } from '../state/useAppState';
 
-const MORE_TAB_IDS: AppTab[] = ['vocab', 'translation', 'selectionAsk'];
+const MORE_TAB_IDS: AppTab[] = ['meetings', 'vocab', 'translation', 'selectionAsk'];
 
 interface NavItem {
   id: AppTab;
@@ -50,6 +64,7 @@ const NAV_BASE: Array<Omit<NavItem, 'name'>> = [
   { id: 'overview', icon: 'overview', cmp: Overview },
   { id: 'history', icon: 'history', cmp: History },
   { id: 'reports', icon: 'doc', cmp: Reports },
+  { id: 'meetings', icon: 'mic', cmp: Meetings },
   { id: 'vocab', icon: 'vocab', cmp: Vocab },
   { id: 'style', icon: 'style', cmp: Style },
   { id: 'translation', icon: 'translate', cmp: Translation },
@@ -79,6 +94,11 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
   const [providerPromptOpen, setProviderPromptOpen] = useState(false);
   const [hotkeyModePromptOpen, setHotkeyModePromptOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [closeMeetingSnapshot, setCloseMeetingSnapshot] = useState<MeetingRecordingSnapshot | null>(null);
+  const [closeMeetingIntent, setCloseMeetingIntent] = useState<MeetingCloseRequestIntent>('hide');
+  const [closeMeetingBusy, setCloseMeetingBusy] = useState(false);
+  const [closeMeetingWaitingForSummary, setCloseMeetingWaitingForSummary] = useState(false);
+  const [closeMeetingError, setCloseMeetingError] = useState<string | null>(null);
 
   // tab 切换的 cross-fade：旧页 blur+fade out（180ms），结束后挂载新页（走 ol-page-slide enter）。
   // displayTab 是实际渲染的 tab，currentTab 是用户点中的目标 tab。
@@ -146,6 +166,32 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
     }
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const handle = await listen<MeetingCloseRequestEvent | MeetingRecordingSnapshot>('meeting:close-requested', event => {
+          if (cancelled) return;
+          const request = normalizeMeetingCloseRequest(event.payload);
+          setCloseMeetingSnapshot(request.snapshot);
+          setCloseMeetingIntent(request.intent);
+          setCloseMeetingWaitingForSummary(false);
+          setCloseMeetingError(null);
+        });
+        if (cancelled) handle();
+        else unlisten = handle;
+      } catch (error) {
+        console.warn('[meetings] close guard listener setup failed', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   // 之前监听的 NAVIGATE_LOCAL_ASR_EVENT 已无意义——「模型设置」独立 tab 已下线，
   // 模型管理 UI 现在通过 Settings → Advanced 的 <LocalAsr embedded /> 渲染，
   // 用户在 Settings 内即可一站式管理，无需跨页跳转。
@@ -187,6 +233,50 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
     window.localStorage.setItem(HOTKEY_MODE_MIGRATION_ACK_KEY, '1');
     setHotkeyModePromptOpen(false);
     openSettings('general');
+  };
+
+  const confirmCloseMeeting = async () => {
+    if (!closeMeetingSnapshot) return;
+    setCloseMeetingBusy(true);
+    setCloseMeetingError(null);
+    try {
+      if (closeMeetingIntent === 'exit' && closeMeetingSnapshot.meeting.status === 'summarizing') {
+        setCloseMeetingWaitingForSummary(true);
+        await waitForMeetingSummaryToSettle(closeMeetingSnapshot.meeting.id);
+        await exitAppAfterMeetingGuard();
+        setCloseMeetingSnapshot(null);
+        setCloseMeetingIntent('hide');
+        setCloseMeetingWaitingForSummary(false);
+        return;
+      }
+
+      const stopped = await stopMeetingRecording(closeMeetingSnapshot.meeting.id);
+      if (closeMeetingIntent === 'exit' && stopped.status === 'summarizing') {
+        setCloseMeetingSnapshot(prev => prev ? { ...prev, meeting: stopped } : prev);
+        setCloseMeetingWaitingForSummary(true);
+        await waitForMeetingSummaryToSettle(stopped.id);
+        await exitAppAfterMeetingGuard();
+      } else if (closeMeetingIntent === 'exit') {
+        await exitAppAfterMeetingGuard();
+      } else {
+        await hideMainWindowAfterMeetingGuard();
+      }
+      setCloseMeetingSnapshot(null);
+      setCloseMeetingIntent('hide');
+      setCloseMeetingWaitingForSummary(false);
+    } catch (error) {
+      setCloseMeetingWaitingForSummary(false);
+      setCloseMeetingError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCloseMeetingBusy(false);
+    }
+  };
+
+  const cancelCloseMeeting = () => {
+    setCloseMeetingSnapshot(null);
+    setCloseMeetingIntent('hide');
+    setCloseMeetingWaitingForSummary(false);
+    setCloseMeetingError(null);
   };
 
   const mobileTitle = settingsOpen
@@ -456,6 +546,16 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           onOpenSettings={openHotkeyRecordingSettings}
         />
       ) : null}
+      {closeMeetingSnapshot && (
+        <MeetingCloseGuardPrompt
+          title={closeMeetingSnapshot.meeting.title}
+          busy={closeMeetingBusy}
+          waitingForSummary={closeMeetingWaitingForSummary}
+          error={closeMeetingError}
+          onCancel={cancelCloseMeeting}
+          onConfirm={() => void confirmCloseMeeting()}
+        />
+      )}
       <AudioCueListener />
 
       {/* tab 切换 + provider prompt + footer popover 公用的入场关键帧 */}
@@ -759,6 +859,114 @@ function ProviderSetupPrompt({ onLater, onOpenSettings }: { onLater: () => void;
       </div>
     </div>
   );
+}
+
+function MeetingCloseGuardPrompt({
+  title,
+  busy,
+  waitingForSummary,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  busy: boolean;
+  waitingForSummary: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        zIndex: 80,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 28,
+        background: 'rgba(15,17,22,0.28)',
+        backdropFilter: 'blur(6px) saturate(140%)',
+        WebkitBackdropFilter: 'blur(6px) saturate(140%)',
+        animation: 'ol-prompt-fade 0.2s var(--ol-motion-soft)',
+      }}
+    >
+      <div
+        style={{
+          width: 400,
+          maxWidth: '100%',
+          borderRadius: 12,
+          background: 'var(--ol-surface)',
+          border: '0.5px solid rgba(0,0,0,.08)',
+          boxShadow: '0 24px 70px -24px rgba(15,17,22,.38), 0 0 0 0.5px rgba(0,0,0,.06)',
+          padding: 20,
+          animation: 'ol-prompt-pop 0.26s var(--ol-motion-spring)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+          <div
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 8,
+              background: 'rgba(245,158,11,0.12)',
+              color: 'var(--ol-warn, #b45309)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+            }}
+          >
+            <Icon name="mic" size={17} />
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink)' }}>
+              {waitingForSummary ? t('shell.meetingCloseGuard.waitingTitle') : t('shell.meetingCloseGuard.title')}
+            </div>
+            <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {title || t('meetings.untitled')}
+            </div>
+          </div>
+        </div>
+        <div style={{ fontSize: 12.5, color: 'var(--ol-ink-3)', lineHeight: 1.55 }}>
+          {waitingForSummary ? t('shell.meetingCloseGuard.waitingForSummary') : t('shell.meetingCloseGuard.body')}
+        </div>
+        {error && (
+          <div style={{ marginTop: 10, fontSize: 12, color: 'var(--ol-red, #ef4444)', lineHeight: 1.45 }}>
+            {t('shell.meetingCloseGuard.error', { err: error })}
+          </div>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18, flexWrap: 'wrap' }}>
+          <Btn variant="ghost" size="sm" disabled={busy || waitingForSummary} onClick={onCancel}>
+            {t('common.cancel')}
+          </Btn>
+          <Btn icon="check" variant="blue" size="sm" disabled={busy || waitingForSummary} onClick={onConfirm}>
+            {waitingForSummary
+              ? t('shell.meetingCloseGuard.waiting')
+              : busy
+                ? t('shell.meetingCloseGuard.stopping')
+                : t('shell.meetingCloseGuard.confirm')}
+          </Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+async function waitForMeetingSummaryToSettle(id: string): Promise<void> {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const meeting = await getMeeting(id);
+    if (meeting.status !== 'summarizing') return;
+    await sleep(1000);
+  }
+  throw new Error('meeting summary still running');
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, ms));
 }
 
 function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () => void; onOpenSettings: () => void }) {

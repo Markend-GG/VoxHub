@@ -4,6 +4,7 @@ import { Icon } from './Icon';
 import type { AppTab } from '../state/useAppState';
 
 const MORE_TABS: Array<{ id: AppTab; icon: string }> = [
+  { id: 'meetings', icon: 'mic' },
   { id: 'vocab', icon: 'vocab' },
   { id: 'translation', icon: 'translate' },
   { id: 'selectionAsk', icon: 'selectionAsk' },

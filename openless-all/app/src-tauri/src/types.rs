@@ -534,6 +534,184 @@ pub struct DictationSession {
     pub context_capture: Option<ContextCaptureEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingStatus {
+    Draft,
+    Recording,
+    Paused,
+    TranscribingInterrupted,
+    Summarizing,
+    SummaryFailed,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingAudioState {
+    Temporary,
+    Retained,
+    Pruned,
+    Missing,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptSegmentSource {
+    RealtimeAsr,
+    RetranscribedAsr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSegment {
+    pub id: String,
+    pub speaker_label: String,
+    pub start_ms: u64,
+    pub end_ms: Option<u64>,
+    pub text: String,
+    pub source: TranscriptSegmentSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingTodo {
+    pub id: String,
+    pub content: String,
+    pub owner: Option<String>,
+    pub due_date: Option<String>,
+    pub source_segment_ids: Vec<String>,
+    pub source_quote: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MeetingSummary {
+    pub overview: String,
+    pub key_decisions: Vec<String>,
+    pub todos: Vec<MeetingTodo>,
+    pub risks_and_open_questions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingAudioMeta {
+    pub state: MeetingAudioState,
+    pub retained: bool,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingRecord {
+    pub id: String,
+    pub title: String,
+    pub status: MeetingStatus,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub transcript_segments: Vec<TranscriptSegment>,
+    pub summary: MeetingSummary,
+    pub audio: MeetingAudioMeta,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingRecordingPhase {
+    Starting,
+    Recording,
+    Paused,
+    Stopping,
+    TranscribingInterrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingRecordingSnapshot {
+    pub meeting: MeetingRecord,
+    pub phase: MeetingRecordingPhase,
+    pub elapsed_ms: u64,
+    pub active_asr_provider: String,
+    pub asr_interrupted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingTranscriptSegmentEvent {
+    pub meeting_id: String,
+    pub segment: TranscriptSegment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingErrorEvent {
+    pub meeting_id: Option<String>,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingSummaryEvent {
+    pub meeting_id: String,
+    pub status: MeetingStatus,
+    pub meeting: Option<MeetingRecord>,
+    pub error: Option<MeetingErrorEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingCloseRequestIntent {
+    Hide,
+    Exit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingCloseRequestEvent {
+    pub snapshot: MeetingRecordingSnapshot,
+    pub intent: MeetingCloseRequestIntent,
+}
+
+#[cfg(test)]
+mod meeting_summary_event_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn meeting_summary_event_serializes_camel_case_and_snake_case_status() {
+        let event = MeetingSummaryEvent {
+            meeting_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            status: MeetingStatus::SummaryFailed,
+            meeting: None,
+            error: Some(MeetingErrorEvent {
+                meeting_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+                code: "summaryInvalidJson".to_string(),
+                message: "invalid summary json".to_string(),
+            }),
+        };
+
+        let value = serde_json::to_value(event).expect("serialize summary event");
+
+        assert_eq!(
+            value,
+            json!({
+                "meetingId": "550e8400-e29b-41d4-a716-446655440000",
+                "status": "summary_failed",
+                "meeting": null,
+                "error": {
+                    "meetingId": "550e8400-e29b-41d4-a716-446655440000",
+                    "code": "summaryInvalidJson",
+                    "message": "invalid summary json"
+                }
+            })
+        );
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictionaryEntry {
@@ -1362,6 +1540,8 @@ pub struct UserPreferences {
     /// 写入新条目时执行清理，避免后台轮询。
     #[serde(default = "default_history_retention_days")]
     pub history_retention_days: u32,
+    #[serde(default = "default_meeting_audio_retention_count")]
+    pub meeting_audio_retention_count: u32,
     /// 对话感知 polish 的上下文窗口（分钟）：把最近 N 分钟的转写 + 已润色文本
     /// 作为多轮上下文喂给 LLM，让代词 / 不完整句子能被正确解析。
     /// 0 = 关闭（每次润色独立单轮，跟历史行为一致）。默认 5 分钟。
@@ -1484,6 +1664,14 @@ fn default_remote_input_mode() -> String {
 
 fn default_history_retention_days() -> u32 {
     7
+}
+
+fn default_meeting_audio_retention_count() -> u32 {
+    20
+}
+
+pub fn clamp_meeting_audio_retention_count(value: u32) -> u32 {
+    value.min(100)
 }
 
 fn default_polish_context_window_minutes() -> u32 {
@@ -1639,6 +1827,8 @@ struct UserPreferencesWire {
     update_channel: UpdateChannel,
     #[serde(default = "default_history_retention_days")]
     history_retention_days: u32,
+    #[serde(default = "default_meeting_audio_retention_count")]
+    meeting_audio_retention_count: u32,
     #[serde(default = "default_polish_context_window_minutes")]
     polish_context_window_minutes: u32,
     #[serde(default)]
@@ -1764,6 +1954,7 @@ impl Default for UserPreferencesWire {
             sherpa_onnx_keep_loaded_secs: prefs.sherpa_onnx_keep_loaded_secs,
             update_channel: prefs.update_channel,
             history_retention_days: prefs.history_retention_days,
+            meeting_audio_retention_count: prefs.meeting_audio_retention_count,
             polish_context_window_minutes: prefs.polish_context_window_minutes,
             start_minimized: prefs.start_minimized,
             theme_mode: prefs.theme_mode,
@@ -1915,6 +2106,9 @@ impl<'de> Deserialize<'de> for UserPreferences {
             sherpa_onnx_keep_loaded_secs: wire.sherpa_onnx_keep_loaded_secs,
             update_channel: wire.update_channel,
             history_retention_days: wire.history_retention_days,
+            meeting_audio_retention_count: clamp_meeting_audio_retention_count(
+                wire.meeting_audio_retention_count,
+            ),
             polish_context_window_minutes: wire.polish_context_window_minutes,
             start_minimized: wire.start_minimized,
             theme_mode: wire.theme_mode,
@@ -2738,6 +2932,7 @@ impl Default for UserPreferences {
             sherpa_onnx_keep_loaded_secs: default_local_asr_keep_loaded_secs(),
             update_channel: UpdateChannel::default(),
             history_retention_days: default_history_retention_days(),
+            meeting_audio_retention_count: default_meeting_audio_retention_count(),
             polish_context_window_minutes: default_polish_context_window_minutes(),
             start_minimized: false,
             theme_mode: ThemeMode::default(),
@@ -3480,6 +3675,26 @@ mod tests {
 
         let restored: UserPreferences = serde_json::from_str(&json).unwrap();
         assert!(!restored.audio_cue_on_record);
+    }
+
+    #[test]
+    fn meeting_audio_retention_count_defaults_to_twenty() {
+        let prefs = UserPreferences::default();
+        assert_eq!(prefs.meeting_audio_retention_count, 20);
+
+        let from_empty: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_empty.meeting_audio_retention_count, 20);
+    }
+
+    #[test]
+    fn meeting_audio_retention_count_allows_zero_and_clamps_upper_bound() {
+        let zero: UserPreferences =
+            serde_json::from_str(r#"{"meetingAudioRetentionCount":0}"#).unwrap();
+        assert_eq!(zero.meeting_audio_retention_count, 0);
+
+        let too_large: UserPreferences =
+            serde_json::from_str(r#"{"meetingAudioRetentionCount":150}"#).unwrap();
+        assert_eq!(too_large.meeting_audio_retention_count, 100);
     }
 
     #[test]

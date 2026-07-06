@@ -288,6 +288,116 @@ export interface DictationSession {
   contextCapture: ContextCaptureEntry | null;
 }
 
+export type MeetingStatus =
+  | 'draft'
+  | 'recording'
+  | 'paused'
+  | 'transcribing_interrupted'
+  | 'summarizing'
+  | 'summary_failed'
+  | 'completed';
+
+export type MeetingAudioState =
+  | 'temporary'
+  | 'retained'
+  | 'pruned'
+  | 'missing'
+  | 'unavailable';
+
+export type TranscriptSegmentSource = 'realtime_asr' | 'retranscribed_asr';
+
+export interface TranscriptSegment {
+  id: string;
+  speakerLabel: string;
+  startMs: number;
+  endMs: number | null;
+  text: string;
+  source: TranscriptSegmentSource;
+}
+
+export interface MeetingTodo {
+  id: string;
+  content: string;
+  owner: string | null;
+  dueDate: string | null;
+  sourceSegmentIds: string[];
+  sourceQuote: string | null;
+}
+
+export interface MeetingSummary {
+  overview: string;
+  keyDecisions: string[];
+  todos: MeetingTodo[];
+  risksAndOpenQuestions: string[];
+}
+
+export interface MeetingAudioMeta {
+  state: MeetingAudioState;
+  retained: boolean;
+  path: string | null;
+}
+
+export interface MeetingRecord {
+  id: string;
+  title: string;
+  status: MeetingStatus;
+  startedAt: string;
+  endedAt: string | null;
+  durationMs: number | null;
+  transcriptSegments: TranscriptSegment[];
+  summary: MeetingSummary;
+  audio: MeetingAudioMeta;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type MeetingRecordingPhase =
+  | 'starting'
+  | 'recording'
+  | 'paused'
+  | 'stopping'
+  | 'transcribing_interrupted';
+
+export interface MeetingRecordingSnapshot {
+  meeting: MeetingRecord;
+  phase: MeetingRecordingPhase;
+  elapsedMs: number;
+  activeAsrProvider: string;
+  asrInterrupted: boolean;
+}
+
+export interface MeetingTranscriptSegmentEvent {
+  meetingId: string;
+  segment: TranscriptSegment;
+}
+
+export interface MeetingErrorEvent {
+  meetingId: string | null;
+  code: string;
+  message: string;
+}
+
+export interface MeetingSummaryEvent {
+  meetingId: string;
+  status: MeetingStatus;
+  meeting: MeetingRecord | null;
+  error: MeetingErrorEvent | null;
+}
+
+export type MeetingCloseRequestIntent = 'hide' | 'exit';
+
+export interface MeetingCloseRequestEvent {
+  snapshot: MeetingRecordingSnapshot;
+  intent: MeetingCloseRequestIntent;
+}
+
+export function normalizeMeetingCloseRequest(
+  payload: MeetingCloseRequestEvent | MeetingRecordingSnapshot,
+): MeetingCloseRequestEvent {
+  if ('snapshot' in payload) return payload;
+  return { snapshot: payload, intent: 'hide' };
+}
+
 export interface DictionaryEntry {
   id: string;
   phrase: string;
@@ -598,6 +708,8 @@ export interface UserPreferences {
   sherpaOnnxKeepLoadedSecs: number;
   /** 历史记录保留天数。0 = 不按时间清理（仍受 200 条上限）。默认 7。 */
   historyRetentionDays: number;
+  /** Meeting raw audio retention count. 0 disables long-term audio retention; default 20; max 100. */
+  meetingAudioRetentionCount: number;
   /** 对话感知 polish 上下文窗口（分钟）。0 = 关闭。默认 5。详见 PR-A。 */
   polishContextWindowMinutes: number;
   /** 启动时静默运行（不弹主窗口）。Windows 开机自启场景常用——只想要后台 + 托盘，

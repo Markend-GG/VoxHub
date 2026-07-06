@@ -162,6 +162,8 @@ macro_rules! app_invoke_handler_desktop {
             commands::get_android_accessibility_status,
             commands::request_android_accessibility_permission,
             commands::open_external_url,
+            commands::hide_main_window_after_meeting_guard,
+            commands::exit_app_after_meeting_guard,
             commands::list_microphone_devices,
             commands::start_microphone_level_monitor,
             commands::stop_microphone_level_monitor,
@@ -186,6 +188,20 @@ macro_rules! app_invoke_handler_desktop {
             commands::get_generated_report,
             commands::delete_generated_report,
             commands::update_generated_report,
+            commands::list_meetings,
+            commands::get_meeting,
+            commands::create_meeting_record,
+            commands::update_meeting_record,
+            commands::delete_meeting_record,
+            commands::start_meeting_recording,
+            commands::pause_meeting_recording,
+            commands::resume_meeting_recording,
+            commands::stop_meeting_recording,
+            commands::get_active_meeting_recording,
+            commands::generate_meeting_summary,
+            commands::retry_meeting_summary,
+            commands::export_meeting_markdown,
+            commands::retranscribe_meeting,
             commands::marketplace_list,
             commands::marketplace_detail,
             commands::marketplace_install,
@@ -348,6 +364,8 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::get_android_accessibility_status,
             $crate::commands::request_android_accessibility_permission,
             $crate::commands::open_external_url,
+            $crate::commands::hide_main_window_after_meeting_guard,
+            $crate::commands::exit_app_after_meeting_guard,
             $crate::commands::list_microphone_devices,
             $crate::commands::start_microphone_level_monitor,
             $crate::commands::stop_microphone_level_monitor,
@@ -364,6 +382,20 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::read_audio_recording,
             $crate::commands::reanalyze_context_history,
             $crate::commands::retranscribe_recording,
+            $crate::commands::list_meetings,
+            $crate::commands::get_meeting,
+            $crate::commands::create_meeting_record,
+            $crate::commands::update_meeting_record,
+            $crate::commands::delete_meeting_record,
+            $crate::commands::start_meeting_recording,
+            $crate::commands::pause_meeting_recording,
+            $crate::commands::resume_meeting_recording,
+            $crate::commands::stop_meeting_recording,
+            $crate::commands::get_active_meeting_recording,
+            $crate::commands::generate_meeting_summary,
+            $crate::commands::retry_meeting_summary,
+            $crate::commands::export_meeting_markdown,
+            $crate::commands::retranscribe_meeting,
             $crate::commands::marketplace_list,
             $crate::commands::marketplace_detail,
             $crate::commands::marketplace_install,
@@ -665,7 +697,14 @@ fn run_desktop() {
                         "screenshot-record-resume" | "screenshot-record-pause" => {
                             handle_screenshot_record_tray_menu_event(app, event.id.as_ref());
                         }
-                        "quit" => app.exit(0),
+                        "quit" => {
+                            if !emit_meeting_close_requested_if_active(
+                                app,
+                                crate::types::MeetingCloseRequestIntent::Exit,
+                            ) {
+                                app.exit(0);
+                            }
+                        }
                         id => {
                             if handle_style_tray_menu_event(app, id) {
                                 return;
@@ -736,7 +775,12 @@ fn run_desktop() {
                 if label == "main" {
                     if let tauri::WindowEvent::CloseRequested { ref api, .. } = event {
                         api.prevent_close();
-                        hide_main_window(app);
+                        if !emit_meeting_close_requested_if_active(
+                            app,
+                            crate::types::MeetingCloseRequestIntent::Hide,
+                        ) {
+                            hide_main_window(app);
+                        }
                     }
                 }
             }
@@ -1016,8 +1060,10 @@ fn start_tray_microphone_watcher(app: AppHandle) {
     //    Linux 无原生路径，返回 false，纯靠下面的慢速兜底。
     //    注册失败（OSStatus≠0 / RegisterEndpoint Err）只 warn，不 panic——兜底轮询保证
     //    三平台都「永远能检测到设备」。
-    let native_registered =
-        device_watch::spawn_native_watcher(app.clone(), make_microphone_change_handler(app.clone()));
+    let native_registered = device_watch::spawn_native_watcher(
+        app.clone(),
+        make_microphone_change_handler(app.clone()),
+    );
     if native_registered {
         log::info!("[tray] OS native microphone device watcher registered");
     } else {
@@ -1165,12 +1211,7 @@ fn apply_windows_caption_theme<R: Runtime>(window: &tauri::WebviewWindow<R>, dar
             &immersive_dark,
             "immersive dark mode",
         );
-        set_dwm_window_attribute(
-            hwnd,
-            DWMWA_CAPTION_COLOR,
-            &caption_color,
-            "caption color",
-        );
+        set_dwm_window_attribute(hwnd, DWMWA_CAPTION_COLOR, &caption_color, "caption color");
         set_dwm_window_attribute(hwnd, DWMWA_TEXT_COLOR, &text_color, "text color");
         set_dwm_window_attribute(hwnd, DWMWA_BORDER_COLOR, &border_color, "border color");
     }
@@ -1385,6 +1426,25 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     activate_app(app);
 }
 
+fn emit_meeting_close_requested_if_active<R: Runtime>(
+    app: &AppHandle<R>,
+    intent: crate::types::MeetingCloseRequestIntent,
+) -> bool {
+    let Some(snapshot) = app
+        .try_state::<Arc<coordinator::Coordinator>>()
+        .and_then(|coord| coord.active_meeting_recording().ok())
+        .flatten()
+    else {
+        return false;
+    };
+    show_main_window(app);
+    let _ = app.emit(
+        "meeting:close-requested",
+        crate::types::MeetingCloseRequestEvent { snapshot, intent },
+    );
+    true
+}
+
 /// 把 CLI intent 路由到 coordinator。两个入口共用：
 /// 1. 首次启动（lib.rs setup 末尾）
 /// 2. single-instance 回调（第二个进程被拦截后转发 argv）
@@ -1457,7 +1517,7 @@ pub(crate) fn request_microphone_from_foreground<R: Runtime>(
     permissions::request_microphone()
 }
 
-fn hide_main_window<R: Runtime>(app: &AppHandle<R>) {
+pub(crate) fn hide_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
     }
@@ -1624,10 +1684,7 @@ fn bottom_visual_position(
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn frame_contains_point(frame: LogicalMonitorFrame, x: f64, y: f64) -> bool {
-    x >= frame.x
-        && x < frame.x + frame.width
-        && y >= frame.y
-        && y < frame.y + frame.height
+    x >= frame.x && x < frame.x + frame.width && y >= frame.y && y < frame.y + frame.height
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1836,11 +1893,8 @@ mod macos_capsule_ax {
 
     unsafe fn cfstring_from_static(bytes_with_nul: &[u8]) -> Option<CFStringRef> {
         let cstr = CStr::from_bytes_with_nul(bytes_with_nul).ok()?;
-        let s = CFStringCreateWithCString(
-            std::ptr::null(),
-            cstr.as_ptr(),
-            K_CF_STRING_ENCODING_UTF8,
-        );
+        let s =
+            CFStringCreateWithCString(std::ptr::null(), cstr.as_ptr(), K_CF_STRING_ENCODING_UTF8);
         if s.is_null() {
             None
         } else {
@@ -2155,19 +2209,20 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
     if let Some(w) = app.get_webview_window("qa") {
         return Some(w);
     }
-    let built = WebviewWindowBuilder::new(app, "qa", WebviewUrl::App("index.html?window=qa".into()))
-        .title("OpenLess QA")
-        .inner_size(380.0, 440.0)
-        .decorations(false)
-        .transparent(true)
-        .shadow(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .focused(false)
-        .visible(false)
-        .accept_first_mouse(true)
-        .build();
+    let built =
+        WebviewWindowBuilder::new(app, "qa", WebviewUrl::App("index.html?window=qa".into()))
+            .title("OpenLess QA")
+            .inner_size(380.0, 440.0)
+            .decorations(false)
+            .transparent(true)
+            .shadow(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .focused(false)
+            .visible(false)
+            .accept_first_mouse(true)
+            .build();
     match built {
         Ok(w) => {
             #[cfg(target_os = "macos")]
@@ -2190,7 +2245,9 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
 
 /// 懒创建 Less Computer 浮窗（macOS only）。配置与原 tauri.conf 的 less-computer 块一致。
 #[cfg(target_os = "macos")]
-fn ensure_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
+fn ensure_less_computer_window<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<tauri::WebviewWindow<R>> {
     if let Some(w) = app.get_webview_window("less-computer") {
         return Some(w);
     }
@@ -2729,8 +2786,8 @@ fn capsule_height_for_qa() -> f64 {
 mod tests {
     use super::{
         bottom_center_position, bottom_visual_position, capsule_height_for_qa,
-        capsule_visual_height, capsule_window_bounds, clamp_to_monitor, logical_monitor_frame,
-        frame_contains_point, frame_distance_to_point_squared, parse_tray_polish_mode_id,
+        capsule_visual_height, capsule_window_bounds, clamp_to_monitor, frame_contains_point,
+        frame_distance_to_point_squared, logical_monitor_frame, parse_tray_polish_mode_id,
         rotate_log_if_too_large, tray_polish_mode_menu_entries, tray_style_menu_enabled,
         LogicalMonitorFrame, LOG_ROTATE_LIMIT_BYTES,
     };
@@ -2876,10 +2933,7 @@ mod tests {
 
         assert_eq!(frame_distance_to_point_squared(frame, 100.0, -100.0), 0.0);
         assert_eq!(frame_distance_to_point_squared(frame, 100.0, 20.0), 400.0);
-        assert_eq!(
-            frame_distance_to_point_squared(frame, -10.0, -910.0),
-            200.0
-        );
+        assert_eq!(frame_distance_to_point_squared(frame, -10.0, -910.0), 200.0);
     }
 
     #[test]

@@ -176,6 +176,25 @@ impl GeminiProvider {
         Ok(clean_polish_output(&raw))
     }
 
+    pub async fn complete_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LLMError> {
+        let contents = vec![user_content(user_prompt)];
+        let body = self.build_generate_body(system_prompt, contents);
+        let url = generate_content_url(&self.config.base_url, &self.config.model);
+
+        log::info!(
+            "[llm] POST {} provider=gemini model={} complete_text=true",
+            url,
+            self.config.model
+        );
+
+        let body_text = self.send_unary(&url, &body).await?;
+        extract_assistant_content(&body_text)
+    }
+
     /// 划词语音问答的流式回答。Gemini 原生 SSE: `:streamGenerateContent?alt=sse`，
     /// 每个 `data: {...}` 帧里 `candidates[0].content.parts[0].text` 是 delta；
     /// 流结束没有 `[DONE]` sentinel，stream 自然终止。

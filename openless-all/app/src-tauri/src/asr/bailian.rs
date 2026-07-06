@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
-use super::{AudioConsumer, RawTranscript};
+use super::{AsrFinalSegment, AsrFinalSegmentSink, AudioConsumer, RawTranscript};
 
 pub const PROVIDER_ID: &str = "bailian";
 pub const DEFAULT_ENDPOINT: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
@@ -110,6 +110,7 @@ pub struct BailianRealtimeASR {
     writer: SharedWriter,
     final_rx: ParkingMutex<Option<oneshot::Receiver<Result<RawTranscript, BailianASRError>>>>,
     task_started: Arc<Notify>,
+    final_segment_sink: ParkingMutex<Option<AsrFinalSegmentSink>>,
 }
 
 impl BailianRealtimeASR {
@@ -120,7 +121,13 @@ impl BailianRealtimeASR {
             writer: Arc::new(AsyncMutex::new(None)),
             final_rx: ParkingMutex::new(None),
             task_started: Arc::new(Notify::new()),
+            final_segment_sink: ParkingMutex::new(None),
         }
+    }
+
+    pub fn with_final_segment_sink(self, sink: AsrFinalSegmentSink) -> Self {
+        *self.final_segment_sink.lock() = Some(sink);
+        self
     }
 
     pub async fn open_session(self: &Arc<Self>) -> Result<(), BailianASRError> {
@@ -413,6 +420,16 @@ impl BailianRealtimeASR {
             st.final_segments.insert(sentence_id, trimmed.to_string());
             // 清理该句的 interim 缓存
             st.partial_segments.remove(&sentence_id);
+            if let Some(sink) = self.final_segment_sink.lock().clone() {
+                sink(AsrFinalSegment {
+                    text: trimmed.to_string(),
+                    start_ms: millis_field(
+                        sentence,
+                        &["begin_time", "beginTime", "start_time", "startTime"],
+                    ),
+                    end_ms: millis_field(sentence, &["end_time", "endTime"]),
+                });
+            }
         } else {
             // interim 结果暂存 partial，同一 sentence_id 后到覆盖前到
             st.partial_segments.insert(sentence_id, trimmed.to_string());
@@ -547,6 +564,20 @@ fn merge_segments(segments: &[String]) -> String {
         result.push_str(&tail);
     }
     result
+}
+
+fn millis_field(value: &Value, names: &[&str]) -> Option<u64> {
+    for name in names {
+        if let Some(ms) = value.get(*name).and_then(Value::as_u64) {
+            return Some(ms);
+        }
+        if let Some(ms) = value.get(*name).and_then(Value::as_i64) {
+            if ms >= 0 {
+                return Some(ms as u64);
+            }
+        }
+    }
+    None
 }
 
 fn run_task_message(task_id: &str, model: &str, vocabulary_id: Option<&str>) -> String {
@@ -742,6 +773,35 @@ mod tests {
         assert_eq!(st.final_segments.len(), 1);
         assert_eq!(st.final_segments.get(&1).unwrap(), "你好吗");
         assert!(st.partial_segments.is_empty(), "partial not cleaned up");
+    }
+
+    #[test]
+    fn final_sentence_segment_sink_receives_sentence_end() {
+        let seen = Arc::new(ParkingMutex::new(Vec::new()));
+        let seen_for_sink = Arc::clone(&seen);
+        let asr = create_test_asr().with_final_segment_sink(Arc::new(move |segment| {
+            seen_for_sink.lock().push(segment);
+        }));
+
+        asr.record_result(&json!({
+            "payload": {
+                "output": {
+                    "sentence": {
+                        "sentence_id": 1,
+                        "text": "最终片段",
+                        "sentence_end": true,
+                        "begin_time": 200,
+                        "end_time": 900
+                    }
+                }
+            }
+        }));
+
+        let seen = seen.lock();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].text, "最终片段");
+        assert_eq!(seen[0].start_ms, Some(200));
+        assert_eq!(seen[0].end_ms, Some(900));
     }
 
     #[test]

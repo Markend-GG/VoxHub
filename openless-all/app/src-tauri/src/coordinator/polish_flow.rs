@@ -200,6 +200,27 @@ pub(super) async fn polish_text(
         .await?)
 }
 
+pub(super) async fn complete_text_with_active_llm(
+    system_prompt: &str,
+    user_prompt: &str,
+    _working_languages: &[String],
+    _chinese_script_preference: ChineseScriptPreference,
+    _output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
+) -> anyhow::Result<String> {
+    let active_llm = CredentialsVault::get_active_llm();
+    if active_llm == "gemini" {
+        let (api_key, model, base_url) = read_gemini_credentials()?;
+        let provider = GeminiProvider::new(
+            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled),
+        );
+        return Ok(provider.complete_text(system_prompt, user_prompt).await?);
+    }
+
+    let provider = build_active_llm_provider(llm_thinking_enabled)?;
+    Ok(provider.complete_text(system_prompt, user_prompt).await?)
+}
+
 /// 专用翻译（仅翻译、不润色、单轮）。现作为"润色+翻译"合成调用解析失败时的兜底——
 /// 模型没按两段格式输出时，退回这里拿一段干净译文，而不是把畸形输出当译文插入。
 pub(super) async fn translate_text(

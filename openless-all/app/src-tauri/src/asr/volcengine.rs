@@ -22,7 +22,9 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
 use super::frame::{self, Flags, MessageType, Serialization};
-use super::{AudioConsumer, DictionaryHotword, RawTranscript};
+use super::{
+    AsrFinalSegment, AsrFinalSegmentSink, AudioConsumer, DictionaryHotword, RawTranscript,
+};
 
 const ENDPOINT: &str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
 /// 200 ms of 16 kHz / 16-bit / mono PCM.
@@ -106,6 +108,7 @@ pub struct VolcengineStreamingASR {
     /// 而把后续 chunk 当成「stream 已结束」之后的多余数据丢弃 → 尾句丢失。
     pending_sends: Arc<AtomicUsize>,
     send_done: Arc<Notify>,
+    final_segment_sink: ParkingMutex<Option<AsrFinalSegmentSink>>,
 }
 
 impl VolcengineStreamingASR {
@@ -119,7 +122,13 @@ impl VolcengineStreamingASR {
             audio_tx: ParkingMutex::new(None),
             pending_sends: Arc::new(AtomicUsize::new(0)),
             send_done: Arc::new(Notify::new()),
+            final_segment_sink: ParkingMutex::new(None),
         }
+    }
+
+    pub fn with_final_segment_sink(self, sink: AsrFinalSegmentSink) -> Self {
+        *self.final_segment_sink.lock() = Some(sink);
+        self
     }
 
     pub async fn open_session(self: &Arc<Self>) -> Result<(), VolcengineASRError> {
@@ -482,6 +491,7 @@ impl VolcengineStreamingASR {
             if !pieces.is_empty() {
                 full_text = pieces.join("");
             }
+            self.emit_final_utterance_segments(utterances);
         }
 
         // 缓存最新的 partial transcript：服务端在 final 帧前断连时 fallback 用。
@@ -520,6 +530,36 @@ impl VolcengineStreamingASR {
         let tx = self.state.lock().final_tx.take();
         if let Some(tx) = tx {
             let _ = tx.send(Err(err));
+        }
+    }
+
+    fn emit_final_utterance_segments(&self, utterances: &[Value]) {
+        let Some(sink) = self.final_segment_sink.lock().clone() else {
+            return;
+        };
+        for utterance in utterances {
+            if !utterance
+                .get("definite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(text) = utterance.get("text").and_then(Value::as_str) else {
+                continue;
+            };
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            sink(AsrFinalSegment {
+                text: text.to_string(),
+                start_ms: millis_field(
+                    utterance,
+                    &["start_time", "startTime", "begin_time", "beginTime"],
+                ),
+                end_ms: millis_field(utterance, &["end_time", "endTime"]),
+            });
         }
     }
 
@@ -634,6 +674,20 @@ fn normalized_result(json: &Value) -> Option<&Value> {
     }
     if json.get("text").and_then(|v| v.as_str()).is_some() {
         return Some(json);
+    }
+    None
+}
+
+fn millis_field(value: &Value, names: &[&str]) -> Option<u64> {
+    for name in names {
+        if let Some(ms) = value.get(*name).and_then(Value::as_u64) {
+            return Some(ms);
+        }
+        if let Some(ms) = value.get(*name).and_then(Value::as_i64) {
+            if ms >= 0 {
+                return Some(ms as u64);
+            }
+        }
     }
     None
 }
@@ -760,5 +814,34 @@ mod tests {
             result,
             Err(VolcengineASRError::FinalResultTimeout)
         ));
+    }
+
+    #[test]
+    fn final_utterance_segment_sink_receives_definite_segments() {
+        let seen = Arc::new(ParkingMutex::new(Vec::new()));
+        let seen_for_sink = Arc::clone(&seen);
+        let asr = VolcengineStreamingASR::new(
+            VolcengineCredentials {
+                app_id: "app".into(),
+                access_token: "token".into(),
+                resource_id: VolcengineCredentials::default_resource_id().into(),
+            },
+            Vec::new(),
+        )
+        .with_final_segment_sink(Arc::new(move |segment| {
+            seen_for_sink.lock().push(segment);
+        }));
+
+        let utterances = vec![
+            json!({"text": "临时", "definite": false, "start_time": 0, "end_time": 100}),
+            json!({"text": "最终片段", "definite": true, "start_time": 100, "end_time": 800}),
+        ];
+        asr.emit_final_utterance_segments(&utterances);
+
+        let seen = seen.lock();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].text, "最终片段");
+        assert_eq!(seen[0].start_ms, Some(100));
+        assert_eq!(seen[0].end_ms, Some(800));
     }
 }
