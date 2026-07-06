@@ -253,28 +253,29 @@ fn meeting_markdown(record: &MeetingRecord) -> String {
     out.push_str("# ");
     out.push_str(&record.title);
     out.push_str("\n\n");
-    out.push_str("## Metadata\n\n");
-    out.push_str(&format!("- Started: {}\n", record.started_at));
+    out.push_str("## 会议总结\n\n");
+    out.push_str("### 元信息\n\n");
+    out.push_str(&format!("- 开始时间: {}\n", record.started_at));
     out.push_str(&format!(
-        "- Ended: {}\n",
+        "- 结束时间: {}\n",
         record.ended_at.as_deref().unwrap_or("-")
     ));
     out.push_str(&format!(
-        "- Duration: {}\n",
+        "- 时长: {}\n",
         record
             .duration_ms
             .map(format_duration_hms)
             .unwrap_or_else(|| "-".to_string())
     ));
-    out.push_str(&format!("- Status: {:?}\n\n", record.status));
+    out.push_str(&format!("- 状态: {:?}\n\n", record.status));
 
-    out.push_str("## Overview\n\n");
+    out.push_str("### 概览\n\n");
     push_optional_block(&mut out, &record.summary.overview);
 
-    out.push_str("## Key Decisions\n\n");
+    out.push_str("### 关键决定\n\n");
     push_markdown_list(&mut out, &record.summary.key_decisions);
 
-    out.push_str("## Todos\n\n");
+    out.push_str("### 待办事项\n\n");
     if record.summary.todos.is_empty() {
         out.push_str("- None\n\n");
     } else {
@@ -282,14 +283,14 @@ fn meeting_markdown(record: &MeetingRecord) -> String {
             out.push_str("- ");
             out.push_str(&todo.content);
             if let Some(owner) = todo.owner.as_deref().filter(|value| !value.is_empty()) {
-                out.push_str(&format!(" | Owner: {owner}"));
+                out.push_str(&format!(" | 负责人: {owner}"));
             }
             if let Some(due) = todo.due_date.as_deref().filter(|value| !value.is_empty()) {
-                out.push_str(&format!(" | Due: {due}"));
+                out.push_str(&format!(" | 截止时间: {due}"));
             }
             if !todo.source_segment_ids.is_empty() {
                 out.push_str(&format!(
-                    " | Sources: {}",
+                    " | 来源片段: {}",
                     todo.source_segment_ids.join(", ")
                 ));
             }
@@ -298,23 +299,23 @@ fn meeting_markdown(record: &MeetingRecord) -> String {
                 .as_deref()
                 .filter(|value| !value.is_empty())
             {
-                out.push_str(&format!(" | Quote: {quote}"));
+                out.push_str(&format!(" | 引用: {quote}"));
             }
             out.push('\n');
         }
         out.push('\n');
     }
 
-    out.push_str("## Risks And Open Questions\n\n");
+    out.push_str("### 风险与开放问题\n\n");
     push_markdown_list(&mut out, &record.summary.risks_and_open_questions);
 
-    out.push_str("## Transcript\n\n");
+    out.push_str("## 转写后的会议原文\n\n");
     if record.transcript_segments.is_empty() {
-        out.push_str("_No transcript._\n");
+        out.push_str("_暂无会议原文。_\n");
     } else {
         for segment in &record.transcript_segments {
             out.push_str(&format!(
-                "[{}][{}] {}\n\n",
+                "- 发言人: {} | 时间: {} | 内容: {}\n\n",
                 segment.speaker_label,
                 format_duration_hms(segment.start_ms),
                 segment.text.trim()
@@ -479,12 +480,24 @@ mod tests {
         let markdown = meeting_markdown(&record);
 
         assert!(markdown.contains("# 会议记录 2026-07-06 10:00"));
-        assert!(markdown.contains("## Overview"));
+        assert!(markdown.contains("## 会议总结"));
+        assert!(markdown.contains("### 元信息"));
+        assert!(markdown.contains("- 开始时间: 2026-07-06T10:00:00Z"));
+        assert!(markdown.contains("### 概览"));
         assert!(markdown.contains("概览"));
+        assert!(markdown.contains("### 关键决定"));
         assert!(markdown.contains("决定 A"));
-        assert!(markdown.contains("跟进事项 | Owner: Alice | Due: 2026-07-07 | Sources: seg-1"));
+        assert!(markdown.contains("### 待办事项"));
+        assert!(
+            markdown.contains("跟进事项 | 负责人: Alice | 截止时间: 2026-07-07 | 来源片段: seg-1")
+        );
+        assert!(markdown.contains("### 风险与开放问题"));
         assert!(markdown.contains("风险 A"));
-        assert!(markdown.contains("[未区分][01:02:03] 原文内容"));
+        assert!(markdown.contains("## 转写后的会议原文"));
+        assert!(markdown.contains("- 发言人: 未区分 | 时间: 01:02:03 | 内容: 原文内容"));
+        assert!(
+            markdown.find("## 会议总结").unwrap() < markdown.find("## 转写后的会议原文").unwrap()
+        );
     }
 
     #[test]
