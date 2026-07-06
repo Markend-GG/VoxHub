@@ -128,6 +128,10 @@ pub fn delete_report_template(coord: CoordinatorState<'_>, id: String) -> Result
 
 #[tauri::command]
 pub fn list_generated_reports(coord: CoordinatorState<'_>) -> Result<Vec<GeneratedReport>, String> {
+    coord
+        .generated_reports()
+        .recover_stale_pending_reports()
+        .map_err(|e| e.to_string())?;
     coord.generated_reports().list().map_err(|e| e.to_string())
 }
 

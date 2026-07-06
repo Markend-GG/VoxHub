@@ -7,9 +7,10 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 
 use super::{atomic_write, data_dir, ensure_dir, read_or_default, HISTORY_CAP};
-use crate::types::GeneratedReport;
+use crate::types::{GeneratedReport, ReportGenerationStatus};
 
 const GENERATED_REPORT_FILE: &str = "generated-reports.json";
+const STALE_PENDING_REPORT_AFTER_MINUTES: i64 = 30;
 
 pub struct GeneratedReportStore {
     path: PathBuf,
@@ -45,6 +46,43 @@ impl GeneratedReportStore {
     pub fn list(&self) -> Result<Vec<GeneratedReport>> {
         let _guard = self.lock.lock();
         self.read_locked()
+    }
+
+    pub fn recover_stale_pending_reports(&self) -> Result<usize> {
+        self.recover_stale_pending_reports_at(
+            chrono::Utc::now(),
+            chrono::Duration::minutes(STALE_PENDING_REPORT_AFTER_MINUTES),
+        )
+    }
+
+    pub fn recover_stale_pending_reports_at(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        stale_after: chrono::Duration,
+    ) -> Result<usize> {
+        let _guard = self.lock.lock();
+        let mut reports = self.read_locked()?;
+        let threshold = now - stale_after;
+        let now_text = now.to_rfc3339();
+        let mut recovered = 0;
+        for report in reports.iter_mut() {
+            if report.status != ReportGenerationStatus::Pending {
+                continue;
+            }
+            let timestamp = parse_report_timestamp(&report.updated_at)
+                .or_else(|| parse_report_timestamp(&report.created_at));
+            if timestamp.is_some_and(|value| value <= threshold) {
+                report.status = ReportGenerationStatus::Failed;
+                report.error_code = Some("failed:stalePending".into());
+                report.error_message = Some("报告生成任务已中断，请重新生成。".into());
+                report.updated_at = now_text.clone();
+                recovered += 1;
+            }
+        }
+        if recovered > 0 {
+            self.write_locked(&reports)?;
+        }
+        Ok(recovered)
     }
 
     pub fn append(&self, report: GeneratedReport) -> Result<()> {
@@ -111,6 +149,12 @@ impl GeneratedReportStore {
     }
 }
 
+fn parse_report_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +210,84 @@ mod tests {
         assert_eq!(reports[0].id, "report-1");
         assert_eq!(reports[0].status, ReportGenerationStatus::Success);
         assert_eq!(reports[0].content.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn stale_pending_reports_are_marked_failed() {
+        let store = test_store();
+        let mut stale = report("report-1", ReportGenerationStatus::Pending);
+        stale.created_at = "2026-06-27T10:00:00Z".into();
+        stale.updated_at = "2026-06-27T10:00:00Z".into();
+        store.append(stale).unwrap();
+
+        let recovered = store
+            .recover_stale_pending_reports_at(
+                chrono::DateTime::parse_from_rfc3339("2026-06-27T10:31:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                chrono::Duration::minutes(30),
+            )
+            .unwrap();
+
+        let reports = store.list().unwrap();
+        assert_eq!(recovered, 1);
+        assert_eq!(reports[0].status, ReportGenerationStatus::Failed);
+        assert_eq!(
+            reports[0].error_code.as_deref(),
+            Some("failed:stalePending")
+        );
+        assert_eq!(
+            reports[0].error_message.as_deref(),
+            Some("报告生成任务已中断，请重新生成。")
+        );
+        assert_eq!(reports[0].updated_at, "2026-06-27T10:31:00+00:00");
+    }
+
+    #[test]
+    fn fresh_pending_reports_are_kept_pending() {
+        let store = test_store();
+        let mut fresh = report("report-1", ReportGenerationStatus::Pending);
+        fresh.created_at = "2026-06-27T10:00:00Z".into();
+        fresh.updated_at = "2026-06-27T10:20:00Z".into();
+        store.append(fresh).unwrap();
+
+        let recovered = store
+            .recover_stale_pending_reports_at(
+                chrono::DateTime::parse_from_rfc3339("2026-06-27T10:31:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                chrono::Duration::minutes(30),
+            )
+            .unwrap();
+
+        let reports = store.list().unwrap();
+        assert_eq!(recovered, 0);
+        assert_eq!(reports[0].status, ReportGenerationStatus::Pending);
+        assert!(reports[0].error_code.is_none());
+    }
+
+    #[test]
+    fn successful_reports_are_not_changed_by_pending_recovery() {
+        let store = test_store();
+        let mut success = report("report-1", ReportGenerationStatus::Success);
+        success.content = Some("done".into());
+        success.created_at = "2026-06-27T10:00:00Z".into();
+        success.updated_at = "2026-06-27T10:00:00Z".into();
+        store.append(success).unwrap();
+
+        let recovered = store
+            .recover_stale_pending_reports_at(
+                chrono::DateTime::parse_from_rfc3339("2026-06-27T11:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                chrono::Duration::minutes(30),
+            )
+            .unwrap();
+
+        let reports = store.list().unwrap();
+        assert_eq!(recovered, 0);
+        assert_eq!(reports[0].status, ReportGenerationStatus::Success);
+        assert_eq!(reports[0].content.as_deref(), Some("done"));
+        assert!(reports[0].error_code.is_none());
     }
 }

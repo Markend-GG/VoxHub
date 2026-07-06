@@ -80,10 +80,10 @@ pub fn start_daily_report_scheduler(coordinator: Arc<crate::coordinator::Coordin
 fn selected_daily_template(coordinator: &crate::coordinator::Coordinator) -> Option<String> {
     let prefs = coordinator.prefs().get();
     let templates = coordinator.report_templates().list().ok()?;
-    if templates
-        .iter()
-        .any(|template| template.id == prefs.selected_daily_report_template_id && template.report_type == ReportType::Daily)
-    {
+    if templates.iter().any(|template| {
+        template.id == prefs.selected_daily_report_template_id
+            && template.report_type == ReportType::Daily
+    }) {
         return Some(prefs.selected_daily_report_template_id);
     }
     templates
@@ -100,19 +100,27 @@ fn schedule_key_already_completed(
     coordinator: &crate::coordinator::Coordinator,
     schedule_key: &str,
 ) -> bool {
+    if let Err(error) = coordinator
+        .generated_reports()
+        .recover_stale_pending_reports()
+    {
+        log::warn!("[report-scheduler] stale pending recovery failed: {error}");
+    }
     coordinator
         .generated_reports()
         .list()
-        .map(|reports| {
-            reports.iter().any(|report| {
-                report.schedule_key.as_deref() == Some(schedule_key)
-                    && matches!(
-                        report.status,
-                        ReportGenerationStatus::Pending | ReportGenerationStatus::Success
-                    )
-            })
-        })
+        .map(|reports| schedule_key_is_blocked(&reports, schedule_key))
         .unwrap_or(false)
+}
+
+fn schedule_key_is_blocked(reports: &[crate::types::GeneratedReport], schedule_key: &str) -> bool {
+    reports.iter().any(|report| {
+        report.schedule_key.as_deref() == Some(schedule_key)
+            && matches!(
+                report.status,
+                ReportGenerationStatus::Pending | ReportGenerationStatus::Success
+            )
+    })
 }
 
 fn parse_hhmm(value: &str) -> Option<(u32, u32)> {
@@ -169,7 +177,10 @@ mod tests {
 
     #[test]
     fn daily_schedule_key_includes_template() {
-        assert_eq!(daily_schedule_key("2026-06-27", "tpl"), "daily:2026-06-27:tpl");
+        assert_eq!(
+            daily_schedule_key("2026-06-27", "tpl"),
+            "daily:2026-06-27:tpl"
+        );
     }
 
     #[test]
@@ -177,23 +188,14 @@ mod tests {
         let key = "daily:2026-06-27:tpl";
         let reports = vec![
             report(Some(key), ReportGenerationStatus::Failed),
-            report(Some("daily:2026-06-26:tpl"), ReportGenerationStatus::Success),
+            report(
+                Some("daily:2026-06-26:tpl"),
+                ReportGenerationStatus::Success,
+            ),
         ];
-        assert!(!reports.iter().any(|entry| {
-            entry.schedule_key.as_deref() == Some(key)
-                && matches!(
-                    entry.status,
-                    ReportGenerationStatus::Pending | ReportGenerationStatus::Success
-                )
-        }));
+        assert!(!schedule_key_is_blocked(&reports, key));
 
         let reports = vec![report(Some(key), ReportGenerationStatus::Pending)];
-        assert!(reports.iter().any(|entry| {
-            entry.schedule_key.as_deref() == Some(key)
-                && matches!(
-                    entry.status,
-                    ReportGenerationStatus::Pending | ReportGenerationStatus::Success
-                )
-        }));
+        assert!(schedule_key_is_blocked(&reports, key));
     }
 }
