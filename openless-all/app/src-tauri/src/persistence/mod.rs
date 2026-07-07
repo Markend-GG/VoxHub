@@ -24,6 +24,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use uuid::Uuid;
 
+mod activity;
 mod correction;
 mod context_analysis;
 mod context_capture;
@@ -40,6 +41,7 @@ mod screenshot_aggregation;
 mod screenshot_record;
 mod style_pack;
 
+pub use activity::*;
 pub use correction::*;
 pub use context_analysis::*;
 pub use context_capture::*;

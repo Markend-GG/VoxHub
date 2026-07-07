@@ -8,7 +8,10 @@ export type AppTab =
   | 'meetings'
   | 'vocab'
   | 'style'
+  | 'vocab'
+  | 'style'
   | 'reports'
+  | 'marketplace'
   | 'translation'
   | 'selectionAsk'
   | 'localAsr';

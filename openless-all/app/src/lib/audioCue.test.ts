@@ -3,6 +3,8 @@
 // 播放/停止依赖 Web Audio 运行时，不在此单测覆盖；这里只钉住可被回归的音符规划。
 
 import {
+  audioContextActionForState,
+  cueActionAfterResume,
   cueTotalDurationMs,
   recordStartCueTones,
   shouldPlayDeferredCue,
@@ -105,6 +107,74 @@ function assertEqual<T>(actual: T, expected: T, name: string) {
     }),
     true,
     'cue at exactly the threshold still plays',
+  );
+}
+
+{
+  // 「用久了没声音」的回归钉子：closed 的 ctx 必须重建，否则提示音/试听永久静默。
+  assertEqual(
+    audioContextActionForState('closed'),
+    'recreate',
+    'closed context must be recreated',
+  );
+  // running 可直接排期。
+  assertEqual(
+    audioContextActionForState('running'),
+    'ready',
+    'running context is ready to schedule',
+  );
+  // suspended 先 resume 再排期（WKWebView/WebView2 常态）。
+  assertEqual(
+    audioContextActionForState('suspended'),
+    'resume',
+    'suspended context needs resume',
+  );
+  // WebKit 非标准 interrupted（音频会话被抢占）同样需要 resume，不能当 running 直接排期。
+  assertEqual(
+    audioContextActionForState('interrupted'),
+    'resume',
+    'interrupted context needs resume',
+  );
+  // 任何未知非运行态都保守地走 resume（宁可尝试唤醒也不静默漏音）。
+  assertEqual(
+    audioContextActionForState('some-future-state'),
+    'resume',
+    'unknown non-running state falls back to resume',
+  );
+}
+
+{
+  // 「用久了没声音」修复的回归钉子：resume() 之后的处置决策（cueActionAfterResume）。
+  // resume 成功、ctx 真在跑、且仍该播 → 排期发声。
+  assertEqual(
+    cueActionAfterResume({ runningAfterResume: true, shouldPlay: true, allowRecreate: true }),
+    'schedule',
+    'running-after-resume and should-play schedules the cue',
+  );
+  // 被新一轮播放接管 / 真迟到（shouldPlay=false）→ 丢弃，且不重建（让最新那次处理）。
+  assertEqual(
+    cueActionAfterResume({ runningAfterResume: true, shouldPlay: false, allowRecreate: true }),
+    'drop',
+    'superseded or late cue is dropped even when the context is running',
+  );
+  // 核心修复：resume 被拒、或名义 resolve 但 ctx 仍非 running（runningAfterResume=false）——
+  // 只要还该播且可重建，就丢弃坏死 ctx 重试，绝不静默放弃 / 不在冻结时钟上排期。
+  assertEqual(
+    cueActionAfterResume({ runningAfterResume: false, shouldPlay: true, allowRecreate: true }),
+    'recreate-retry',
+    'a context that will not wake recreates instead of going permanently silent',
+  );
+  // 重试一次后仍唤不醒（allowRecreate=false）→ 放弃，避免坏死 ctx 上无限递归。
+  assertEqual(
+    cueActionAfterResume({ runningAfterResume: false, shouldPlay: true, allowRecreate: false }),
+    'drop',
+    'second attempt gives up to avoid an infinite recreate loop',
+  );
+  // 本就不该播时，即使唤不醒也不浪费一次重建。
+  assertEqual(
+    cueActionAfterResume({ runningAfterResume: false, shouldPlay: false, allowRecreate: true }),
+    'drop',
+    'no recreate is spent when the cue should not play anyway',
   );
 }
 
