@@ -14,8 +14,10 @@ import {
   openSystemSettings,
   requestAccessibilityPermission,
   requestMicrophonePermission,
+  resetAccessibilityPermissionAndRestartApp,
 } from '../../lib/ipc';
 import type { NetworkCheckResult } from '../../lib/ipc';
+import { emitSaved } from '../../lib/savedEvent';
 import { getPlatformCapabilities } from '../../lib/platform';
 import { checkAndroidMicrophoneAccess, requestAndroidMicrophoneAccess } from '@android/lib/androidMicrophonePermission';
 import type {
@@ -107,7 +109,11 @@ export function PermissionsSection() {
   }, [platformCaps?.platform, platformCaps?.supportsDesktopHotkey]);
 
   const reRequestAccessibility = async () => {
-    await requestAccessibilityPermission();
+    const result = await requestAccessibilityPermission();
+    // 如果 TCC 弹窗已拒绝（或之前已拒绝不再弹），引导用户到系统设置
+    if (result !== 'granted') {
+      await openSystemSettings('accessibility');
+    }
     refreshPermissions();
   };
 
@@ -159,9 +165,19 @@ export function PermissionsSection() {
         <SettingRow label={t('settings.permissions.accLabel')}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%', flexWrap: 'wrap', minWidth: 0 }}>
             <PermissionPill status={accessibility} />
-            {accessibility !== 'granted' && accessibility !== 'notApplicable' && (
+            {accessibility !== 'granted' && accessibility !== 'notApplicable' && accessibility !== 'loading' && (
               <Btn variant="ghost" size="sm" onClick={reRequestAccessibility}>
-                {t('settings.permissions.grant')}
+                {accessibility === 'denied' ? t('settings.permissions.openSystem') : t('settings.permissions.grant')}
+              </Btn>
+            )}
+            {accessibility === 'denied' && (
+              <Btn variant="ghost" size="sm" onClick={() => {
+                resetAccessibilityPermissionAndRestartApp().catch((error) => {
+                  console.error('[settings] reset accessibility permission failed', error);
+                  emitSaved('failed', t('common.operationFailed'));
+                });
+              }}>
+                {t('settings.permissions.restart')}
               </Btn>
             )}
           </div>

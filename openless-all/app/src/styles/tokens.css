@@ -13,34 +13,32 @@
   --ol-control-radius: 8px;
   --ol-bubble-radius: var(--ol-r-lg);
   --ol-input-ink: var(--ol-ink);
+  /* 白底哲学：霜感玻璃改为近实色，纯白渐变到 zinc-50。 */
   --ol-frost-bg:
-    radial-gradient(135% 86% at 15% -10%,
-      rgba(255, 255, 255, 0.97) 0%,
-      rgba(255, 255, 255, 0) 56%),
     linear-gradient(161deg,
-      rgba(255, 255, 255, 0.93) 0%,
-      rgba(244, 247, 252, 0.88) 100%);
-  /* Shared palette */
+      #ffffff 0%,
+      #fafafa 100%);
+  /* Shared palette（shadcn zinc） */
   --ol-white: #ffffff;
-  --ol-canvas: #f7f7f8;
+  --ol-canvas: #ffffff;
   --ol-surface: #ffffff;
-  --ol-surface-2: #fafafa;
+  --ol-surface-2: #f4f4f5;
   --ol-surface-solid: #ffffff;
-  --ol-line: rgba(0, 0, 0, 0.08);
-  --ol-line-strong: rgba(0, 0, 0, 0.14);
-  --ol-line-soft: rgba(0, 0, 0, 0.05);
+  --ol-line: #e4e4e7;
+  --ol-line-strong: #d4d4d8;
+  --ol-line-soft: #f4f4f5;
 
-  --ol-bg-base: #f3f4f6;
-  --ol-bg-elevated: #fbfbfc;
+  --ol-bg-base: #fafafa;
+  --ol-bg-elevated: #ffffff;
 
-  /* Ink */
-  --ol-ink: #0a0a0b;
-  --ol-ink-2: #2a2a2d;
-  --ol-ink-3: rgba(10, 10, 11, 0.62);
-  /* AA 修复：曾把 alpha 从 0.58 降到 0.42，浅色 surface 上的弱化文字跌到
-     2.88:1（< WCAG AA 4.5:1）。恢复为 0.58（≈5.1:1，仍比 --ol-ink-3 浅）。 */
-  --ol-ink-4: rgba(10, 10, 11, 0.58);
-  --ol-ink-5: rgba(10, 10, 11, 0.24);
+  /* Ink（zinc 阶梯） */
+  --ol-ink: #09090b;
+  --ol-ink-2: #3f3f46;
+  --ol-ink-3: #71717a;
+  /* zinc 规格：ink-4 取 zinc-400（对白底约 2.6:1），仅用于占位符/装饰性弱文字；
+     需要满足 AA 的弱化正文请用 ink-3（zinc-500，对白底约 4.7:1）及以上。 */
+  --ol-ink-4: #a1a1aa;
+  --ol-ink-5: #d4d4d8;
 
   /* Blue accent */
   --ol-blue: #2563eb;
@@ -49,10 +47,10 @@
   --ol-blue-ring: rgba(37, 99, 235, 0.22);
   --ol-on-accent: #ffffff;
 
-  /* Shared glass */
-  --ol-glass-bg: rgba(255, 255, 255, 0.62);
-  --ol-glass-bg-strong: rgba(255, 255, 255, 0.78);
-  --ol-glass-border: rgba(255, 255, 255, 0.7);
+  /* Shared glass（近实色：透感基本关闭，保留 token 结构） */
+  --ol-glass-bg: rgba(255, 255, 255, 0.94);
+  --ol-glass-bg-strong: rgba(255, 255, 255, 0.97);
+  --ol-glass-border: #e4e4e7;
   --ol-glass-blur: 20px;
   --ol-glass-blur-strong: 36px;
 
@@ -64,11 +62,11 @@
   --ol-motion-soft: cubic-bezier(0.22, 0.8, 0.22, 1);
   --ol-motion-quick: cubic-bezier(0.2, 0, 0, 1);
 
-  /* Shadows */
-  --ol-shadow-sm: 0 1px 2px rgba(15, 17, 22, 0.04), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
-  --ol-shadow-md: 0 1px 2px rgba(15, 17, 22, 0.05), 0 6px 24px -12px rgba(15, 17, 22, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
-  --ol-shadow-lg: 0 20px 60px -20px rgba(15, 17, 22, 0.18), 0 8px 32px -16px rgba(15, 17, 22, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
-  --ol-shadow-xl: 0 40px 120px -40px rgba(15, 17, 22, 0.30), 0 24px 60px -24px rgba(15, 17, 22, 0.15), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+  /* Shadows（shadcn 弱阴影：模糊与 alpha 约砍半） */
+  --ol-shadow-sm: 0 1px 1px rgba(15, 17, 22, 0.02), 0 0 0 0.5px rgba(0, 0, 0, 0.02);
+  --ol-shadow-md: 0 1px 1px rgba(15, 17, 22, 0.03), 0 6px 12px -6px rgba(15, 17, 22, 0.05), 0 0 0 0.5px rgba(0, 0, 0, 0.02);
+  --ol-shadow-lg: 0 20px 30px -10px rgba(15, 17, 22, 0.09), 0 8px 16px -8px rgba(15, 17, 22, 0.05), 0 0 0 0.5px rgba(0, 0, 0, 0.03);
+  --ol-shadow-xl: 0 40px 60px -20px rgba(15, 17, 22, 0.15), 0 24px 30px -12px rgba(15, 17, 22, 0.08), 0 0 0 0.5px rgba(0, 0, 0, 0.03);
 
   /* Radii */
   --ol-shell-radius: 32px;
@@ -94,31 +92,27 @@
   --ol-warn-soft: #fff7ed;
   --ol-err: #dc2626;
 
-  /* Theme-aware shell and control tokens */
+  /* Theme-aware shell and control tokens（白/实底：去掉彩色氛围渐变） */
   --ol-app-shell-bg:
-    radial-gradient(circle at top left, rgba(255, 255, 255, 0.68), rgba(255, 255, 255, 0) 38%),
-    radial-gradient(circle at 86% 18%, rgba(47, 109, 246, 0.08), rgba(47, 109, 246, 0) 30%),
     linear-gradient(180deg, var(--ol-bg-elevated) 0%, var(--ol-bg-base) 100%);
   --ol-window-bg:
-    radial-gradient(120% 80% at 0% 0%, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0) 60%),
-    radial-gradient(100% 70% at 100% 100%, rgba(37,99,235,0.07) 0%, rgba(37,99,235,0) 55%),
-    linear-gradient(180deg, rgba(245,245,247,0.92) 0%, rgba(232,232,236,0.92) 100%);
-  --ol-window-border: rgba(0, 0, 0, 0.10);
-  --ol-linux-titlebar-bg: rgba(245, 245, 247, 0.85);
-  --ol-linux-titlebar-border: rgba(0, 0, 0, 0.08);
+    linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
+  --ol-window-border: #e4e4e7;
+  --ol-linux-titlebar-bg: rgba(250, 250, 250, 0.92);
+  --ol-linux-titlebar-border: #e4e4e7;
 
-  --ol-panel-bg: rgba(255, 255, 255, 0.72);
-  --ol-panel-border: rgba(255, 255, 255, 0.58);
+  --ol-panel-bg: rgba(255, 255, 255, 0.96);
+  --ol-panel-border: #e4e4e7;
   --ol-panel-shadow: 0 24px 80px -32px rgba(15, 23, 42, 0.24), 0 12px 36px -18px rgba(15, 23, 42, 0.12);
-  --ol-card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(252, 252, 253, 0.82));
-  --ol-card-border: rgba(255, 255, 255, 0.74);
+  --ol-card-bg: #ffffff;
+  --ol-card-border: #e4e4e7;
   --ol-card-shadow: 0 10px 30px -18px rgba(15, 23, 42, 0.16), 0 0 0 0.5px rgba(255, 255, 255, 0.55) inset;
   /* 玻璃面板背景（半透明，配 backdrop-filter）；FloatingShell 主区非不透明分支用，
      light/dark 取值不同需保持主题感知。 */
-  --ol-panel-glass-bg: rgba(255, 255, 255, 0.72);
+  --ol-panel-glass-bg: rgba(255, 255, 255, 0.94);
 
-  --ol-sidebar-bg: linear-gradient(180deg, rgba(255,255,255,0.34), rgba(255,255,255,0.12));
-  --ol-sidebar-border: rgba(255,255,255,0.38);
+  --ol-sidebar-bg: #fafafa;
+  --ol-sidebar-border: #e4e4e7;
   --ol-sidebar-brand-bg: linear-gradient(180deg, rgba(255,255,255,0.72), rgba(255,255,255,0.36));
   --ol-sidebar-brand-border: rgba(255,255,255,0.50);
   --ol-sidebar-pill-bg: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.58));
@@ -131,10 +125,10 @@
   --ol-sidebar-settings-active-bg: linear-gradient(180deg, rgba(255,255,255,0.82), rgba(255,255,255,0.48));
   --ol-nav-hover-bg: rgba(0, 0, 0, 0.04);
 
-  --ol-settings-rail-bg: linear-gradient(180deg, rgba(255,255,255,0.58), rgba(246,248,252,0.72));
+  --ol-settings-rail-bg: linear-gradient(180deg, rgba(252,252,253,0.96), rgba(250,250,250,0.96));
   --ol-settings-rail-border: rgba(255,255,255,0.52);
   --ol-settings-links-border: rgba(255,255,255,0.46);
-  --ol-settings-content-bg: linear-gradient(180deg, rgba(255,255,255,0.56), rgba(249,250,252,0.74));
+  --ol-settings-content-bg: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(252,252,253,0.96));
   --ol-settings-close-bg: rgba(255,255,255,0.38);
   --ol-settings-close-hover-bg: rgba(255,255,255,0.72);
 
@@ -145,23 +139,23 @@
   --ol-control-elevated: var(--ol-surface-2);
   --ol-control-shadow: 0 10px 20px -18px rgba(15,23,42,0.2);
   --ol-pill-bg: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(245,247,250,0.68));
-  --ol-pill-border: rgba(148,163,184,0.22);
+  --ol-pill-border: rgba(161,161,170,0.22);
   --ol-pill-shadow: inset 0 1px 0 0 rgba(255,255,255,0.72), 0 10px 20px -18px rgba(15,23,42,0.18);
   --ol-pill-blue-bg: rgba(96,165,250,0.14);
   --ol-pill-blue-border: rgba(96,165,250,0.24);
   --ol-pill-ok-bg: rgba(74,222,128,0.14);
   --ol-pill-ok-border: rgba(74,222,128,0.22);
-  --ol-pill-dark-bg: linear-gradient(180deg, rgba(28,34,45,0.92), rgba(18,23,31,0.88));
+  --ol-pill-dark-bg: linear-gradient(180deg, rgba(39,39,42,0.92), rgba(24,24,27,0.88));
   --ol-pill-dark-border: rgba(15,23,42,0.10);
   --ol-pill-dark-shadow: 0 12px 20px -18px rgba(15,23,42,0.22);
-  --ol-pill-selected-bg: #111827;
+  --ol-pill-selected-bg: #18181b;
   --ol-pill-selected-ink: #ffffff;
-  --ol-pill-selected-border: #111827;
+  --ol-pill-selected-border: #18181b;
   --ol-segmented-bg: rgba(0,0,0,0.04);
   --ol-segmented-active-bg: #ffffff;
   --ol-segmented-active-shadow: 0 1px 2px rgba(0,0,0,.06), 0 0 0 0.5px rgba(0,0,0,.06);
   --ol-select-trigger-bg: var(--ol-control-solid);
-  --ol-select-popover-bg: rgba(252, 252, 254, 0.96);
+  --ol-select-popover-bg: rgba(255, 255, 255, 0.97);
   --ol-select-popover-border: rgba(0, 0, 0, 0.10);
   --ol-select-popover-shadow: 0 12px 30px -10px rgba(15, 17, 22, 0.25), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
   --ol-select-option-hover-bg: rgba(37, 99, 235, 0.10);
@@ -178,10 +172,10 @@
   --ol-style-card-border-active: rgba(96,165,250,0.82);
   --ol-style-card-shadow: 0 24px 48px -34px rgba(15, 23, 42, 0.18), inset 0 1px 0 0 rgba(255,255,255,0.65);
   --ol-style-card-shadow-active: 0 24px 56px -28px rgba(37,99,235,0.28), 0 0 0 1px rgba(96,165,250,0.78), 0 0 0 4px rgba(96,165,250,0.16), inset 0 1px 0 0 rgba(255,255,255,0.72);
-  --ol-style-card-ink: #0f172a;
-  --ol-style-card-ink-2: rgba(15, 23, 42, 0.82);
-  --ol-style-card-ink-3: rgba(15, 23, 42, 0.56);
-  --ol-style-card-icon-bg: rgba(226,232,240,0.62);
+  --ol-style-card-ink: #09090b;
+  --ol-style-card-ink-2: rgba(9, 9, 11, 0.82);
+  --ol-style-card-ink-3: rgba(9, 9, 11, 0.56);
+  --ol-style-card-icon-bg: rgba(228,228,231,0.62);
   --ol-style-card-icon-bg-active: rgba(96,165,250,0.14);
   --ol-style-delete-bg: rgba(255,255,255,0.56);
   --ol-style-delete-border: rgba(248,113,113,0.36);
@@ -215,56 +209,53 @@
 }
 
 [data-ol-theme='dark'] {
-  --ol-accent-solid-bg: #2563eb;
-  --ol-accent-solid-bg-hover: #3b82f6;
+  --ol-accent-solid-bg: #3b82f6;
+  --ol-accent-solid-bg-hover: #60a5fa;
   --ol-accent-solid-ink: #f8fbff;
-  --ol-primary-solid-bg: #2563eb;
+  --ol-primary-solid-bg: #3b82f6;
   --ol-primary-solid-ink: #f8fbff;
-  --ol-danger-solid-bg: #dc2626;
+  --ol-danger-solid-bg: #ef4444;
   --ol-danger-solid-ink: #ffffff;
-  --ol-input-ink: #f4f7fb;
+  --ol-input-ink: #fafafa;
   --ol-frost-bg:
-    radial-gradient(135% 86% at 15% -10%,
-      rgba(255, 255, 255, 0.06) 0%,
-      rgba(255, 255, 255, 0) 56%),
     linear-gradient(161deg,
-      rgba(26, 26, 30, 0.96) 0%,
-      rgba(20, 20, 24, 0.92) 100%);
+      rgba(24, 24, 27, 0.97) 0%,
+      rgba(20, 20, 23, 0.96) 100%);
 
-  --ol-white: #11141a;
-  --ol-canvas: #0b0e13;
-  --ol-surface: #141922;
-  --ol-surface-2: #1a202b;
-  --ol-surface-solid: #171d27;
-  --ol-line: rgba(255, 255, 255, 0.09);
-  --ol-line-strong: rgba(255, 255, 255, 0.16);
-  --ol-line-soft: rgba(255, 255, 255, 0.07);
+  --ol-white: #1c1c1f;
+  --ol-canvas: #0c0c0e;
+  --ol-surface: #1c1c1f;
+  --ol-surface-2: #2a2a2e;
+  --ol-surface-solid: #18181b;
+  --ol-line: #27272a;
+  --ol-line-strong: #3f3f46;
+  --ol-line-soft: #1f1f23;
 
-  --ol-bg-base: #0a0d12;
-  --ol-bg-elevated: #10151d;
-  /* 玻璃面板背景暗色取值。 */
-  --ol-panel-glass-bg: rgba(17, 23, 31, 0.76);
+  --ol-bg-base: #09090b;
+  --ol-bg-elevated: #141417;
+  /* 玻璃面板背景暗色取值（近实色）。 */
+  --ol-panel-glass-bg: rgba(24, 24, 27, 0.96);
 
-  --ol-ink: #f4f7fb;
-  --ol-ink-2: #d8dfeb;
-  --ol-ink-3: rgba(244, 247, 251, 0.74);
-  --ol-ink-4: rgba(244, 247, 251, 0.50);
-  --ol-ink-5: rgba(244, 247, 251, 0.26);
+  --ol-ink: #fafafa;
+  --ol-ink-2: #d4d4d8;
+  --ol-ink-3: #a1a1aa;
+  --ol-ink-4: #71717a;
+  --ol-ink-5: #3f3f46;
 
-  --ol-blue: #60a5fa;
-  --ol-blue-hover: #3b82f6;
-  --ol-blue-soft: rgba(96, 165, 250, 0.14);
-  --ol-blue-ring: rgba(96, 165, 250, 0.30);
+  --ol-blue: #74b7ff;
+  --ol-blue-hover: #93c5fd;
+  --ol-blue-soft: rgba(116, 183, 255, 0.16);
+  --ol-blue-ring: rgba(116, 183, 255, 0.34);
   --ol-on-accent: #f8fbff;
 
-  --ol-glass-bg: rgba(15, 19, 27, 0.68);
-  --ol-glass-bg-strong: rgba(17, 22, 30, 0.84);
-  --ol-glass-border: rgba(255, 255, 255, 0.10);
+  --ol-glass-bg: rgba(24, 24, 27, 0.94);
+  --ol-glass-bg-strong: rgba(24, 24, 27, 0.97);
+  --ol-glass-border: #27272a;
 
-  --ol-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.34), 0 0 0 0.5px rgba(255, 255, 255, 0.04);
-  --ol-shadow-md: 0 10px 30px -20px rgba(0, 0, 0, 0.42), 0 0 0 0.5px rgba(255, 255, 255, 0.05);
-  --ol-shadow-lg: 0 24px 72px -32px rgba(0, 0, 0, 0.58), 0 0 0 0.5px rgba(255, 255, 255, 0.05);
-  --ol-shadow-xl: 0 48px 120px -52px rgba(0, 0, 0, 0.72), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+  --ol-shadow-sm: 0 1px 1px rgba(0, 0, 0, 0.17), 0 0 0 0.5px rgba(226, 232, 240, 0.03);
+  --ol-shadow-md: 0 12px 17px -11px rgba(0, 0, 0, 0.25), 0 0 0 0.5px rgba(226, 232, 240, 0.03);
+  --ol-shadow-lg: 0 26px 40px -17px rgba(0, 0, 0, 0.33), 0 0 0 0.5px rgba(226, 232, 240, 0.03);
+  --ol-shadow-xl: 0 54px 65px -29px rgba(0, 0, 0, 0.39), 0 0 0 0.5px rgba(226, 232, 240, 0.04);
 
   --ol-ok: #4ade80;
   --ol-ok-soft: rgba(74, 222, 128, 0.14);
@@ -272,115 +263,115 @@
   --ol-warn-soft: rgba(245, 158, 11, 0.14);
   --ol-err: #f87171;
 
-  --ol-app-shell-bg: linear-gradient(180deg, #050607 0%, #090a0c 100%);
+  --ol-app-shell-bg:
+    linear-gradient(180deg, #141417 0%, #09090b 100%);
   --ol-window-bg:
-    radial-gradient(120% 80% at 0% 0%, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0) 42%),
-    linear-gradient(180deg, rgba(31,31,34,0.98) 0%, rgba(23,23,25,0.98) 100%);
-  --ol-window-border: rgba(255,255,255,0.08);
-  --ol-linux-titlebar-bg: rgba(15, 20, 28, 0.90);
-  --ol-linux-titlebar-border: rgba(255,255,255,0.08);
+    linear-gradient(180deg, #18181b 0%, #09090b 100%);
+  --ol-window-border: #27272a;
+  --ol-linux-titlebar-bg: rgba(20, 20, 23, 0.92);
+  --ol-linux-titlebar-border: #27272a;
 
-  --ol-panel-bg: linear-gradient(180deg, rgba(33,33,36,0.96), rgba(28,28,31,0.94));
-  --ol-panel-border: rgba(255,255,255,0.07);
-  --ol-panel-shadow: 0 18px 44px -34px rgba(0,0,0,0.62);
-  --ol-card-bg: linear-gradient(180deg, rgba(34,34,37,0.96), rgba(29,29,32,0.94));
-  --ol-card-border: rgba(255,255,255,0.06);
-  --ol-card-shadow: none;
+  --ol-panel-bg: linear-gradient(180deg, rgba(24, 24, 27, 0.96), rgba(20, 20, 23, 0.95));
+  --ol-panel-border: #27272a;
+  --ol-panel-shadow: 0 28px 78px -42px rgba(0,0,0,0.70), inset 0 1px 0 rgba(255,255,255,0.04);
+  --ol-card-bg: #18181b;
+  --ol-card-border: #27272a;
+  --ol-card-shadow: 0 18px 42px -30px rgba(0,0,0,0.62), inset 0 1px 0 rgba(255,255,255,0.04);
 
-  --ol-sidebar-bg: transparent;
-  --ol-sidebar-border: rgba(255,255,255,0.06);
+  --ol-sidebar-bg: #141417;
+  --ol-sidebar-border: #27272a;
   --ol-sidebar-brand-bg: transparent;
   --ol-sidebar-brand-border: transparent;
-  --ol-sidebar-pill-bg: rgba(255,255,255,0.06);
-  --ol-sidebar-pill-border: rgba(255,255,255,0.07);
-  --ol-sidebar-footer-border: rgba(255,255,255,0.07);
-  --ol-sidebar-version-bg: transparent;
-  --ol-sidebar-version-border: transparent;
+  --ol-sidebar-pill-bg: linear-gradient(180deg, rgba(63, 63, 70, 0.86), rgba(39, 39, 42, 0.86));
+  --ol-sidebar-pill-border: rgba(226,232,240,0.10);
+  --ol-sidebar-footer-border: rgba(226,232,240,0.08);
+  --ol-sidebar-version-bg: rgba(255,255,255,0.04);
+  --ol-sidebar-version-border: rgba(226,232,240,0.08);
   --ol-sidebar-settings-bg: transparent;
   --ol-sidebar-settings-border: transparent;
-  --ol-sidebar-settings-active-bg: rgba(255,255,255,0.08);
-  --ol-nav-hover-bg: rgba(255,255,255,0.05);
+  --ol-sidebar-settings-active-bg: linear-gradient(180deg, rgba(63, 63, 70, 0.86), rgba(39, 39, 42, 0.86));
+  --ol-nav-hover-bg: rgba(116,183,255,0.10);
 
-  --ol-settings-rail-bg: rgba(255,255,255,0.02);
-  --ol-settings-rail-border: rgba(255,255,255,0.06);
-  --ol-settings-links-border: rgba(255,255,255,0.06);
-  --ol-settings-content-bg: linear-gradient(180deg, rgba(29,29,32,0.96), rgba(24,24,27,0.94));
-  --ol-settings-close-bg: rgba(255,255,255,0.06);
-  --ol-settings-close-hover-bg: rgba(255,255,255,0.14);
+  --ol-settings-rail-bg: linear-gradient(180deg, rgba(20, 20, 23, 0.98), rgba(13, 13, 15, 0.98));
+  --ol-settings-rail-border: rgba(226,232,240,0.09);
+  --ol-settings-links-border: rgba(226,232,240,0.08);
+  --ol-settings-content-bg: linear-gradient(180deg, rgba(24, 24, 27, 0.98), rgba(20, 20, 23, 0.98));
+  --ol-settings-close-bg: rgba(255,255,255,0.05);
+  --ol-settings-close-hover-bg: rgba(116,183,255,0.14);
 
-  --ol-control-muted: rgba(255,255,255,0.05);
-  --ol-control-muted-strong: rgba(255,255,255,0.08);
-  --ol-control-border: rgba(255,255,255,0.08);
-  --ol-control-solid: rgba(28, 34, 44, 0.98);
-  --ol-control-elevated: rgba(21,27,36,0.98);
-  --ol-control-shadow: none;
-  --ol-pill-bg: rgba(255,255,255,0.05);
-  --ol-pill-border: rgba(255,255,255,0.08);
-  --ol-pill-shadow: none;
-  --ol-pill-blue-bg: rgba(59,130,246,0.14);
-  --ol-pill-blue-border: rgba(96,165,250,0.28);
+  --ol-control-muted: rgba(226,232,240,0.06);
+  --ol-control-muted-strong: rgba(226,232,240,0.10);
+  --ol-control-border: rgba(226,232,240,0.11);
+  --ol-control-solid: rgba(24, 24, 27, 0.98);
+  --ol-control-elevated: rgba(39, 39, 42, 0.98);
+  --ol-control-shadow: 0 12px 26px -22px rgba(0,0,0,0.64);
+  --ol-pill-bg: rgba(226,232,240,0.07);
+  --ol-pill-border: rgba(226,232,240,0.10);
+  --ol-pill-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+  --ol-pill-blue-bg: rgba(116,183,255,0.16);
+  --ol-pill-blue-border: rgba(116,183,255,0.30);
   --ol-pill-ok-bg: rgba(74,222,128,0.16);
   --ol-pill-ok-border: rgba(74,222,128,0.24);
-  --ol-pill-dark-bg: rgba(255,255,255,0.08);
-  --ol-pill-dark-border: rgba(255,255,255,0.12);
-  --ol-pill-dark-shadow: none;
-  --ol-pill-selected-bg: rgba(36, 42, 54, 0.98);
+  --ol-pill-dark-bg: linear-gradient(180deg, rgba(63, 63, 70, 0.92), rgba(39, 39, 42, 0.92));
+  --ol-pill-dark-border: rgba(226,232,240,0.12);
+  --ol-pill-dark-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
+  --ol-pill-selected-bg: linear-gradient(180deg, rgba(59, 130, 246, 0.95), rgba(37, 99, 235, 0.92));
   --ol-pill-selected-ink: #f4f7fb;
-  --ol-pill-selected-border: rgba(255, 255, 255, 0.10);
-  --ol-segmented-bg: rgba(255,255,255,0.06);
-  --ol-segmented-active-bg: rgba(36, 42, 54, 0.98);
-  --ol-segmented-active-shadow: 0 1px 2px rgba(0, 0, 0, 0.28), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+  --ol-pill-selected-border: rgba(147, 197, 253, 0.44);
+  --ol-segmented-bg: rgba(226,232,240,0.07);
+  --ol-segmented-active-bg: linear-gradient(180deg, rgba(63, 63, 70, 0.98), rgba(39, 39, 42, 0.98));
+  --ol-segmented-active-shadow: 0 1px 2px rgba(0, 0, 0, 0.36), 0 0 0 0.5px rgba(226, 232, 240, 0.10), inset 0 1px 0 rgba(255,255,255,0.04);
   --ol-select-trigger-bg: var(--ol-control-solid);
-  --ol-select-popover-bg: rgba(28, 32, 40, 0.98);
-  --ol-select-popover-border: rgba(255, 255, 255, 0.10);
-  --ol-select-popover-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.48), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
-  --ol-select-option-hover-bg: rgba(96, 165, 250, 0.14);
-  --ol-toggle-off-bg: rgba(255,255,255,0.16);
-  --ol-toggle-knob: #f8fbff;
-  --ol-overlay-bg: rgba(4, 8, 14, 0.58);
+  --ol-select-popover-bg: rgba(24, 24, 27, 0.98);
+  --ol-select-popover-border: rgba(226, 232, 240, 0.12);
+  --ol-select-popover-shadow: 0 18px 42px -16px rgba(0, 0, 0, 0.62), 0 0 0 0.5px rgba(226, 232, 240, 0.08);
+  --ol-select-option-hover-bg: rgba(116, 183, 255, 0.15);
+  --ol-toggle-off-bg: rgba(226,232,240,0.18);
+  --ol-toggle-knob: #fafafa;
+  --ol-overlay-bg: rgba(5, 8, 13, 0.64);
 
-  --ol-style-shell-bg: linear-gradient(180deg, rgba(29,29,32,0.94), rgba(24,24,27,0.92));
-  --ol-style-shell-border: rgba(255,255,255,0.07);
-  --ol-style-shell-shadow: none;
-  --ol-style-card-bg: rgba(34,34,37,0.94);
-  --ol-style-card-bg-active: rgba(39,39,43,0.96);
-  --ol-style-card-border: rgba(255,255,255,0.07);
-  --ol-style-card-border-active: rgba(96,165,250,0.72);
-  --ol-style-card-shadow: none;
-  --ol-style-card-shadow-active: 0 0 0 1px rgba(96,165,250,0.72);
-  --ol-style-card-ink: #f4f7fb;
-  --ol-style-card-ink-2: rgba(244,247,251,0.86);
-  --ol-style-card-ink-3: rgba(244,247,251,0.64);
-  --ol-style-card-icon-bg: rgba(255,255,255,0.06);
-  --ol-style-card-icon-bg-active: rgba(96,165,250,0.16);
-  --ol-style-delete-bg: rgba(255,255,255,0.05);
+  --ol-style-shell-bg: linear-gradient(180deg, rgba(24, 24, 27, 0.96), rgba(20, 20, 23, 0.94));
+  --ol-style-shell-border: rgba(226,232,240,0.09);
+  --ol-style-shell-shadow: 0 26px 70px -42px rgba(0,0,0,0.66);
+  --ol-style-card-bg: linear-gradient(180deg, rgba(39, 39, 42, 0.96), rgba(24, 24, 27, 0.94));
+  --ol-style-card-bg-active: linear-gradient(180deg, rgba(51, 51, 56, 0.98), rgba(39, 39, 42, 0.96));
+  --ol-style-card-border: rgba(226,232,240,0.09);
+  --ol-style-card-border-active: rgba(116,183,255,0.72);
+  --ol-style-card-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+  --ol-style-card-shadow-active: 0 0 0 1px rgba(116,183,255,0.70), 0 18px 42px -28px rgba(37,99,235,0.48);
+  --ol-style-card-ink: #fafafa;
+  --ol-style-card-ink-2: rgba(250,250,250,0.86);
+  --ol-style-card-ink-3: rgba(250,250,250,0.64);
+  --ol-style-card-icon-bg: rgba(226,232,240,0.07);
+  --ol-style-card-icon-bg-active: rgba(116,183,255,0.17);
+  --ol-style-delete-bg: rgba(226,232,240,0.06);
   --ol-style-delete-border: rgba(248,113,113,0.34);
-  --ol-style-add-tile-bg: rgba(255,255,255,0.02);
-  --ol-style-add-tile-icon-bg: rgba(255,255,255,0.10);
-  --ol-style-add-tile-border: rgba(255,255,255,0.10);
-  --ol-style-input-bg: rgba(255,255,255,0.04);
-  --ol-style-input-border: rgba(255,255,255,0.08);
-  --ol-style-input-shadow: none;
-  --ol-style-subtle-bg: rgba(255,255,255,0.03);
-  --ol-style-subtle-border: rgba(255,255,255,0.06);
-  --ol-style-subtle-shadow: none;
-  --ol-style-editor-bg: linear-gradient(180deg, rgba(27,27,30,0.96), rgba(23,23,26,0.94));
-  --ol-style-editor-border: rgba(255,255,255,0.07);
-  --ol-style-editor-shadow: none;
+  --ol-style-add-tile-bg: rgba(226,232,240,0.035);
+  --ol-style-add-tile-icon-bg: rgba(226,232,240,0.10);
+  --ol-style-add-tile-border: rgba(226,232,240,0.12);
+  --ol-style-input-bg: rgba(9, 9, 11, 0.38);
+  --ol-style-input-border: rgba(226,232,240,0.10);
+  --ol-style-input-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+  --ol-style-subtle-bg: rgba(226,232,240,0.05);
+  --ol-style-subtle-border: rgba(226,232,240,0.08);
+  --ol-style-subtle-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+  --ol-style-editor-bg: linear-gradient(180deg, rgba(24, 24, 27, 0.98), rgba(20, 20, 23, 0.96));
+  --ol-style-editor-border: rgba(226,232,240,0.10);
+  --ol-style-editor-shadow: 0 30px 90px -42px rgba(0,0,0,0.70);
 
-  --ol-capsule-pill-bg: #1a1a1e;
-  --ol-capsule-pill-border: rgba(255, 255, 255, 0.10);
-  --ol-capsule-pill-shadow: 0 18px 50px -10px rgba(0, 0, 0, 0.42), 0 0 0 0.5px rgba(0, 0, 0, 0.24);
+  --ol-capsule-pill-bg: #1b222c;
+  --ol-capsule-pill-border: rgba(226, 232, 240, 0.12);
+  --ol-capsule-pill-shadow: 0 18px 50px -10px rgba(0, 0, 0, 0.48), 0 0 0 0.5px rgba(226, 232, 240, 0.06);
   --ol-capsule-pill-inset: inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
-  --ol-capsule-btn-bg: #2a2a2f;
-  --ol-capsule-btn-bg-confirm: #2e2e33;
+  --ol-capsule-btn-bg: #26313f;
+  --ol-capsule-btn-bg-confirm: #2b3848;
   --ol-capsule-btn-ink: #f4f7fb;
-  --ol-capsule-btn-border: rgba(255, 255, 255, 0.12);
+  --ol-capsule-btn-border: rgba(226, 232, 240, 0.14);
   --ol-capsule-center-ink: rgba(244, 247, 251, 0.72);
   --ol-capsule-confirm-bg: var(--ol-capsule-btn-bg-confirm);
   --ol-capsule-confirm-ink: var(--ol-capsule-btn-ink);
-  --ol-capsule-badge-bg: rgba(26, 26, 30, 0.94);
-  --ol-capsule-badge-border: rgba(96, 165, 250, 0.28);
+  --ol-capsule-badge-bg: rgba(27, 34, 44, 0.94);
+  --ol-capsule-badge-border: rgba(116, 183, 255, 0.30);
 }
 
 * { box-sizing: border-box; }

@@ -42,10 +42,10 @@ use crate::correction::apply_correction_rules;
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::insertion::TextInserter;
 use crate::persistence::{
-    sync_style_pack_preferences, ContextAnalysisStore, ContextCaptureStore, CorrectionRuleStore,
-    CredentialAccount, CredentialsVault, DictionaryStore, GeneratedReportStore, HistoryStore,
-    PreferencesStore, ReportTemplateStore, RewriteHistoryStore, ScreenshotAggregationStore,
-    ScreenshotRecordStore, StylePackStore,
+    sync_style_pack_preferences, ActivityStore, ContextAnalysisStore, ContextCaptureStore,
+    CorrectionRuleStore, CredentialAccount, CredentialsVault, DictionaryStore, GeneratedReportStore,
+    HistoryStore, PreferencesStore, ReportTemplateStore, RewriteHistoryStore,
+    ScreenshotAggregationStore, ScreenshotRecordStore, StylePackStore,
 };
 
 use crate::llm_gemini::{GeminiConfig, GeminiProvider};
@@ -88,6 +88,9 @@ use meeting_summary::*;
 use polish_flow::*;
 use rewrite_flow::*;
 use qa_session::*;
+
+// less_computer_sync 命令的数据源（浮窗 webview 冷加载竞态补偿，见 dictation.rs）。
+pub(crate) use dictation::less_computer_event_backlog;
 
 pub(super) fn qa_event_target() -> &'static str {
     #[cfg(target_os = "android")]
@@ -271,6 +274,8 @@ pub(crate) struct Inner {
     pub(crate) screenshot_aggregation: ScreenshotAggregationStore,
     report_templates: ReportTemplateStore,
     generated_reports: GeneratedReportStore,
+    /// 每日活动计数（热力图数据源），与 history 的保留策略解耦。
+    activity: ActivityStore,
     pub(crate) prefs: PreferencesStore,
     style_packs: StylePackStore,
     vocab: DictionaryStore,
@@ -315,6 +320,7 @@ pub(crate) struct Inner {
     /// 自定义组合键监听器（global-hotkey crate）。当 `prefs.hotkey.trigger == Custom` 时
     /// 代替 modifier-only 的 hotkey monitor。`None` 表示不使用自定义组合键或还没成功安装。
     combo_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
+    side_aware_combo: Mutex<Option<crate::side_aware_combo::SideAwareComboMonitor>>,
     translation_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
     switch_style_hotkey: Mutex<Option<ActionHotkeyMonitor>>,
     open_app_hotkey: Mutex<Option<ActionHotkeyMonitor>>,
@@ -341,6 +347,11 @@ pub(crate) struct Inner {
     /// 最近一次应用到 capsule 窗口的几何状态。避免录音 level tick 反复触发
     /// resize / reposition。
     capsule_layout: Mutex<Option<CapsuleLayoutState>>,
+    /// 预备态标志：按下热键即"乐观显示"胶囊（带入场动画），此时麦克风还在 cpal
+    /// init 窗口内、没有第一帧 PCM。为 true 时 emit_capsule 把 Recording payload 的
+    /// `warming` 打成 true（前端渲染"待命"光效）；`level_handler` 首次触发（PCM 真的
+    /// 流入）后置 false，光条"点亮"进入正式录音。begin_session 每次入场重置为 true。
+    capsule_warming: AtomicBool,
     /// QA 用的 ASR 句柄。必须跟 active_asr_provider 保持一致，避免浮窗走不同入口。
     qa_asr: Mutex<Option<ActiveAsr>>,
     /// QA 用的 Recorder 句柄。
@@ -458,6 +469,11 @@ impl Coordinator {
                 CorrectionRuleStore::new_fallback()
             });
 
+            let activity = ActivityStore::load().unwrap_or_else(|e| {
+                log::error!("[coord] ActivityStore init failed: {e}; 活动计数降级为内存态");
+                ActivityStore::new_fallback()
+            });
+
             Self {
                 inner: Arc::new(Inner {
                     app: Mutex::new(None),
@@ -469,6 +485,7 @@ impl Coordinator {
                     report_templates,
                     generated_reports,
                     rewrite_history,
+                    activity,
                     prefs,
                     style_packs,
                     vocab,
@@ -486,6 +503,7 @@ impl Coordinator {
                     session_cooldown_until: Mutex::new(None),
                     shortcut_recording_active: AtomicBool::new(false),
                     combo_hotkey: Mutex::new(None),
+                    side_aware_combo: Mutex::new(None),
                     translation_hotkey: Mutex::new(None),
                     switch_style_hotkey: Mutex::new(None),
                     open_app_hotkey: Mutex::new(None),
@@ -498,6 +516,7 @@ impl Coordinator {
                     last_capsule_state: Mutex::new(None),
                     qa_state: Mutex::new(QaSessionState::default()),
                     capsule_layout: Mutex::new(None),
+                    capsule_warming: AtomicBool::new(false),
                     qa_asr: Mutex::new(None),
                     qa_recorder: Mutex::new(None),
                     meeting_session: Mutex::new(None),
@@ -594,6 +613,11 @@ impl Coordinator {
             CorrectionRuleStore::new_fallback()
         });
 
+        let activity = ActivityStore::load().unwrap_or_else(|e| {
+            log::error!("[coord] ActivityStore init failed: {e}; 活动计数降级为内存态");
+            ActivityStore::new_fallback()
+        });
+
         Self {
             inner: Arc::new(Inner {
                 app: Mutex::new(None),
@@ -605,6 +629,7 @@ impl Coordinator {
                 report_templates,
                 generated_reports,
                 rewrite_history,
+                activity,
                 prefs,
                 style_packs,
                 vocab,
@@ -624,6 +649,7 @@ impl Coordinator {
                 session_cooldown_until: Mutex::new(None),
                 shortcut_recording_active: AtomicBool::new(false),
                 combo_hotkey: Mutex::new(None),
+                side_aware_combo: Mutex::new(None),
                 translation_hotkey: Mutex::new(None),
                 switch_style_hotkey: Mutex::new(None),
                 open_app_hotkey: Mutex::new(None),
@@ -636,6 +662,7 @@ impl Coordinator {
                 last_capsule_state: Mutex::new(None),
                 qa_state: Mutex::new(QaSessionState::default()),
                 capsule_layout: Mutex::new(None),
+                capsule_warming: AtomicBool::new(false),
                 qa_asr: Mutex::new(None),
                 qa_recorder: Mutex::new(None),
                 meeting_session: Mutex::new(None),
@@ -961,18 +988,41 @@ impl Coordinator {
     pub fn update_combo_hotkey_binding(&self) {
         let prefs = self.inner.prefs.get();
         if crate::shortcut_binding::legacy_modifier_trigger(&prefs.dictation_hotkey).is_some() {
-            // 修饰键单键由 HotkeyMonitor 处理，组合键 monitor 要释放。
             take_combo_hotkey_on_main_thread(&self.inner);
+            self.inner.side_aware_combo.lock().take();
             log::info!("[coord] combo hotkey 已关闭（modifier-only）");
             return;
         }
         let binding = prefs.dictation_hotkey.clone();
         if is_unconfigured_shortcut(&binding) {
-            // Custom 但没录到有效主键：清掉旧 monitor，避免旧快捷键继续生效。
             take_combo_hotkey_on_main_thread(&self.inner);
+            self.inner.side_aware_combo.lock().take();
             log::info!("[coord] combo hotkey 已关闭（无绑定）");
             return;
-        };
+        }
+
+        if crate::shortcut_binding::binding_requires_side_aware_hook(&binding) {
+            take_combo_hotkey_on_main_thread(&self.inner);
+            self.inner.side_aware_combo.lock().take();
+            let (tx, rx) = mpsc::channel::<ComboHotkeyEvent>();
+            match crate::side_aware_combo::SideAwareComboMonitor::start(binding, tx) {
+                Ok(monitor) => {
+                    *self.inner.side_aware_combo.lock() = Some(monitor);
+                    let bridge_inner = Arc::clone(&self.inner);
+                    std::thread::Builder::new()
+                        .name("openless-side-combo-bridge".into())
+                        .spawn(move || combo_hotkey_bridge_loop(bridge_inner, rx))
+                        .ok();
+                    log::info!("[coord] side-aware combo hotkey listener installed (via update)");
+                }
+                Err(e) => {
+                    log::warn!("[coord] update side-aware combo binding 失败: {e}");
+                }
+            }
+            return;
+        }
+
+        self.inner.side_aware_combo.lock().take();
         let app = self.inner.app.lock().clone();
         let Some(app) = app else {
             log::warn!("[coord] update combo hotkey binding: AppHandle 未 bind，跳过");
@@ -1219,11 +1269,6 @@ impl Coordinator {
         close_qa_panel(&self.inner);
     }
 
-    /// 用户点 📌 切换 pinned 状态。pinned=true 时浮窗不自动隐藏。
-    pub fn qa_window_pin(&self, pinned: bool) {
-        self.inner.qa_state.lock().pinned = pinned;
-        log::info!("[coord] QA window pinned={pinned}");
-    }
 
     /// 用户点 ✕ / 按 Esc 关 Less Computer 浮窗：隐藏窗口 + 结束连续对话
     /// （下次说话开新会话，不再 --continue 续旧上下文）。
@@ -1237,16 +1282,27 @@ impl Coordinator {
         }
     }
 
-    /// 前端按内容测高后回传，后端 clamp + bottom-anchored 重新摆放 Less Computer 浮窗。
-    pub fn less_computer_window_resize(&self, height: f64) {
-        if let Some(app) = self.inner.app.lock().clone() {
-            crate::resize_less_computer_window(&app, height);
-        }
-    }
-
     /// 内联审批卡的 Approve / Deny 回执：解析等待中的 token。
     pub fn less_computer_approve(&self, token: &str, approved: bool) {
         dictation::resolve_less_computer_approval(token, approved);
+    }
+
+    /// 浮窗打字输入：文字指令直接进入 Less Computer 执行链（与语音转写同一条
+    /// 路径——同样的护栏钳制 / 审批循环 / 连续会话语义），跳过录音与 ASR。
+    pub fn less_computer_submit_text(&self, text: String) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let session_id = crate::coordinator_state::new_session_id();
+            if let Err(e) =
+                dictation::run_voice_agent_transcript(&inner, session_id, text, 0).await
+            {
+                log::warn!("[less-computer] text submit run failed: {e}");
+            }
+        });
     }
 
     pub fn history(&self) -> &HistoryStore {
@@ -1271,6 +1327,10 @@ impl Coordinator {
 
     pub fn generated_reports(&self) -> &GeneratedReportStore {
         &self.inner.generated_reports
+    }
+
+    pub fn activity(&self) -> &ActivityStore {
+        &self.inner.activity
     }
 
     pub fn prefs(&self) -> &PreferencesStore {
@@ -2056,14 +2116,18 @@ fn should_try_non_tsf_insertion_fallback(
 }
 
 #[cfg(target_os = "windows")]
-fn insert_via_non_tsf_fallback(
+pub(super) fn insert_via_non_tsf_fallback(
     inner: &Arc<Inner>,
     polished: &str,
     _restore_clipboard: bool,
     _paste_shortcut: PasteShortcut,
 ) -> InsertStatus {
+    let prefs = inner.prefs.get();
+    let sendinput_options = dictation::windows_sendinput_options_from_prefs(&prefs);
     let status = finish_non_tsf_insertion_fallback(
-        || inner.inserter.insert_via_unicode_keystrokes(polished),
+        || inner
+            .inserter
+            .insert_via_unicode_keystrokes(polished, sendinput_options),
         || inner.inserter.copy_fallback(polished),
     );
 
@@ -2304,7 +2368,8 @@ fn build_active_llm_provider(llm_thinking_enabled: bool) -> anyhow::Result<Activ
         .trim_end_matches('/')
         .to_string();
     let config = OpenAICompatibleConfig::new(active, "OpenLess LLM", base_url, api_key, model)
-        .with_thinking_enabled(llm_thinking_enabled);
+        .with_thinking_enabled(llm_thinking_enabled)
+        .with_extra_headers(CredentialsVault::get_active_llm_extra_headers());
     Ok(ActiveLLMProvider::OpenAI(OpenAICompatibleLLMProvider::new(
         config,
     )))
@@ -2329,6 +2394,7 @@ fn resolve_ark_endpoint_with_policy(
 #[cfg(test)]
 mod tests {
     use super::dictation::abort_recording_with_error;
+    use super::dictation::{handle_pressed_edge, handle_released_edge};
     use super::*;
     use crate::types::{HotkeyMode, HotkeyTrigger};
     use once_cell::sync::Lazy;
@@ -3091,7 +3157,13 @@ mod tests {
     #[test]
     fn focus_restore_failure_uses_specific_error_code_when_insert_fails() {
         assert_eq!(
-            dictation_error_code(InsertStatus::Failed, false, false, false),
+            dictation_error_code(
+                InsertStatus::Failed,
+                false,
+                false,
+                false,
+                crate::types::WindowsInsertionMode::Tsf,
+            ),
             Some("focusRestoreFailed")
         );
     }
@@ -3108,8 +3180,28 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn tsf_required_failure_keeps_tsf_error_when_focus_was_ready() {
         assert_eq!(
-            dictation_error_code(InsertStatus::Failed, false, true, false),
+            dictation_error_code(
+                InsertStatus::Failed,
+                false,
+                true,
+                false,
+                crate::types::WindowsInsertionMode::Tsf,
+            ),
             Some("windowsImeTsfRequired")
+        );
+    }
+
+    #[test]
+    fn sendinput_only_mode_skips_tsf_required_error() {
+        assert_eq!(
+            dictation_error_code(
+                InsertStatus::Failed,
+                false,
+                true,
+                false,
+                crate::types::WindowsInsertionMode::SendInput,
+            ),
+            None
         );
     }
 

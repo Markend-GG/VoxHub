@@ -14,6 +14,24 @@ use super::*;
 const HOTKEY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 const STREAMING_INSERT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(12);
 
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacosKeylessDictationProvider {
+    LocalQwen3,
+    AppleSpeech,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_keyless_dictation_provider(active_asr: &str) -> Option<MacosKeylessDictationProvider> {
+    if crate::asr::local::is_local_qwen3(active_asr) {
+        Some(MacosKeylessDictationProvider::LocalQwen3)
+    } else if crate::asr::local::is_apple_speech(active_asr) {
+        Some(MacosKeylessDictationProvider::AppleSpeech)
+    } else {
+        None
+    }
+}
+
 /// Less Computer 浮窗的 Tauri 事件名（前端 LessComputerPanel 订阅）。
 const LESS_COMPUTER_EVENT: &str = "less-computer:event";
 
@@ -48,10 +66,111 @@ pub(super) fn resolve_less_computer_approval(token: &str, approved: bool) {
     }
 }
 
+/// Less Computer 事件缓冲：浮窗首次创建时 webview 冷加载需要数百毫秒，此时后端
+/// emit 的事件（尤其第一条 `user` —— 用户说出的那句话）会先于前端 listener 注册
+/// 被丢弃，表现为「AI 在干活、但面板上没有我说的话」。这里按单调 seq 缓存当前
+/// 会话的全部事件，前端 mount 后调 `less_computer_sync` 全量重放，实时流按 seq
+/// 去重衔接。fresh=true 的 user 事件 = 新会话，清空重来（seq 不回卷，去重不混淆）。
+/// 容量上限防极端长会话无界增长（超限丢最旧 —— 重放的意义在冷启动窗口，尾部足够）。
+const LESS_COMPUTER_EVENT_LOG_CAP: usize = 2048;
+
+struct LessComputerEventLog {
+    next_seq: u64,
+    events: std::collections::VecDeque<serde_json::Value>,
+}
+
+static LESS_COMPUTER_EVENT_LOG: std::sync::OnceLock<std::sync::Mutex<LessComputerEventLog>> =
+    std::sync::OnceLock::new();
+
+fn less_computer_event_log() -> &'static std::sync::Mutex<LessComputerEventLog> {
+    LESS_COMPUTER_EVENT_LOG.get_or_init(|| {
+        std::sync::Mutex::new(LessComputerEventLog {
+            next_seq: 0,
+            events: std::collections::VecDeque::new(),
+        })
+    })
+}
+
+/// 纯逻辑：给 payload 编 seq 并写入缓冲（fresh user 先清空，超限丢最旧）。
+fn log_less_computer_event(log: &mut LessComputerEventLog, payload: &mut serde_json::Value) {
+    let fresh_user = payload.get("kind").and_then(|k| k.as_str()) == Some("user")
+        && payload.get("fresh").and_then(|f| f.as_bool()) == Some(true);
+    if fresh_user {
+        log.events.clear();
+    }
+    log.next_seq += 1;
+    payload["seq"] = serde_json::json!(log.next_seq);
+    log.events.push_back(payload.clone());
+    while log.events.len() > LESS_COMPUTER_EVENT_LOG_CAP {
+        log.events.pop_front();
+    }
+}
+
+/// `less_computer_sync` 命令的数据源：当前会话已发生的事件（seq 升序）。
+pub(crate) fn less_computer_event_backlog() -> Vec<serde_json::Value> {
+    less_computer_event_log()
+        .lock()
+        .map(|log| log.events.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// 往 Less Computer 浮窗发一条事件（macOS only；前端按 `kind` 渲染聊天结构）。
-fn emit_less_computer(inner: &Arc<Inner>, payload: serde_json::Value) {
+/// 每条事件先记入缓冲并带上 seq，再实时 emit —— 锁中毒时跳过缓冲照常 emit
+/// （无 seq 事件前端无条件应用，退化为修复前行为而不是丢事件）。
+fn emit_less_computer(inner: &Arc<Inner>, mut payload: serde_json::Value) {
+    if let Ok(mut log) = less_computer_event_log().lock() {
+        log_less_computer_event(&mut log, &mut payload);
+    }
     if let Some(app) = inner.app.lock().clone() {
         let _ = app.emit_to("less-computer", LESS_COMPUTER_EVENT, payload);
+    }
+}
+
+#[cfg(test)]
+mod less_computer_event_log_tests {
+    use super::{log_less_computer_event, LessComputerEventLog, LESS_COMPUTER_EVENT_LOG_CAP};
+
+    fn new_log() -> LessComputerEventLog {
+        LessComputerEventLog {
+            next_seq: 0,
+            events: std::collections::VecDeque::new(),
+        }
+    }
+
+    #[test]
+    fn assigns_monotonic_seq_and_clears_on_fresh_user() {
+        let mut log = new_log();
+        let mut e1 = serde_json::json!({"kind":"user","text":"第一句","fresh":true});
+        let mut e2 = serde_json::json!({"kind":"delta","text":"好的"});
+        log_less_computer_event(&mut log, &mut e1);
+        log_less_computer_event(&mut log, &mut e2);
+        assert_eq!(e1["seq"], 1);
+        assert_eq!(e2["seq"], 2);
+        assert_eq!(log.events.len(), 2);
+
+        // fresh=true 开新会话：缓冲清空，seq 继续单调（前端按 seq 去重不回卷）。
+        let mut e3 = serde_json::json!({"kind":"user","text":"新会话","fresh":true});
+        log_less_computer_event(&mut log, &mut e3);
+        assert_eq!(log.events.len(), 1);
+        assert_eq!(e3["seq"], 3);
+
+        // 追加轮次（fresh=false / 缺省）不清空。
+        let mut e4 = serde_json::json!({"kind":"user","text":"追加","fresh":false});
+        log_less_computer_event(&mut log, &mut e4);
+        assert_eq!(log.events.len(), 2);
+        assert_eq!(log.events.front().unwrap()["seq"], 3);
+    }
+
+    #[test]
+    fn caps_backlog_dropping_oldest() {
+        let mut log = new_log();
+        for i in 0..(LESS_COMPUTER_EVENT_LOG_CAP + 5) {
+            let mut e = serde_json::json!({"kind":"delta","text":i.to_string()});
+            log_less_computer_event(&mut log, &mut e);
+        }
+        assert_eq!(log.events.len(), LESS_COMPUTER_EVENT_LOG_CAP);
+        // 丢最旧：队首是第 6 条（seq 从 1 起）。
+        assert_eq!(log.events.front().unwrap()["seq"], 6);
     }
 }
 
@@ -77,9 +196,10 @@ fn emit_less_computer(inner: &Arc<Inner>, payload: serde_json::Value) {
 ///    - 失败：`(raw_text, Some(reason), false)` — 流式过程出错，调用方走 raw 一次性兜底
 ///    - 不支持：`run_streaming_polish` 内部直接调 `polish_or_passthrough` 透明降级
 ///
-/// **不在流式路径里做**：`apply_chinese_script_preference` / `apply_correction_rules`
-/// 这两步在 v1 跳过 —— 字符已经一边流一边落出去了，不好回退。需要的话只能关 toggle 走
-/// 一次性路径。
+/// **流式路径里的字形转换**：Simplified（t2s）在 `on_delta` 对每个 delta 就地转换
+/// （近乎逐字映射，跨 delta 拆散词条也几乎总是正确）；Traditional（s2t）有真歧义，
+/// `streaming_insert_eligible` 仍把它挡在一次性路径。`apply_correction_rules` 依旧
+/// 不在流式路径里做 —— 字符已经落出去，不好回退。
 #[allow(clippy::too_many_arguments)]
 async fn run_streaming_polish(
     inner: &Arc<Inner>,
@@ -154,13 +274,39 @@ async fn run_streaming_polish(
     // 与用户实际看到的内容一致；（b）pr-agent #412 反馈 \"saved output diverges
     // from what the user actually sees\"。
     let (tx, rx) = std::sync::mpsc::channel::<String>();
+    #[cfg(target_os = "windows")]
+    let sendinput_options =
+        windows_sendinput_options_from_prefs(&inner.prefs.get());
     let typer_handle = tokio::task::spawn_blocking(move || {
-        drain_streaming_insert_deltas(rx, STREAMING_INSERT_FLUSH_INTERVAL)
+        #[cfg(target_os = "windows")]
+        {
+            drain_streaming_insert_deltas_with_sendinput_options(
+                rx,
+                STREAMING_INSERT_FLUSH_INTERVAL,
+                sendinput_options,
+            )
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            drain_streaming_insert_deltas(rx, STREAMING_INSERT_FLUSH_INTERVAL)
+        }
     });
 
     // 3. 调流式润色，on_delta 塞 mpsc；should_cancel 检查 dictation 取消旗。
     let inner_for_cancel = Arc::clone(inner);
     let should_cancel = move || inner_for_cancel.state.lock().cancelled;
+    // Simplified 目标：对每个 delta 就地 t2s（转换器建一次，避免每个 delta 重新加载
+    // 词典）。Traditional 不会走到这里（eligibility 已降级），Auto 无需转换。
+    let delta_converter = (chinese_script_preference
+        == crate::types::ChineseScriptPreference::Simplified)
+        .then(|| {
+            ferrous_opencc::OpenCC::from_config(ferrous_opencc::config::BuiltinConfig::T2s)
+                .map_err(|e| {
+                    log::warn!("[coord] streaming_insert: OpenCC t2s init failed, deltas stay unconverted: {e}");
+                })
+                .ok()
+        })
+        .flatten();
     let outcome = super::polish_or_passthrough_streaming(
         raw,
         mode,
@@ -173,7 +319,11 @@ async fn run_streaming_polish(
         front_app,
         prior_turns,
         move |delta: &str| {
-            let _ = tx.send(delta.to_string());
+            let converted = match delta_converter.as_ref() {
+                Some(converter) => converter.convert(delta),
+                None => delta.to_string(),
+            };
+            let _ = tx.send(converted);
         },
         should_cancel,
     )
@@ -294,11 +444,41 @@ async fn run_streaming_polish(
     }
 }
 
+#[cfg(target_os = "windows")]
+pub(super) fn windows_sendinput_options_from_prefs(
+    prefs: &crate::types::UserPreferences,
+) -> crate::unicode_keystroke::WindowsSendInputOptions {
+    crate::unicode_keystroke::WindowsSendInputOptions {
+        newline_mode: prefs.windows_sendinput_newline_mode,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_insertion_allows_streaming(mode: crate::types::WindowsInsertionMode) -> bool {
+    mode == crate::types::WindowsInsertionMode::SendInput
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_insertion_allows_streaming(_mode: crate::types::WindowsInsertionMode) -> bool {
+    true
+}
+
 fn drain_streaming_insert_deltas(
     rx: std::sync::mpsc::Receiver<String>,
     flush_interval: std::time::Duration,
 ) -> (String, Option<String>) {
     drain_streaming_insert_deltas_with(rx, flush_interval, flush_streaming_insert_buffer)
+}
+
+#[cfg(target_os = "windows")]
+fn drain_streaming_insert_deltas_with_sendinput_options(
+    rx: std::sync::mpsc::Receiver<String>,
+    flush_interval: std::time::Duration,
+    options: crate::unicode_keystroke::WindowsSendInputOptions,
+) -> (String, Option<String>) {
+    drain_streaming_insert_deltas_with(rx, flush_interval, move |pending, typed| {
+        flush_streaming_insert_buffer_with_options(pending, typed, options)
+    })
 }
 
 fn drain_streaming_insert_deltas_with<F>(
@@ -351,6 +531,17 @@ fn flush_streaming_insert_buffer(pending: &mut String, typed_text: &mut String) 
     )
 }
 
+#[cfg(target_os = "windows")]
+fn flush_streaming_insert_buffer_with_options(
+    pending: &mut String,
+    typed_text: &mut String,
+    options: crate::unicode_keystroke::WindowsSendInputOptions,
+) -> Option<String> {
+    flush_streaming_insert_buffer_with(pending, typed_text, move |text| {
+        crate::unicode_keystroke::type_unicode_chunk_with_options(text, options)
+    })
+}
+
 fn flush_streaming_insert_buffer_with<F>(
     pending: &mut String,
     typed_text: &mut String,
@@ -397,7 +588,7 @@ fn finalize_polished_text(
     polished: String,
     translation_active: bool,
     _raw_uses_llm: bool,
-    mode: PolishMode,
+    _mode: PolishMode,
     polish_error: &Option<String>,
     chinese_script_preference: crate::types::ChineseScriptPreference,
     correction_rules: &[crate::types::CorrectionRule],
@@ -443,14 +634,19 @@ fn streaming_insert_eligible(
     mode: PolishMode,
     raw_uses_llm: bool,
     chinese_script_preference: crate::types::ChineseScriptPreference,
+    windows_insertion_mode: crate::types::WindowsInsertionMode,
 ) -> bool {
     streaming_insert_enabled
         && !translation_active
         && (mode != PolishMode::Raw || raw_uses_llm)
-        // 非 Auto 字形（简/繁）要对成品文本做确定性 OpenCC 转换，而流式是边出边落字、
-        // 没有成品可后处理（finalize_polished_text 在 already_streamed 时直接 return）。
-        // → 非 Auto 时关掉流式，走一次性路径，确保简/繁转换真正生效（issue #643）。
-        && chinese_script_preference == crate::types::ChineseScriptPreference::Auto
+        // 固定字形的 OpenCC 转换与流式的兼容性按方向区分：
+        //   - Simplified（t2s）：近乎逐字映射，对每个 delta 就地转换即可（跨 delta
+        //     边界拆散的词级条目退化为逐字转换，t2s 方向仍几乎总是正确），流式放行
+        //     —— 否则固定简体的用户流式静默失效且无从得知原因。
+        //   - Traditional（s2t）：一简对多繁有真歧义（发→發/髮），需要全文上下文，
+        //     仍走一次性路径确保转换准确（issue #643）。
+        && chinese_script_preference != crate::types::ChineseScriptPreference::Traditional
+        && windows_insertion_allows_streaming(windows_insertion_mode)
 }
 
 fn default_done_message(status: InsertStatus, polish_failed: bool) -> Option<String> {
@@ -612,7 +808,9 @@ pub(super) async fn handle_released(inner: &Arc<Inner>) {
 }
 
 /// Less Computer 收尾：把转写当作指令交给无头 Claude，结果以胶囊展示（不插入到光标）。
-async fn run_voice_agent_transcript(
+/// pub(super)：除语音路径外，浮窗的打字输入（less_computer_submit_text 命令）
+/// 也以文字直接进入同一条执行链（同样的护栏 / 审批 / 连续会话语义）。
+pub(super) async fn run_voice_agent_transcript(
     inner: &Arc<Inner>,
     _session_id: SessionId,
     transcript: String,
@@ -628,7 +826,7 @@ async fn run_voice_agent_transcript(
         CapsuleState::Polishing,
         0.0,
         elapsed,
-        Some("Claude 处理中…".to_string()),
+        Some("Agent 处理中…".to_string()),
         None,
     );
 
@@ -724,7 +922,7 @@ async fn run_voice_agent_transcript(
         LessComputerOutcome::Done { text, cost_usd } => {
             let text = text.trim().to_string();
             if text.is_empty() {
-                let msg = "Claude 无结果（确认已登录 claude 且额度充足）".to_string();
+                let msg = "Agent 无结果（确认已登录且额度充足）".to_string();
                 emit_less_computer(
                     inner,
                     serde_json::json!({ "kind": "error", "message": msg }),
@@ -788,11 +986,22 @@ async fn run_less_computer_once(
     extra_allow_patterns: &[String],
     continue_session: bool,
 ) -> LessComputerOutcome {
-    // 护栏 deny：默认全量；审批放行的模式从 deny 中剔除。
-    // 审批 UI 只回传命中的单个高风险子串，但同一风险有等价写法（如 --force / -f）。
-    // 按「风险等价组」整组放行：只放行被点那一个会让等价写法仍卡在 deny（deny 优先级高于
-    // allow）→ 命令仍被拦。见 guard::risk_equivalent_patterns。
-    let mut deny = crate::coding_agent::guard::default_deny_rules();
+    use crate::coding_agent::CodingAgentProvider;
+
+    let provider = CodingAgentProvider::from_pref(&inner.prefs.get().coding_agent_provider);
+    // 可配置可执行文件：用户在「高级 → Less Computer」填了路径就用它，留空/空白按后端取默认
+    // （claude / opencode）。trim 后为空视作未配置。
+    let configured_exe: Option<String> = inner
+        .prefs
+        .get()
+        .coding_agent_exe
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    // 审批放行的高风险子串按「风险等价组」整组放行（如 --force / -f）：只放行被点那一个会让
+    // 等价写法仍被拦。Claude / OpenCode 共用这组前缀。见 guard::risk_equivalent_patterns。
     let approved_patterns: Vec<String> = extra_allow_patterns
         .iter()
         .flat_map(|p| {
@@ -803,61 +1012,15 @@ async fn run_less_computer_once(
                 group.into_iter().map(|s| s.to_string()).collect()
             }
         })
+        // 不可安全批准的模式（提权/毁盘/系统级如 "sudo "、"dd if=" 等，deny_rule_for_pattern
+        // 返回 None）在审批阶段保持拦截，不注入 allow 列表也不生成 OpenCode allow glob。
+        .filter(|p| crate::coding_agent::guard::deny_rule_for_pattern(p).is_some())
         .collect();
-    // 只放行「可批准」的命令：deny_rule_for_pattern 返回该 pattern 在 default_deny_rules 里的
-    // 精确 deny 规则；提权/毁盘/系统级等不可安全表达的命令返回 None → 即使被批准也保持拦截
-    // （fail-closed），且不向 allow 注入畸形规则。允许的 allow 规则与被移除的 deny 严格一致。
-    let allow_rules: Vec<String> = approved_patterns
-        .iter()
-        .filter_map(|p| crate::coding_agent::guard::deny_rule_for_pattern(p))
-        .map(|rule| rule.to_string())
-        .collect();
-    if !allow_rules.is_empty() {
-        deny.retain(|d| !allow_rules.iter().any(|a| a == d));
-    }
-    let settings_json = serde_json::json!({
-        "permissions": { "defaultMode": mode.as_cli_arg(), "deny": deny }
-    });
-    let settings_path = std::env::temp_dir().join(format!(
-        "openless-less-computer-guard-{}.json",
-        uuid::Uuid::new_v4()
-    ));
-    // fail-closed：序列化或写入失败时立即中止，绝不在「无护栏」下把无效路径交给
-    // `claude -p --settings`（找不到文件 = 完全裸跑）。宁可不跑也不裸跑。
-    let settings_bytes = match serde_json::to_vec_pretty(&settings_json) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("[less-computer] 序列化护栏配置失败: {e}");
-            return LessComputerOutcome::Failed {
-                message: "护栏配置写入失败，已中止（拒绝在无护栏下执行）".into(),
-            };
-        }
-    };
-    if let Err(e) = std::fs::write(&settings_path, settings_bytes) {
-        log::warn!("[less-computer] 写护栏配置失败: {e}");
-        return LessComputerOutcome::Failed {
-            message: "护栏配置写入失败，已中止（拒绝在无护栏下执行）".into(),
-        };
-    }
 
     let mut req = crate::coding_agent::CodingAgentRequest::new("less-computer", prompt.to_string());
     req.cwd = cwd.map(|p| p.to_path_buf());
     req.model = model.map(|m| m.to_string());
     req.permission_mode = mode;
-    // 写护栏成功后才设置：写失败已在上面 fail-closed 返回，不会带无效路径裸跑。
-    req.settings_json_path = Some(settings_path.clone());
-    // 去掉 WebFetch：无出站白名单时它是 prompt 注入 SSRF 面（诱导拉取内网/元数据端点）。
-    // 保留 WebSearch（走搜索引擎，不直接抓任意 URL）。
-    req.allowed_tools = vec![
-        "Bash".into(),
-        "Read".into(),
-        "Edit".into(),
-        "Write".into(),
-        "Glob".into(),
-        "Grep".into(),
-        "WebSearch".into(),
-    ];
-    req.allowed_tools.extend(allow_rules);
     // 真实任务（开应用、多步操作、读写文件）常超过 120s/0.5$ → 老是「运行超时」。放宽到
     // 5 分钟 / 2$，给多步任务足够空间；仍有硬上限兜底，不会无限跑/烧钱。
     req.max_budget_usd = Some(2.0);
@@ -869,9 +1032,97 @@ async fn run_less_computer_once(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_for_runner = Arc::clone(&cancel);
-    let run = async_runtime::spawn(async move {
-        crate::coding_agent::run_claude_agent("claude", req, tx, cancel_for_runner).await
-    });
+
+    // 护栏 + 运行器按 provider 分派。两条路径都 fail-closed：护栏配置生成失败一律中止，
+    // 绝不在无护栏下裸跑。`settings_path` 仅 Claude 路径用临时文件（OpenCode 走 env 注入，
+    // 无临时文件需清理）。
+    let settings_path: Option<std::path::PathBuf>;
+    let run = match provider {
+        CodingAgentProvider::ClaudeCodeCli => {
+            // 护栏 deny：默认全量；审批放行的模式从 deny 中剔除。
+            let mut deny = crate::coding_agent::guard::default_deny_rules();
+            // 只放行「可批准」的命令：deny_rule_for_pattern 返回该 pattern 在 default_deny_rules
+            // 里的精确 deny 规则；提权/毁盘/系统级等不可安全表达的命令返回 None → 即使被批准也
+            // 保持拦截（fail-closed），且不向 allow 注入畸形规则。
+            let allow_rules: Vec<String> = approved_patterns
+                .iter()
+                .filter_map(|p| crate::coding_agent::guard::deny_rule_for_pattern(p))
+                .map(|rule| rule.to_string())
+                .collect();
+            if !allow_rules.is_empty() {
+                deny.retain(|d| !allow_rules.iter().any(|a| a == d));
+            }
+            let settings_json = serde_json::json!({
+                "permissions": { "defaultMode": mode.as_cli_arg(), "deny": deny }
+            });
+            let path = std::env::temp_dir().join(format!(
+                "openless-less-computer-guard-{}.json",
+                uuid::Uuid::new_v4()
+            ));
+            // fail-closed：序列化或写入失败时立即中止，绝不把无效路径交给 `claude -p --settings`
+            //（找不到文件 = 完全裸跑）。宁可不跑也不裸跑。
+            let settings_bytes = match serde_json::to_vec_pretty(&settings_json) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::warn!("[less-computer] 序列化护栏配置失败: {e}");
+                    return LessComputerOutcome::Failed {
+                        message: "护栏配置写入失败，已中止（拒绝在无护栏下执行）".into(),
+                    };
+                }
+            };
+            if let Err(e) = std::fs::write(&path, settings_bytes) {
+                log::warn!("[less-computer] 写护栏配置失败: {e}");
+                return LessComputerOutcome::Failed {
+                    message: "护栏配置写入失败，已中止（拒绝在无护栏下执行）".into(),
+                };
+            }
+            settings_path = Some(path.clone());
+            req.settings_json_path = Some(path);
+            // 去掉 WebFetch：无出站白名单时它是 prompt 注入 SSRF 面。保留 WebSearch（走搜索引擎）。
+            req.allowed_tools = vec![
+                "Bash".into(),
+                "Read".into(),
+                "Edit".into(),
+                "Write".into(),
+                "Glob".into(),
+                "Grep".into(),
+                "WebSearch".into(),
+            ];
+            req.allowed_tools.extend(allow_rules);
+            let exe = configured_exe.unwrap_or_else(|| "claude".to_string());
+            async_runtime::spawn(async move {
+                crate::coding_agent::run_claude_agent(&exe, req, tx, cancel_for_runner).await
+            })
+        }
+        CodingAgentProvider::OpenCodeCli => {
+            // OpenCode 无 `--settings`，护栏走 `permission` 配置经 OPENCODE_CONFIG_CONTENT 注入。
+            // build_opencode_guard_config 默认 bash deny 高风险前缀、webfetch deny，审批放行的
+            // 前缀显式 allow。fail-closed：序列化失败立即中止，绝不无护栏裸跑。
+            let guard =
+                crate::coding_agent::guard::build_opencode_guard_config(&approved_patterns);
+            let guard_str = match serde_json::to_string(&guard) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("[less-computer] 序列化 OpenCode 护栏配置失败: {e}");
+                    return LessComputerOutcome::Failed {
+                        message: "护栏配置写入失败，已中止（拒绝在无护栏下执行）".into(),
+                    };
+                }
+            };
+            settings_path = None;
+            let exe = configured_exe.unwrap_or_else(|| "opencode".to_string());
+            async_runtime::spawn(async move {
+                crate::coding_agent::run_opencode_agent(
+                    &exe,
+                    req,
+                    Some(guard_str),
+                    tx,
+                    cancel_for_runner,
+                )
+                .await
+            })
+        }
+    };
     let cancel_for_watcher = Arc::clone(&cancel);
     let inner_for_cancel = Arc::clone(inner);
     let cancel_watcher = async_runtime::spawn(async move {
@@ -903,6 +1154,9 @@ async fn run_less_computer_once(
             E::ToolUse { name, .. } => {
                 emit_less_computer(inner, serde_json::json!({ "kind": "tool", "name": name }));
             }
+            E::Compaction { .. } => {
+                emit_less_computer(inner, serde_json::json!({ "kind": "compaction" }));
+            }
             E::Completed {
                 text, cost_usd: c, ..
             } => {
@@ -916,7 +1170,10 @@ async fn run_less_computer_once(
     let run_result = run.await;
     cancel.store(true, Ordering::Relaxed);
     let _ = cancel_watcher.await;
-    let _ = std::fs::remove_file(&settings_path);
+    // 仅 Claude 路径有临时护栏文件需清理；OpenCode 走 env 注入无文件。
+    if let Some(path) = &settings_path {
+        let _ = std::fs::remove_file(path);
+    }
 
     if cancelled
         || matches!(
@@ -939,7 +1196,7 @@ async fn run_less_computer_once(
                 Ok(Err(e)) => Some(e.to_string()),
                 _ => None,
             })
-            .unwrap_or_else(|| "Claude 无结果（确认已登录 claude 且额度充足）".to_string());
+            .unwrap_or_else(|| "Agent 无结果（确认已登录且额度充足）".to_string());
         LessComputerOutcome::Failed { message }
     }
 }
@@ -1073,9 +1330,11 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
     );
     #[cfg(target_os = "windows")]
     {
-        let prepared = inner.windows_ime.prepare_session();
-        let mut slots = inner.prepared_windows_ime_session.lock();
-        store_prepared_windows_ime_session(&mut slots, current_session_id, prepared);
+        if inner.prefs.get().windows_insertion_mode == crate::types::WindowsInsertionMode::Tsf {
+            let prepared = inner.windows_ime.prepare_session();
+            let mut slots = inner.prepared_windows_ime_session.lock();
+            store_prepared_windows_ime_session(&mut slots, current_session_id, prepared);
+        }
     }
     // 翻译模式标志重置；hotkey 监听器在 Shift down 时再 set true。
     inner
@@ -1089,6 +1348,14 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
         log::info!("[coord] session started (hotkey-injection dry-run)");
         return Ok(());
     }
+
+    // 乐观显示：按下热键即弹出胶囊并播入场动画，不等麦克风/ASR。此刻麦克风还在 cpal
+    // init 窗口内、没有第一帧 PCM，先进「预备态」（warming=true → 前端渲染待命光效，引导
+    // 用户稍候再开口）；level_handler 首次触发（PCM 真的流入）后翻成正式录音态、光条点亮。
+    // 这样把「视觉反馈」与「麦克风就绪」解耦：即时反馈 + 完整入场动画，同时用预备→点亮的
+    // 过渡守住「不漏首字」。若随后凭证/权限校验失败，下面分支会用 Error 覆盖这一帧。
+    inner.capsule_warming.store(true, Ordering::SeqCst);
+    emit_capsule(inner, CapsuleState::Recording, 0.0, 0, None, None);
 
     if let Err(message) = ensure_asr_credentials() {
         log::warn!("[coord] ASR credential gate failed: {message}");
@@ -1220,33 +1487,58 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
     }
 
     #[cfg(target_os = "macos")]
-    if crate::asr::local::is_local_qwen3(&active_asr) {
-        let local = match build_local_qwen3(inner).await {
-            Ok(l) => l,
-            Err(e) => {
-                log::error!("[coord] 本地 Qwen3-ASR 初始化失败: {e:#}");
-                emit_capsule(
+    if let Some(provider) = macos_keyless_dictation_provider(&active_asr) {
+        match provider {
+            MacosKeylessDictationProvider::LocalQwen3 => {
+                let local = match build_local_qwen3(inner).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::error!("[coord] 本地 Qwen3-ASR 初始化失败: {e:#}");
+                        emit_capsule(
+                            inner,
+                            CapsuleState::Error,
+                            0.0,
+                            0,
+                            Some(format!("本地模型初始化失败: {e}")),
+                            None,
+                        );
+                        restore_prepared_windows_ime_session(inner, current_session_id);
+                        inner.state.lock().phase = SessionPhase::Idle;
+                        schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                        return Err(format!("local ASR init failed: {e}"));
+                    }
+                };
+                store_asr_for_session(
                     inner,
-                    CapsuleState::Error,
-                    0.0,
-                    0,
-                    Some(format!("本地模型初始化失败: {e}")),
-                    None,
+                    current_session_id,
+                    ActiveAsr::Local(Arc::clone(&local)),
                 );
-                restore_prepared_windows_ime_session(inner, current_session_id);
-                inner.state.lock().phase = SessionPhase::Idle;
-                schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                return Err(format!("local ASR init failed: {e}"));
+                let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
+                start_recorder_and_enter_listening(
+                    inner,
+                    current_session_id,
+                    &active_asr,
+                    consumer,
+                )
+                .await?;
             }
-        };
-        store_asr_for_session(
-            inner,
-            current_session_id,
-            ActiveAsr::Local(Arc::clone(&local)),
-        );
-        let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
-            .await?;
+            MacosKeylessDictationProvider::AppleSpeech => {
+                let local = build_apple_speech(&inner.prefs.get());
+                store_asr_for_session(
+                    inner,
+                    current_session_id,
+                    ActiveAsr::AppleSpeech(Arc::clone(&local)),
+                );
+                let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
+                start_recorder_and_enter_listening(
+                    inner,
+                    current_session_id,
+                    &active_asr,
+                    consumer,
+                )
+                .await?;
+            }
+        }
         return Ok(());
     }
 
@@ -1476,6 +1768,10 @@ pub(super) async fn start_recorder_for_starting(
             .started_at
             .elapsed()
             .as_millis() as u64;
+        // 第一帧 PCM 真的流到 consumer 了（recorder.rs::process_callback 的顺序保证
+        // consume_pcm_chunk 先于 level_handler）——关掉预备态，让这一帧起 payload.warming
+        // 翻 false，前端把「待命」光条点亮成正式录音态。之后每帧都是 false（幂等）。
+        inner_for_level.capsule_warming.store(false, Ordering::SeqCst);
         emit_capsule(
             &inner_for_level,
             CapsuleState::Recording,
@@ -2372,6 +2668,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         mode,
         raw_uses_llm,
         chinese_script_preference,
+        prefs.windows_insertion_mode,
     );
     log::info!(
         "[coord] polish dispatch: translation={translation_active} mode={mode:?} streaming_eligible={streaming_eligible}"
@@ -2481,6 +2778,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let prefs = inner.prefs.get();
     let restore_clipboard = prefs.restore_clipboard_after_paste;
     let allow_non_tsf_insertion_fallback = prefs.allow_non_tsf_insertion_fallback;
+    let windows_insertion_mode = prefs.windows_insertion_mode;
     let paste_shortcut = prefs.paste_shortcut;
     // 流式路径下，字符已经通过 Unicode keystroke 落到光标处，跳过 inserter.insert。
     let status = if already_streamed {
@@ -2503,17 +2801,41 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         if focus_ready_for_paste {
             #[cfg(target_os = "windows")]
             {
-                let ime_target = capture_ime_submit_target();
-                insert_with_windows_ime_first(
-                    inner,
-                    current_session_id,
-                    &polished,
-                    restore_clipboard,
-                    allow_non_tsf_insertion_fallback,
-                    paste_shortcut,
-                    ime_target,
-                )
-                .await
+                match windows_insertion_mode {
+                    crate::types::WindowsInsertionMode::SendInput => {
+                        let sendinput_options = windows_sendinput_options_from_prefs(&prefs);
+                        if allow_non_tsf_insertion_fallback {
+                            insert_via_non_tsf_fallback(
+                                inner,
+                                &polished,
+                                restore_clipboard,
+                                paste_shortcut,
+                            )
+                        } else {
+                            inner
+                                .inserter
+                                .insert_via_unicode_keystrokes(&polished, sendinput_options)
+                        }
+                    }
+                    crate::types::WindowsInsertionMode::Paste => inner.inserter.insert(
+                        &polished,
+                        restore_clipboard,
+                        paste_shortcut,
+                    ),
+                    crate::types::WindowsInsertionMode::Tsf => {
+                        let ime_target = capture_ime_submit_target();
+                        insert_with_windows_ime_first(
+                            inner,
+                            current_session_id,
+                            &polished,
+                            restore_clipboard,
+                            allow_non_tsf_insertion_fallback,
+                            paste_shortcut,
+                            ime_target,
+                        )
+                        .await
+                    }
+                }
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -2569,6 +2891,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         polish_error.is_some(),
         focus_ready_for_paste,
         allow_non_tsf_insertion_fallback,
+        windows_insertion_mode,
     )
     .map(str::to_string);
     let tsf_required_insert_failed = error_code.as_deref() == Some("windowsImeTsfRequired");
@@ -2626,6 +2949,14 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             session_for_analysis,
         );
     }
+    // 活动计数（概览页热力图数据源）：只有成功完成的听写才点亮格子——转录失败 /
+    // 错误收尾的两处 append 不计。写失败不阻断主流程。
+    if let Err(e) = inner
+        .activity
+        .bump(&chrono::Local::now().format("%Y-%m-%d").to_string())
+    {
+        log::warn!("[coord] activity bump failed: {e}");
+    }
 
     // 远程输入：把本次最终文字回传给手机端。remote_server 的 WS handler 订阅了
     // "remote:result"（mod.rs:614），但此前全仓从未 emit，导致手机结果区永远空（#691）。
@@ -2673,12 +3004,14 @@ pub(super) fn dictation_error_code(
     polish_failed: bool,
     focus_ready_for_paste: bool,
     allow_non_tsf_insertion_fallback: bool,
+    windows_insertion_mode: crate::types::WindowsInsertionMode,
 ) -> Option<&'static str> {
     if !focus_ready_for_paste && status == InsertStatus::Failed {
         Some("focusRestoreFailed")
     } else if cfg!(target_os = "windows")
         && focus_ready_for_paste
         && !allow_non_tsf_insertion_fallback
+        && windows_insertion_mode == crate::types::WindowsInsertionMode::Tsf
         && status == InsertStatus::Failed
     {
         Some("windowsImeTsfRequired")
@@ -2782,6 +3115,8 @@ mod tests {
         finalize_polished_text, flush_streaming_insert_buffer_with, pcm_duration_ms,
         pcm_from_wav_bytes, streaming_insert_eligible,
     };
+    #[cfg(target_os = "macos")]
+    use super::{macos_keyless_dictation_provider, MacosKeylessDictationProvider};
     use crate::types::{
         ChineseScriptPreference, CorrectionRule, DictationSession, InsertStatus, PolishMode,
     };
@@ -2879,6 +3214,20 @@ mod tests {
         let sid = Uuid::new_v4();
         let session = build_transcribe_failed_session(sid, 1, PolishMode::Structured, false);
         assert_eq!(session.has_audio_recording, Some(false));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_keyless_dictation_provider_routes_apple_speech_locally() {
+        assert_eq!(
+            macos_keyless_dictation_provider(crate::asr::local::APPLE_SPEECH_PROVIDER_ID),
+            Some(MacosKeylessDictationProvider::AppleSpeech)
+        );
+        assert_eq!(
+            macos_keyless_dictation_provider(crate::asr::local::PROVIDER_ID),
+            Some(MacosKeylessDictationProvider::LocalQwen3)
+        );
+        assert_eq!(macos_keyless_dictation_provider("volcengine"), None);
     }
 
     #[test]
@@ -3101,32 +3450,80 @@ mod tests {
             PolishMode::Light,
             false,
             ChineseScriptPreference::Auto,
+            crate::types::WindowsInsertionMode::SendInput,
         ));
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
-    fn streaming_disabled_for_non_auto_script_so_opencc_runs() {
-        // issue #643：非 Auto 字形（简/繁）必须走一次性路径，让 finalize 的 OpenCC 转换生效。
-        for pref in [
-            ChineseScriptPreference::Simplified,
-            ChineseScriptPreference::Traditional,
-        ] {
-            assert!(!streaming_insert_eligible(
-                true,
-                false,
-                PolishMode::Light,
-                false,
-                pref
-            ));
-        }
-        // Auto 不受影响，仍可流式。
-        assert!(streaming_insert_eligible(
+    fn streaming_disabled_for_windows_tsf_insertion_mode() {
+        assert!(!streaming_insert_eligible(
             true,
             false,
             PolishMode::Light,
             false,
             ChineseScriptPreference::Auto,
+            crate::types::WindowsInsertionMode::Tsf,
         ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn streaming_disabled_for_windows_paste_insertion_mode() {
+        assert!(!streaming_insert_eligible(
+            true,
+            false,
+            PolishMode::Light,
+            false,
+            ChineseScriptPreference::Auto,
+            crate::types::WindowsInsertionMode::Paste,
+        ));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn streaming_ignores_windows_insertion_mode_on_non_windows() {
+        for mode in [
+            crate::types::WindowsInsertionMode::Tsf,
+            crate::types::WindowsInsertionMode::Paste,
+        ] {
+            assert!(streaming_insert_eligible(
+                true,
+                false,
+                PolishMode::Light,
+                false,
+                ChineseScriptPreference::Auto,
+                mode,
+            ));
+        }
+    }
+
+    #[test]
+    fn streaming_script_gate_blocks_only_traditional() {
+        // Traditional（s2t）有一简对多繁的真歧义，必须走一次性路径做全文 OpenCC
+        // 转换（issue #643）；Simplified（t2s）近乎逐字，on_delta 就地转换即可，
+        // 不再挡流式（用户反馈：固定简体导致流式静默失效）。
+        assert!(!streaming_insert_eligible(
+            true,
+            false,
+            PolishMode::Light,
+            false,
+            ChineseScriptPreference::Traditional,
+            crate::types::WindowsInsertionMode::SendInput,
+        ));
+        for pref in [
+            ChineseScriptPreference::Auto,
+            ChineseScriptPreference::Simplified,
+        ] {
+            assert!(streaming_insert_eligible(
+                true,
+                false,
+                PolishMode::Light,
+                false,
+                pref,
+                crate::types::WindowsInsertionMode::SendInput,
+            ));
+        }
     }
 
     #[test]

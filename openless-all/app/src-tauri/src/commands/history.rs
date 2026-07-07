@@ -118,6 +118,18 @@ pub fn reanalyze_context_history(
     Ok(())
 }
 
+/// 每日活动计数（日期升序），概览页年度热力图的数据源。与历史内容 / 保留策略解耦：
+/// 清空历史不影响它，全年格子照亮。
+#[tauri::command]
+pub fn get_activity_stats(coord: CoordinatorState<'_>) -> Vec<ActivityDay> {
+    coord
+        .activity()
+        .snapshot()
+        .into_iter()
+        .map(|(date, count)| ActivityDay { date, count })
+        .collect()
+}
+
 /// 读取某次会话的原始麦克风 wav 字节流。文件存在的条件：debug 用户的任意会话，或任意
 /// 「转录失败 / empty」会话（失败保留）——成功的非 debug 会话录音会在插入后删掉。
 /// 文件名规约：`<data_dir>/recordings/<session_id>.wav`，与 DictationSession.id 同名。
