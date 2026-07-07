@@ -5,6 +5,8 @@ import { useState, useEffect, useCallback, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { Card, Btn, Pill } from '../_atoms';
+import { Icon } from '../../components/Icon';
+import { Modal } from '../../components/ui/Modal';
 import { SettingRow, SectionTitle, Toggle } from './shared';
 import {
   listOpenWindowApps,
@@ -100,14 +102,13 @@ function WhitelistModal({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div style={modalOverlayStyle} onClick={onClose}>
-      <div style={modalCardStyle} onClick={e => e.stopPropagation()}>
+    <Modal onClose={onClose} zIndex={70} width="min(640px, 100%)">
         <div style={modalHeaderStyle}>
           <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>
             {t('settings.screenshotWhitelist.modalTitle')}
           </h3>
           <Btn variant="ghost" size="sm" onClick={onClose} style={{ minWidth: 28, padding: '4px 6px' }}>
-            ✕
+            <Icon name="close" size={13} />
           </Btn>
         </div>
 
@@ -178,7 +179,7 @@ function WhitelistModal({ onClose }: { onClose: () => void }) {
                       onClick={() => handleDelete(app.processName)}
                       style={{ minWidth: 24, padding: '3px 5px', fontSize: 11, color: 'var(--ol-ink-4)' }}
                     >
-                      ✕
+                      <Icon name="trash" size={12} />
                     </Btn>
                   </span>
                 </div>
@@ -199,15 +200,13 @@ function WhitelistModal({ onClose }: { onClose: () => void }) {
             {t('settings.screenshotWhitelist.close')}
           </Btn>
         </div>
-      </div>
-
       {showAddModal && (
         <AddAppModal
           currentApps={apps}
           onClose={() => setShowAddModal(false)}
         />
       )}
-    </div>
+    </Modal>
   );
 }
 
@@ -265,14 +264,13 @@ function AddAppModal({
   };
 
   return (
-    <div style={modalOverlayStyle} onClick={onClose}>
-      <div style={{ ...modalCardStyle, maxWidth: 520 }} onClick={e => e.stopPropagation()}>
+    <Modal onClose={onClose} zIndex={80} width="min(520px, 100%)">
         <div style={modalHeaderStyle}>
           <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>
             {t('settings.screenshotWhitelist.addAppTitle')}
           </h3>
           <Btn variant="ghost" size="sm" onClick={onClose} style={{ minWidth: 28, padding: '4px 6px' }}>
-            ✕
+            <Icon name="close" size={13} />
           </Btn>
         </div>
         <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginBottom: 8 }}>
@@ -335,39 +333,11 @@ function AddAppModal({
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
 // ─── 样式 ──────────────────────────────────────────────────────────
-
-const modalOverlayStyle: CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  background: 'var(--ol-overlay-bg)',
-  backdropFilter: 'blur(8px) saturate(140%)',
-  WebkitBackdropFilter: 'blur(8px) saturate(140%)',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  zIndex: 100,
-  animation: 'ol-modal-backdrop-in 0.18s var(--ol-motion-soft)',
-};
-
-const modalCardStyle: CSSProperties = {
-  width: '90%',
-  maxWidth: 640,
-  maxHeight: '80vh',
-  background: 'var(--ol-surface)',
-  borderRadius: 'var(--ol-r-lg)',
-  border: '0.5px solid var(--ol-line)',
-  boxShadow: 'var(--ol-shadow-xl)',
-  display: 'flex',
-  flexDirection: 'column' as const,
-  padding: 20,
-  animation: 'ol-modal-card-in 0.24s var(--ol-motion-spring)',
-};
 
 const modalHeaderStyle: CSSProperties = {
   display: 'flex',
