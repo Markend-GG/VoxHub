@@ -54,7 +54,7 @@
 ### 6. 系统声音采集
 
 - V1 只录麦克风。
-- V2 将系统声音采集作为独立方向：支持 system audio capture（系统声音采集），用于 Zoom、Teams、腾讯会议等线上会议中采集对方声音。
+- V3 / future 将系统声音采集作为独立方向：支持 system audio capture（系统声音采集），用于 Zoom、Teams、腾讯会议等线上会议中采集对方声音。
 - Windows/macOS 的系统音频采集方案需要单独设计，不能假设与麦克风采集同形。
 - 需要明确麦克风与系统声音的混音、回声、延迟对齐、权限失败和设备切换策略。
 
@@ -79,11 +79,19 @@
 
 ### 10. 上传音频生成会议记录
 
-- 后续支持用户上传已有音频文件生成会议记录，不要求必须通过 OpenLess 现场录音。
+- 已确认后续版本需要支持用户上传已有音频文件生成会议记录，不要求必须通过 OpenLess 现场录音。
+- 该能力可作为会议 V2 候选方向之一，建议与现场录音、system audio capture（系统声音采集）解耦设计。
 - 上传音频应复用会议记录数据结构：生成 `MeetingRecord`（会议记录）、`TranscriptSegment`（会议原文片段）和后续 summary（总结）。
 - 需要明确支持的音频格式、大小限制、时长限制、转码策略、失败重试和本地临时文件清理。
 - 需要评估上传音频与现有会议录音音频保留策略的关系：上传原文件是否复制到 `meeting-recordings/`、是否计入 retention（保留数量）、用户删除会议时是否删除上传副本。
 - 不应绕开现有 ASR provider（语音转文字服务商）选择逻辑；如需独立配置，应归入会议专用 ASR 配置方向统一设计。
+
+## 当前阶段归属（2026-07-08）
+
+- V2-1：会议专用 ASR 配置、`fun-asr-realtime` realtime ASR（实时语音转文字）、draft + final（临时识别 + 最终片段）、timestamp metadata（时间戳元数据）。
+- V2-2：local VAD（本地语音活动检测）作为 speaker diarization（说话人分离）前置能力，停止会议后做本地 speaker diarization 与 transcript alignment（原文对齐）。
+- V2-3：上传音频生成会议记录，复用会议 ASR 配置、会议记录结构、音频保留和删除策略。
+- V3 / future：realtime speaker labels（实时说话人标签）、subtitle-grade streaming（字幕级低延迟流式刷新）、system audio capture（系统声音采集）、悬浮入口与独立实时展示、长会议总结质量增强、Word/PDF 导出、第三方任务系统集成和高级文本后处理。
 
 ## 当前结论
 
