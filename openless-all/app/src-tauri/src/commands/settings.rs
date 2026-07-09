@@ -624,6 +624,9 @@ mod persist_settings_tests {
         fn refresh_translation_hotkey(&self) {}
         fn refresh_switch_style_hotkey(&self) {}
         fn refresh_open_app_hotkey(&self) {}
+        fn refresh_rewrite_hotkey(&self) {}
+        fn refresh_screenshot_record_hotkey(&self) {}
+        fn cancel_active_screenshot_record(&self, _reason: &str) {}
         fn refresh_coding_agent_hotkey(&self) {}
     }
 
