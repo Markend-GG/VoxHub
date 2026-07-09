@@ -422,6 +422,7 @@ fn replace_transcript_with_retranscribed_text(record: &mut MeetingRecord, text: 
         end_ms: record.duration_ms,
         text: text.trim().to_string(),
         source: TranscriptSegmentSource::RetranscribedAsr,
+        metadata: None,
     }];
     if record.status != MeetingStatus::Summarizing {
         record.status = MeetingStatus::Completed;
@@ -475,6 +476,7 @@ mod tests {
             end_ms: None,
             text: "原文内容".to_string(),
             source: TranscriptSegmentSource::RealtimeAsr,
+            metadata: None,
         }];
 
         let markdown = meeting_markdown(&record);

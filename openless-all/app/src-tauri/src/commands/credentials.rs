@@ -173,6 +173,24 @@ pub fn set_credential(window: Window, account: String, value: String) -> Result<
     Ok(())
 }
 
+#[tauri::command]
+pub fn set_asr_provider_credential(
+    window: Window,
+    provider: String,
+    account: String,
+    value: String,
+) -> Result<(), String> {
+    ensure_main_window(&window)?;
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return Err("provider is empty".to_string());
+    }
+    let acc = parse_asr_provider_account(&account)?;
+    CredentialsVault::set_asr_for_provider(provider, acc, &value).map_err(|e| e.to_string())?;
+    let _ = window.emit("credentials:changed", ());
+    Ok(())
+}
+
 #[cfg(mobile)]
 #[tauri::command]
 pub async fn set_active_asr_provider(
@@ -250,6 +268,21 @@ pub fn read_credential(window: Window, account: String) -> Result<Option<String>
     CredentialsVault::get(acc).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn read_asr_provider_credential(
+    window: Window,
+    provider: String,
+    account: String,
+) -> Result<Option<String>, String> {
+    ensure_main_window(&window)?;
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return Err("provider is empty".to_string());
+    }
+    let acc = parse_asr_provider_account(&account)?;
+    CredentialsVault::get_asr_for_provider(provider, acc).map_err(|e| e.to_string())
+}
+
 fn ensure_main_window(window: &Window) -> Result<(), String> {
     if window.label() == "main" {
         Ok(())
@@ -272,5 +305,34 @@ fn parse_account(s: &str) -> Result<CredentialAccount, String> {
         "asr.model" => Ok(CredentialAccount::AsrModel),
         "asr.vocabulary_id" => Ok(CredentialAccount::AsrVocabularyId),
         _ => Err(format!("unknown account: {s}")),
+    }
+}
+
+fn parse_asr_provider_account(s: &str) -> Result<CredentialAccount, String> {
+    let account = parse_account(s)?;
+    match account {
+        CredentialAccount::VolcengineAppKey
+        | CredentialAccount::VolcengineAccessKey
+        | CredentialAccount::VolcengineResourceId
+        | CredentialAccount::AsrApiKey
+        | CredentialAccount::AsrEndpoint
+        | CredentialAccount::AsrModel
+        | CredentialAccount::AsrVocabularyId => Ok(account),
+        CredentialAccount::ArkApiKey
+        | CredentialAccount::ArkModelId
+        | CredentialAccount::ArkContextVisionModelId
+        | CredentialAccount::ArkEndpoint => Err(format!("account is not ASR-scoped: {s}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asr_provider_account_rejects_llm_accounts() {
+        assert!(parse_asr_provider_account("asr.api_key").is_ok());
+        assert!(parse_asr_provider_account("volcengine.app_key").is_ok());
+        assert!(parse_asr_provider_account("ark.api_key").is_err());
     }
 }

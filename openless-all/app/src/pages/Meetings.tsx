@@ -34,6 +34,7 @@ import type {
   MeetingRecordingSnapshot,
   MeetingStatus,
   MeetingSummaryEvent,
+  MeetingTranscriptDraftEvent,
   MeetingTranscriptSegmentEvent,
   TranscriptSegment,
   TranscriptSegmentSource,
@@ -76,6 +77,7 @@ export function Meetings() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [eventError, setEventError] = useState<MeetingErrorEvent | null>(null);
+  const [draftByMeetingId, setDraftByMeetingId] = useState<Record<string, MeetingTranscriptDraftEvent>>({});
   const [editDraft, setEditDraft] = useState<MeetingEditDraft | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [rewriteConfirmId, setRewriteConfirmId] = useState<string | null>(null);
@@ -83,10 +85,15 @@ export function Meetings() {
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const transcriptStickToBottomRef = useRef(true);
   const meetingsRef = useRef<MeetingRecord[]>([]);
+  const activeSnapshotRef = useRef<MeetingRecordingSnapshot | null>(null);
 
   useEffect(() => {
     meetingsRef.current = meetings;
   }, [meetings]);
+
+  useEffect(() => {
+    activeSnapshotRef.current = activeSnapshot;
+  }, [activeSnapshot]);
 
   const syncActiveSnapshot = useCallback(async (expectedMeetingId?: string) => {
     try {
@@ -143,6 +150,7 @@ export function Meetings() {
   useEffect(() => {
     let cancelled = false;
     let unlistenState: (() => void) | undefined;
+    let unlistenDraft: (() => void) | undefined;
     let unlistenSegment: (() => void) | undefined;
     let unlistenError: (() => void) | undefined;
     let unlistenSummary: (() => void) | undefined;
@@ -162,11 +170,43 @@ export function Meetings() {
           });
           setMeetings(prev => upsertMeeting(prev, snapshot.meeting));
           setSelectedId(prev => prev ?? snapshot.meeting.id);
+          if (finalSnapshot) {
+            setDraftByMeetingId(prev => removeDraft(prev, snapshot.meeting.id));
+          }
+        });
+        const draftHandle = await listen<MeetingTranscriptDraftEvent>('meeting:transcript-draft', event => {
+          if (cancelled) return;
+          const payload = event.payload;
+          const snapshot = activeSnapshotRef.current;
+          const staleForActiveSession =
+            snapshot?.meeting.id === payload.meetingId &&
+            !!snapshot.activeProviderSessionId &&
+            payload.providerSessionId !== snapshot.activeProviderSessionId;
+          if (staleForActiveSession) return;
+          if (payload.clear) {
+            setDraftByMeetingId(prev => removeDraft(prev, payload.meetingId));
+            return;
+          }
+          if (!snapshot || snapshot.meeting.id !== payload.meetingId) return;
+          if (snapshot.activeProviderSessionId && payload.providerSessionId !== snapshot.activeProviderSessionId) return;
+          setDraftByMeetingId(prev => ({
+            ...prev,
+            [payload.meetingId]: payload,
+          }));
         });
         const segmentHandle = await listen<MeetingTranscriptSegmentEvent>('meeting:transcript-segment', event => {
           if (cancelled) return;
           const payload = event.payload;
           const knownMeeting = meetingsRef.current.some(record => record.id === payload.meetingId);
+          const snapshot = activeSnapshotRef.current;
+          const segmentProviderSessionId = payload.segment.metadata?.providerSessionId ?? null;
+          const staleForActiveSession =
+            snapshot?.meeting.id === payload.meetingId &&
+            !!snapshot.activeProviderSessionId &&
+            segmentProviderSessionId !== snapshot.activeProviderSessionId;
+          if (!staleForActiveSession) {
+            setDraftByMeetingId(prev => removeDraft(prev, payload.meetingId));
+          }
           setMeetings(prev => appendSegment(prev, payload.meetingId, payload.segment));
           setActiveSnapshot(prev => {
             if (!prev || prev.meeting.id !== payload.meetingId) return prev;
@@ -207,12 +247,14 @@ export function Meetings() {
 
         if (cancelled) {
           stateHandle();
+          draftHandle();
           segmentHandle();
           errorHandle();
           summaryHandle();
           closeHandle();
         } else {
           unlistenState = stateHandle;
+          unlistenDraft = draftHandle;
           unlistenSegment = segmentHandle;
           unlistenError = errorHandle;
           unlistenSummary = summaryHandle;
@@ -226,6 +268,7 @@ export function Meetings() {
     return () => {
       cancelled = true;
       unlistenState?.();
+      unlistenDraft?.();
       unlistenSegment?.();
       unlistenError?.();
       unlistenSummary?.();
@@ -253,6 +296,7 @@ export function Meetings() {
   const selectedControlMode = activeControlMode && detailMeeting?.id === activeControlMode.meetingId
     ? activeControlMode.mode
     : null;
+  const selectedDraft = detailMeeting ? draftByMeetingId[detailMeeting.id] ?? null : null;
   const transcriptCount = detailMeeting?.transcriptSegments.length ?? 0;
 
   useEffect(() => {
@@ -260,7 +304,7 @@ export function Meetings() {
     const el = transcriptScrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [detailMeeting?.id, transcriptCount]);
+  }, [detailMeeting?.id, selectedDraft?.text, transcriptCount]);
 
   const selectMeeting = async (id: string) => {
     setSelectedId(id);
@@ -395,6 +439,7 @@ export function Meetings() {
       setActiveSnapshot(snapshot.meeting.endedAt == null ? snapshot : null);
       setActiveControlMode(snapshot.meeting.endedAt == null ? { meetingId: snapshot.meeting.id, mode: 'paused' } : null);
       setMeetings(prev => upsertMeeting(prev, snapshot.meeting));
+      setDraftByMeetingId(prev => removeDraft(prev, id));
     } catch (error) {
       console.error('[meetings] pause failed', error);
       setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
@@ -427,6 +472,7 @@ export function Meetings() {
       setActiveSnapshot(null);
       setActiveControlMode(null);
       setMeetings(prev => upsertMeeting(prev, record));
+      setDraftByMeetingId(prev => removeDraft(prev, id));
       setSelectedId(record.id);
       if (mobile) setMobileDetailOpen(true);
       const fresh = await listMeetings();
@@ -614,6 +660,7 @@ export function Meetings() {
                   />
                   <TranscriptList
                     record={detailMeeting}
+                    draft={selectedDraft}
                     scrollRef={transcriptScrollRef}
                     onScroll={() => {
                       const el = transcriptScrollRef.current;
@@ -817,9 +864,6 @@ function MeetingDetailHeader({
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 11, color: 'var(--ol-ink-4)' }}>
             <span>{t('meetings.startedAt')}: {formatDateTime(record.startedAt)}</span>
             <span>{active ? t('meetings.elapsed') : t('meetings.duration')}: {formatDuration(active ? snapshot.elapsedMs : record.durationMs, t)}</span>
-            {snapshot?.activeAsrProvider && (
-              <span>{t('meetings.provider')}: <span style={{ fontFamily: 'var(--ol-font-mono)' }}>{snapshot.activeAsrProvider}</span></span>
-            )}
           </div>
         </div>
         {(showPause || showResume || showStop || canEdit || canDelete || editing) && (
@@ -882,6 +926,7 @@ function MeetingDetailHeader({
 
 function TranscriptList({
   record,
+  draft,
   scrollRef,
   onScroll,
   actionLoading,
@@ -889,6 +934,7 @@ function TranscriptList({
   onRetranscribe,
 }: {
   record: MeetingRecord;
+  draft: MeetingTranscriptDraftEvent | null;
   scrollRef: MutableRefObject<HTMLDivElement | null>;
   onScroll: () => void;
   actionLoading: ActionLoading;
@@ -896,6 +942,7 @@ function TranscriptList({
   onRetranscribe: () => void;
 }) {
   const { t } = useTranslation();
+  const hasTranscriptRows = record.transcriptSegments.length > 0;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: 260 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexShrink: 0 }}>
@@ -919,7 +966,7 @@ function TranscriptList({
         className="ol-thinscroll"
         style={{ maxHeight: 'min(46vh, 520px)', overflow: 'auto', paddingRight: 2 }}
       >
-        {record.transcriptSegments.length === 0 ? (
+        {!hasTranscriptRows && !draft ? (
           <div style={{ padding: 18, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)', color: 'var(--ol-ink-4)', fontSize: 12.5, lineHeight: 1.55 }}>
             {t('meetings.noTranscript')}
           </div>
@@ -928,6 +975,7 @@ function TranscriptList({
             {record.transcriptSegments.map(segment => (
               <TranscriptRow key={segment.id} segment={segment} />
             ))}
+            {draft && <TranscriptDraftRow draft={draft} />}
           </div>
         )}
       </div>
@@ -1253,6 +1301,29 @@ function TranscriptRow({ segment }: { segment: TranscriptSegment }) {
   );
 }
 
+function TranscriptDraftRow({ draft }: { draft: MeetingTranscriptDraftEvent }) {
+  const { t } = useTranslation();
+  return (
+    <div style={{
+      padding: '11px 12px',
+      border: '0.5px dashed var(--ol-line-strong)',
+      borderRadius: 10,
+      background: 'var(--ol-surface)',
+      opacity: 0.86,
+    }}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 7 }}>
+        <Pill size="sm" tone="blue">{t('meetings.draftRecognizing')}</Pill>
+        {draft.startMs != null && (
+          <Pill size="sm" tone="default">{formatTimestamp(draft.startMs)}</Pill>
+        )}
+      </div>
+      <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap' }}>
+        {draft.text}
+      </div>
+    </div>
+  );
+}
+
 function ErrorBanner({ children, tone }: { children: ReactNode; tone: 'error' | 'warning' }) {
   const warning = tone === 'warning';
   return (
@@ -1287,6 +1358,16 @@ function appendSegment(records: MeetingRecord[], meetingId: string, segment: Tra
       transcriptSegments: [...record.transcriptSegments, segment],
     };
   });
+}
+
+function removeDraft(
+  drafts: Record<string, MeetingTranscriptDraftEvent>,
+  meetingId: string,
+): Record<string, MeetingTranscriptDraftEvent> {
+  if (!(meetingId in drafts)) return drafts;
+  const next = { ...drafts };
+  delete next[meetingId];
+  return next;
 }
 
 function hasSegment(record: MeetingRecord, segmentId: string): boolean {

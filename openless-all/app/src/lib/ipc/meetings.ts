@@ -42,6 +42,7 @@ function mockMeetingRecordingSnapshot(): MeetingRecordingSnapshot {
         phase: "recording",
         elapsedMs: 0,
         activeAsrProvider: "mock",
+        activeProviderSessionId: "mock-session-1",
         asrInterrupted: false,
     }
 }

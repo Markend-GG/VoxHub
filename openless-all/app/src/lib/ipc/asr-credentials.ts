@@ -22,6 +22,18 @@ export function setCredential(account: string, value: string): Promise<void> {
     return invokeOrMock("set_credential", { account, value }, () => undefined)
 }
 
+export function setAsrProviderCredential(
+    provider: string,
+    account: string,
+    value: string,
+): Promise<void> {
+    return invokeOrMock(
+        "set_asr_provider_credential",
+        { provider, account, value },
+        () => undefined,
+    )
+}
+
 export function setActiveAsrProvider(provider: string): Promise<void> {
     return invokeOrMock(
         "set_active_asr_provider",
@@ -46,6 +58,17 @@ export function readCredential(account: string): Promise<string | null> {
     )
 }
 
+export function readAsrProviderCredential(
+    provider: string,
+    account: string,
+): Promise<string | null> {
+    return invokeOrMock<string | null>(
+        "read_asr_provider_credential",
+        { provider, account },
+        () => null,
+    )
+}
+
 export function validateProviderCredentials(
     kind: "llm" | "asr",
 ): Promise<ProviderCheckResult> {
@@ -62,5 +85,18 @@ export function listProviderModels(
             kind === "llm"
                 ? ["gpt-4o", "deepseek-v4-flash", "deepseek-v4-pro"]
                 : ["whisper-1"],
+    }))
+}
+
+export function listAsrProviderModels(
+    provider: string,
+): Promise<ProviderModelsResult> {
+    return invokeOrMock("list_asr_provider_models", { provider }, () => ({
+        models:
+            provider === "bailian"
+                ? ["fun-asr-realtime"]
+                : provider === "xiaomi-mimo-asr"
+                  ? ["mimo-v2.5-asr"]
+                  : ["whisper-1"],
     }))
 }

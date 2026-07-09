@@ -202,11 +202,7 @@ impl CredsLlmEntry {
             && self.apiKey.as_deref().unwrap_or("").is_empty()
             && self.baseURL.as_deref().unwrap_or("").is_empty()
             && self.model.as_deref().unwrap_or("").is_empty()
-            && self
-                .contextVisionModel
-                .as_deref()
-                .unwrap_or("")
-                .is_empty()
+            && self.contextVisionModel.as_deref().unwrap_or("").is_empty()
             && self.temperature.is_none()
             && self
                 .extraHeaders
@@ -808,14 +804,36 @@ fn lookup_account(root: &CredsRoot, account: CredentialAccount) -> Option<String
         CredentialAccount::VolcengineResourceId => asr.and_then(|e| pick(&e.resourceId)),
         CredentialAccount::ArkApiKey => llm.and_then(|e| pick(&e.apiKey)),
         CredentialAccount::ArkModelId => llm.and_then(|e| pick(&e.model)),
-        CredentialAccount::ArkContextVisionModelId => {
-            llm.and_then(|e| pick(&e.contextVisionModel))
-        }
+        CredentialAccount::ArkContextVisionModelId => llm.and_then(|e| pick(&e.contextVisionModel)),
         CredentialAccount::ArkEndpoint => llm.and_then(|e| pick(&e.baseURL)),
         CredentialAccount::AsrApiKey => asr.and_then(|e| pick(&e.apiKey)),
         CredentialAccount::AsrEndpoint => asr.and_then(|e| pick(&e.baseURL)),
         CredentialAccount::AsrModel => asr.and_then(|e| pick(&e.model)),
         CredentialAccount::AsrVocabularyId => asr.and_then(|e| pick(&e.vocabularyId)),
+    }
+}
+
+fn lookup_asr_account_for_provider(
+    root: &CredsRoot,
+    provider_id: &str,
+    account: CredentialAccount,
+) -> Option<String> {
+    let asr = root.providers.asr.get(provider_id);
+    let pick = |s: &Option<String>| s.as_ref().filter(|v| !v.is_empty()).cloned();
+    match account {
+        CredentialAccount::VolcengineAppKey => {
+            asr.and_then(|e| pick(&e.appKey).or_else(|| pick(&e.apiKey)))
+        }
+        CredentialAccount::VolcengineAccessKey => asr.and_then(|e| pick(&e.accessKey)),
+        CredentialAccount::VolcengineResourceId => asr.and_then(|e| pick(&e.resourceId)),
+        CredentialAccount::AsrApiKey => asr.and_then(|e| pick(&e.apiKey)),
+        CredentialAccount::AsrEndpoint => asr.and_then(|e| pick(&e.baseURL)),
+        CredentialAccount::AsrModel => asr.and_then(|e| pick(&e.model)),
+        CredentialAccount::AsrVocabularyId => asr.and_then(|e| pick(&e.vocabularyId)),
+        CredentialAccount::ArkApiKey
+        | CredentialAccount::ArkModelId
+        | CredentialAccount::ArkContextVisionModelId
+        | CredentialAccount::ArkEndpoint => None,
     }
 }
 
@@ -868,6 +886,43 @@ fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option
             let entry = root.providers.asr.entry(asr_id).or_default();
             entry.vocabularyId = normalized;
         }
+    }
+}
+
+fn write_asr_account_for_provider(
+    root: &mut CredsRoot,
+    provider_id: &str,
+    account: CredentialAccount,
+    value: Option<String>,
+) {
+    let normalized = value.and_then(|v| if v.is_empty() { None } else { Some(v) });
+    let entry = root.providers.asr.entry(provider_id.to_string()).or_default();
+    match account {
+        CredentialAccount::VolcengineAppKey => {
+            entry.appKey = normalized;
+        }
+        CredentialAccount::VolcengineAccessKey => {
+            entry.accessKey = normalized;
+        }
+        CredentialAccount::VolcengineResourceId => {
+            entry.resourceId = normalized;
+        }
+        CredentialAccount::AsrApiKey => {
+            entry.apiKey = normalized;
+        }
+        CredentialAccount::AsrEndpoint => {
+            entry.baseURL = normalized;
+        }
+        CredentialAccount::AsrModel => {
+            entry.model = normalized;
+        }
+        CredentialAccount::AsrVocabularyId => {
+            entry.vocabularyId = normalized;
+        }
+        CredentialAccount::ArkApiKey
+        | CredentialAccount::ArkModelId
+        | CredentialAccount::ArkContextVisionModelId
+        | CredentialAccount::ArkEndpoint => {}
     }
 }
 
@@ -954,6 +1009,18 @@ impl CredentialsVault {
         Ok(lookup_account(&load_credentials(), account))
     }
 
+    pub fn get_asr_for_provider(
+        provider_id: &str,
+        account: CredentialAccount,
+    ) -> Result<Option<String>> {
+        let _guard = credentials_lock().lock();
+        Ok(lookup_asr_account_for_provider(
+            &load_credentials(),
+            provider_id,
+            account,
+        ))
+    }
+
     pub fn set(account: CredentialAccount, value: &str) -> Result<()> {
         let _guard = credentials_lock().lock();
         let mut root = load_credentials_for_update()?;
@@ -963,6 +1030,22 @@ impl CredentialsVault {
             Some(value.to_string())
         };
         write_account(&mut root, account, v);
+        save_credentials(&root)
+    }
+
+    pub fn set_asr_for_provider(
+        provider_id: &str,
+        account: CredentialAccount,
+        value: &str,
+    ) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        let v = if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        };
+        write_asr_account_for_provider(&mut root, provider_id, account, v);
         save_credentials(&root)
     }
 
@@ -1011,7 +1094,11 @@ impl CredentialsVault {
         let _guard = credentials_lock().lock();
         let headers = parse_extra_headers_json(value)?;
         let mut root = load_credentials_for_update()?;
-        let entry = root.providers.llm.entry(root.active.llm.clone()).or_default();
+        let entry = root
+            .providers
+            .llm
+            .entry(root.active.llm.clone())
+            .or_default();
         entry.extraHeaders = if headers.is_empty() {
             None
         } else {
@@ -1043,7 +1130,12 @@ impl CredentialsVault {
 
 #[cfg(test)]
 mod tests {
-    use super::{chunk_json_payload, parse_extra_headers_json, KEYRING_CHUNK_MAX_UTF16_UNITS};
+    use super::{
+        chunk_json_payload, lookup_asr_account_for_provider, parse_extra_headers_json,
+        CredentialAccount, CredsActive, CredsAsrEntry, CredsProviders, CredsRoot,
+        KEYRING_CHUNK_MAX_UTF16_UNITS,
+    };
+    use std::collections::HashMap;
 
     #[test]
     fn credential_payload_chunks_stay_under_windows_blob_limit() {
@@ -1077,5 +1169,101 @@ mod tests {
                 "unexpected error for {name}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn lookup_asr_account_for_provider_does_not_use_active_asr() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "volcengine".to_string(),
+            CredsAsrEntry {
+                appKey: Some("global-app".to_string()),
+                accessKey: Some("global-access".to_string()),
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "bailian".to_string(),
+            CredsAsrEntry {
+                apiKey: Some("meeting-key".to_string()),
+                baseURL: Some("wss://meeting.example/ws".to_string()),
+                model: Some("fun-asr-realtime".to_string()),
+                vocabularyId: Some("vocab-1".to_string()),
+                ..Default::default()
+            },
+        );
+        let root = CredsRoot {
+            version: 1,
+            active: CredsActive {
+                asr: "volcengine".to_string(),
+                llm: "ark".to_string(),
+            },
+            providers: CredsProviders {
+                asr: providers,
+                ..Default::default()
+            },
+        };
+
+        assert_eq!(
+            lookup_asr_account_for_provider(&root, "bailian", CredentialAccount::AsrApiKey)
+                .as_deref(),
+            Some("meeting-key")
+        );
+        assert_eq!(
+            lookup_asr_account_for_provider(&root, "bailian", CredentialAccount::AsrEndpoint)
+                .as_deref(),
+            Some("wss://meeting.example/ws")
+        );
+        assert_eq!(
+            lookup_asr_account_for_provider(
+                &root,
+                "volcengine",
+                CredentialAccount::VolcengineAppKey
+            )
+            .as_deref(),
+            Some("global-app")
+        );
+        assert_eq!(root.active.asr, "volcengine");
+    }
+
+    #[test]
+    fn write_asr_account_for_provider_does_not_change_active_asr() {
+        let mut root = CredsRoot {
+            version: 1,
+            active: CredsActive {
+                asr: "volcengine".to_string(),
+                llm: "ark".to_string(),
+            },
+            providers: CredsProviders::default(),
+        };
+
+        super::write_asr_account_for_provider(
+            &mut root,
+            "bailian",
+            CredentialAccount::AsrApiKey,
+            Some("meeting-key".to_string()),
+        );
+        super::write_asr_account_for_provider(
+            &mut root,
+            "bailian",
+            CredentialAccount::AsrEndpoint,
+            Some("wss://meeting.example/ws".to_string()),
+        );
+
+        assert_eq!(root.active.asr, "volcengine");
+        assert_eq!(
+            lookup_asr_account_for_provider(&root, "bailian", CredentialAccount::AsrApiKey)
+                .as_deref(),
+            Some("meeting-key")
+        );
+        assert_eq!(
+            lookup_asr_account_for_provider(&root, "bailian", CredentialAccount::AsrEndpoint)
+                .as_deref(),
+            Some("wss://meeting.example/ws")
+        );
+        assert_eq!(
+            lookup_asr_account_for_provider(&root, "volcengine", CredentialAccount::AsrApiKey),
+            None
+        );
     }
 }

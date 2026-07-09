@@ -6,13 +6,18 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from '../../components/Icon';
 import { detectOS } from '../../components/WindowChrome';
 import {
+  listAsrProviderModels,
   listProviderModels,
+  readAsrProviderCredential,
   readCredential,
   setActiveAsrProvider,
   setActiveLlmProvider,
+  setAsrProviderCredential,
   setCredential,
   validateProviderCredentials,
 } from '../../lib/ipc';
+import { listAsrProviderCapabilities } from '../../lib/ipc/settings';
+import type { AsrProviderCapabilities, MeetingAsrMode, MeetingVadSilencePreset } from '../../lib/types';
 import { emitSaved } from '../../lib/savedEvent';
 import { useMobileLayout } from '../../lib/useMobileLayout';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
@@ -174,6 +179,21 @@ const ASR_PRESETS: ReadonlyArray<{ id: AsrPresetId; nameKey: string; baseUrl: st
   { id: 'apple-speech', nameKey: 'asrAppleSpeech',  baseUrl: '',                                              model: ''                              },
 ];
 
+function isLocalAsrPreset(id: AsrPresetId): boolean {
+  return id === 'local-qwen3'
+    || id === 'foundry-local-whisper'
+    || id === 'sherpa-onnx-local'
+    || id === 'apple-speech';
+}
+
+function asrPresetById(id: string | null | undefined) {
+  return ASR_PRESETS.find(p => p.id === id);
+}
+
+function asrProviderSupportsModelField(id: AsrPresetId): boolean {
+  return id !== 'volcengine' && !isLocalAsrPreset(id);
+}
+
 type ProvidersSectionKind = 'all' | 'llm' | 'asr';
 
 interface ProvidersSectionProps {
@@ -199,6 +219,8 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
   const asrSwitchSeqRef = useRef(0);
   const [llmModelRevision, setLlmModelRevision] = useState(0);
   const [asrModelRevision, setAsrModelRevision] = useState(0);
+  const [meetingAsrModelRevision, setMeetingAsrModelRevision] = useState(0);
+  const [asrCapabilities, setAsrCapabilities] = useState<AsrProviderCapabilities[]>([]);
   const os = detectOS();
   // 本地重引擎（qwen3 / sherpa / foundry）仍只在「高级 → 本地模型」里启用，
   // 防止新手在主下拉误开 CPU 推理。Apple 语音是系统自带、零凭据、轻量，
@@ -224,6 +246,21 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
     setAsrProvider(asrId);
     setCommittedAsrProvider(asrId);
   }, [prefs, os]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listAsrProviderCapabilities()
+      .then(capabilities => {
+        if (!cancelled) setAsrCapabilities(capabilities);
+      })
+      .catch(error => {
+        console.warn('[settings] failed to load ASR capabilities', error);
+        if (!cancelled) setAsrCapabilities([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // issue #219 / #220 P2：
   //   1. 立刻 setLlmProvider —— 受控 <select> 必须反映用户最新选择。
@@ -333,12 +370,89 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
     }
   };
 
+  const onMeetingAsrModeChange = (mode: MeetingAsrMode) => {
+    if (!prefs) return;
+    void updatePrefs(current => ({
+      ...current,
+      meetingAsr: {
+        ...current.meetingAsr,
+        mode,
+        providerId: mode === 'provider_specific'
+          ? current.meetingAsr.providerId || current.activeAsrProvider || 'volcengine'
+          : current.meetingAsr.providerId,
+      },
+    })).catch(error => {
+      console.error('[settings] failed to update meeting ASR mode', error);
+      emitSaved('failed', t('common.operationFailed'));
+    });
+  };
+
+  const onMeetingAsrProviderChange = (providerId: AsrPresetId) => {
+    if (!prefs) return;
+    void updatePrefs(current => ({
+      ...current,
+      meetingAsr: {
+        ...current.meetingAsr,
+        mode: 'provider_specific',
+        providerId,
+      },
+    })).catch(error => {
+      console.error('[settings] failed to update meeting ASR provider', error);
+      emitSaved('failed', t('common.operationFailed'));
+    });
+  };
+
+  const onMeetingSilencePresetChange = (silencePreset: MeetingVadSilencePreset) => {
+    if (!prefs) return;
+    void updatePrefs(current => ({
+      ...current,
+      meetingAsr: {
+        ...current.meetingAsr,
+        silencePreset,
+      },
+    })).catch(error => {
+      console.error('[settings] failed to update meeting ASR silence preset', error);
+      emitSaved('failed', t('common.operationFailed'));
+    });
+  };
+
+  const saveMeetingModelOverride = (providerId: AsrPresetId, model: string) => {
+    if (!prefs) return Promise.resolve();
+    const trimmed = model.trim();
+    return updatePrefs(current => ({
+      ...current,
+      meetingAsr: {
+        ...current.meetingAsr,
+        modelOverride: trimmed || null,
+        modelProviderId: trimmed ? providerId : null,
+      },
+    }));
+  };
+
   // preset 决定 placeholder 与 default —— 必须跟着 committed*Provider 走，
   // 否则受控 <select> 立刻切到新厂商，但凭据字段还在显示旧 entry，placeholder
   // 会先于实际数据切换、视觉上对不上。
   const preset = LLM_PRESETS.find(p => p.id === committedLlmProvider) ?? LLM_PRESETS[LLM_PRESETS.length - 1];
   const codexOAuthSelected = committedLlmProvider === 'codex_oauth';
   const asrPreset = visibleAsrPresets.find(p => p.id === committedAsrProvider);
+  const meetingAsr = prefs?.meetingAsr ?? {
+    mode: 'inherit_global' as MeetingAsrMode,
+    providerId: null,
+    modelOverride: null,
+    modelProviderId: null,
+    silencePreset: 'standard' as MeetingVadSilencePreset,
+  };
+  const meetingProviderId = (meetingAsr.providerId || prefs?.activeAsrProvider || 'volcengine') as AsrPresetId;
+  const inheritedMeetingProviderId = (prefs?.activeAsrProvider || 'volcengine') as AsrPresetId;
+  const effectiveMeetingProviderId = (meetingAsr.mode === 'provider_specific'
+    ? meetingProviderId
+    : inheritedMeetingProviderId) as AsrPresetId;
+  const effectiveMeetingPreset = asrPresetById(effectiveMeetingProviderId);
+  const meetingModelOverrideValue = meetingAsr.modelProviderId === effectiveMeetingProviderId
+    ? meetingAsr.modelOverride || ''
+    : '';
+  const meetingCapability = asrCapabilities.find(capability => capability.providerId === meetingProviderId);
+  const showMeetingSilencePreset = Boolean(meetingCapability?.supportsVadSilencePreset);
   const showLlm = kind === 'all' || kind === 'llm';
   const showAsr = kind === 'all' || kind === 'asr';
   return (
@@ -402,6 +516,7 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
       )}
 
       {showAsr && (
+      <>
       <Card>
         <div style={{ marginBottom: 10 }}>
           <SectionTitle>{t('settings.providers.asrTitle')}</SectionTitle>
@@ -513,6 +628,173 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
           </>
         )}
       </Card>
+      <Card>
+        <div style={{ marginBottom: 10 }}>
+          <SectionTitle>{t('settings.providers.meetingAsrTitle')}</SectionTitle>
+        </div>
+        <SettingRow label={t('settings.providers.meetingAsrModeLabel')}>
+          <SelectLite
+            value={meetingAsr.mode}
+            onChange={next => onMeetingAsrModeChange(next as MeetingAsrMode)}
+            options={[
+              { value: 'inherit_global', label: t('settings.providers.meetingAsrInheritGlobal') },
+              { value: 'provider_specific', label: t('settings.providers.meetingAsrProviderSpecific') },
+            ]}
+            ariaLabel={t('settings.providers.meetingAsrModeLabel')}
+            style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 240 }}
+          />
+        </SettingRow>
+        {meetingAsr.mode === 'inherit_global' && (
+          <>
+            <SettingRow label={t('settings.providers.meetingAsrProviderLabel')}>
+              <span style={{ fontSize: 12.5, color: 'var(--ol-ink-2)' }}>
+                {t(`settings.providers.presets.${effectiveMeetingPreset?.nameKey || 'asrVolcengine'}`)}
+              </span>
+            </SettingRow>
+            {asrProviderSupportsModelField(effectiveMeetingProviderId) && (
+              <>
+                <CredentialField
+                  key={`meeting-inherit:${effectiveMeetingProviderId}:model:${meetingModelOverrideValue}`}
+                  label={t('settings.providers.modelLabel')}
+                  account="meeting.asr.model"
+                  placeholder={effectiveMeetingPreset?.model || 'whisper-1'}
+                  defaultValue={effectiveMeetingPreset?.model || undefined}
+                  valueKey={`${effectiveMeetingProviderId}:${meetingModelOverrideValue}`}
+                  readValue={() => Promise.resolve(meetingModelOverrideValue)}
+                  saveValue={model => saveMeetingModelOverride(effectiveMeetingProviderId, model)}
+                />
+                <ProviderTools
+                  key={`meeting-inherit:${effectiveMeetingProviderId}`}
+                  kind="asr"
+                  modelAccount="meeting.asr.model"
+                  showValidate={false}
+                  loadModels={() => listAsrProviderModels(effectiveMeetingProviderId)}
+                  applyModel={model => saveMeetingModelOverride(effectiveMeetingProviderId, model)}
+                  onModelSelected={() => undefined}
+                />
+              </>
+            )}
+          </>
+        )}
+        {meetingAsr.mode === 'provider_specific' && (
+          <>
+            <SettingRow label={t('settings.providers.meetingAsrProviderLabel')}>
+              <SelectLite
+                value={meetingProviderId}
+                onChange={next => onMeetingAsrProviderChange(next as AsrPresetId)}
+                options={ASR_PRESETS.map(p => ({
+                  value: p.id,
+                  label: t(`settings.providers.presets.${p.nameKey}`),
+                }))}
+                ariaLabel={t('settings.providers.meetingAsrProviderLabel')}
+                style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 240 }}
+              />
+            </SettingRow>
+            {meetingProviderId === 'volcengine' ? (
+              <>
+                <CredentialField
+                  key={`meeting:${meetingProviderId}:app_key`}
+                  label={t('settings.providers.volcengineAppKeyLabel')}
+                  account="volcengine.app_key"
+                  providerId={meetingProviderId}
+                  providerScoped
+                  mono
+                  mask
+                />
+                <CredentialField
+                  key={`meeting:${meetingProviderId}:access_key`}
+                  label={t('settings.providers.volcengineAccessKeyLabel')}
+                  account="volcengine.access_key"
+                  providerId={meetingProviderId}
+                  providerScoped
+                  mono
+                  mask
+                />
+                <CredentialField
+                  key={`meeting:${meetingProviderId}:resource_id`}
+                  label={t('settings.providers.volcengineResourceIdLabel')}
+                  account="volcengine.resource_id"
+                  providerId={meetingProviderId}
+                  providerScoped
+                  mono
+                  placeholder={ASR_DEFAULT_RESOURCE_ID}
+                  defaultValue={ASR_DEFAULT_RESOURCE_ID}
+                />
+              </>
+            ) : isLocalAsrPreset(meetingProviderId) ? (
+              <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6, margin: '2px 0 8px' }}>
+                {t('settings.providers.asrProviderTakenOver')}
+              </div>
+            ) : (
+              <>
+                <CredentialField
+                  key={`meeting:${meetingProviderId}:api_key`}
+                  label={t('settings.providers.apiKeyLabel')}
+                  account="asr.api_key"
+                  providerId={meetingProviderId}
+                  providerScoped
+                  mono
+                  mask
+                />
+                <CredentialField
+                  key={`meeting:${meetingProviderId}:endpoint`}
+                  label={t('settings.providers.baseUrlLabel')}
+                  account="asr.endpoint"
+                  providerId={meetingProviderId}
+                  providerScoped
+                  placeholder={asrPresetById(meetingProviderId)?.baseUrl || 'https://api.openai.com/v1'}
+                  defaultValue={asrPresetById(meetingProviderId)?.baseUrl || undefined}
+                />
+                <CredentialField
+                  key={`meeting:${meetingProviderId}:model:${meetingAsrModelRevision}`}
+                  label={t('settings.providers.modelLabel')}
+                  account="asr.model"
+                  providerId={meetingProviderId}
+                  providerScoped
+                  placeholder={asrPresetById(meetingProviderId)?.model || 'whisper-1'}
+                  defaultValue={asrPresetById(meetingProviderId)?.model || undefined}
+                />
+                {meetingProviderId === 'bailian' && (
+                  <CredentialField
+                    key={`meeting:${meetingProviderId}:vocabulary_id`}
+                    label={t('settings.providers.bailianVocabularyIdLabel')}
+                    account="asr.vocabulary_id"
+                    providerId={meetingProviderId}
+                    providerScoped
+                    mono
+                    placeholder="vocab-..."
+                  />
+                )}
+                <ProviderTools
+                  key={`meeting-specific:${meetingProviderId}`}
+                  kind="asr"
+                  modelAccount="asr.model"
+                  showValidate={false}
+                  loadModels={() => listAsrProviderModels(meetingProviderId)}
+                  applyModel={model => setAsrProviderCredential(meetingProviderId, 'asr.model', model)}
+                  onModelSelected={() => setMeetingAsrModelRevision(v => v + 1)}
+                />
+              </>
+            )}
+            {showMeetingSilencePreset && (
+              <SettingRow label={t('settings.providers.meetingAsrSilenceLabel')}>
+                <SelectLite
+                  value={meetingAsr.silencePreset}
+                  onChange={next => onMeetingSilencePresetChange(next as MeetingVadSilencePreset)}
+                  options={[
+                    { value: 'short', label: t('settings.providers.meetingAsrSilenceShort') },
+                    { value: 'standard', label: t('settings.providers.meetingAsrSilenceStandard') },
+                    { value: 'long', label: t('settings.providers.meetingAsrSilenceLong') },
+                  ]}
+                  ariaLabel={t('settings.providers.meetingAsrSilenceLabel')}
+                  style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 240 }}
+                />
+              </SettingRow>
+            )}
+          </>
+        )}
+      </Card>
+      </>
       )}
     </>
   );
@@ -520,7 +802,23 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
 
 type ProviderToolStatus = 'idle' | 'loading' | 'success' | 'empty' | 'error';
 
-function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 'asr'; modelAccount: string; onModelSelected: () => void }) {
+interface ProviderToolsProps {
+  kind: 'llm' | 'asr';
+  modelAccount: string;
+  onModelSelected: (model: string) => void;
+  showValidate?: boolean;
+  loadModels?: () => Promise<{ models: string[] }>;
+  applyModel?: (model: string) => Promise<void>;
+}
+
+function ProviderTools({
+  kind,
+  modelAccount,
+  onModelSelected,
+  showValidate = true,
+  loadModels: loadModelsOverride,
+  applyModel: applyModelOverride,
+}: ProviderToolsProps) {
   const { t } = useTranslation();
   const mobile = useMobileLayout();
   const [models, setModels] = useState<string[]>([]);
@@ -560,7 +858,9 @@ function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 
   const loadModels = async () => {
     setResult('loading', t('settings.providers.loadingModels'));
     try {
-      const result = await listProviderModels(kind);
+      const result = loadModelsOverride
+        ? await loadModelsOverride()
+        : await listProviderModels(kind);
       setModels(result.models);
       if (result.models.length === 0) {
         setResult('empty', t('settings.providers.modelsEmpty'));
@@ -577,9 +877,13 @@ function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 
   const applyModel = async (model: string) => {
     setResult('loading', t('common.saving'));
     try {
-      await setCredential(modelAccount, model);
+      if (applyModelOverride) {
+        await applyModelOverride(model);
+      } else {
+        await setCredential(modelAccount, model);
+      }
       setSelectedModel(model);
-      onModelSelected();
+      onModelSelected(model);
       setResult('success', t('settings.providers.modelSaved', { model }));
     } catch (error) {
       setResult('error', providerErrorMessage(error, t));
@@ -590,7 +894,9 @@ function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 
     <SettingRow label={t('settings.providers.toolsLabel')}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', maxWidth: mobile ? '100%' : 420 }}>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', width: '100%' }}>
-          <button onClick={validate} style={miniBtnStyle} disabled={status === 'loading'}>{t('settings.providers.validate')}</button>
+          {showValidate && (
+            <button onClick={validate} style={miniBtnStyle} disabled={status === 'loading'}>{t('settings.providers.validate')}</button>
+          )}
           <button onClick={loadModels} style={miniBtnStyle} disabled={status === 'loading'}>{t('settings.providers.fetchModels')}</button>
           {models.length > 0 && (
             <SelectLite
@@ -638,6 +944,11 @@ type CredentialFieldStatus = 'idle' | 'saving' | 'saved' | 'readError' | 'saveEr
 interface CredentialFieldProps {
   label: string;
   account: string;
+  providerId?: string;
+  providerScoped?: boolean;
+  valueKey?: string;
+  readValue?: () => Promise<string | null>;
+  saveValue?: (value: string) => Promise<void>;
   placeholder?: string;
   mono?: boolean;
   mask?: boolean;
@@ -645,7 +956,20 @@ interface CredentialFieldProps {
   trailing?: ReactNode;
 }
 
-function CredentialField({ label, account, placeholder, mono, mask, defaultValue, trailing }: CredentialFieldProps) {
+function CredentialField({
+  label,
+  account,
+  providerId,
+  providerScoped,
+  valueKey,
+  readValue,
+  saveValue,
+  placeholder,
+  mono,
+  mask,
+  defaultValue,
+  trailing,
+}: CredentialFieldProps) {
   const { t } = useTranslation();
   const mobile = useMobileLayout();
   const [value, setValue] = useState('');
@@ -667,7 +991,11 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
-    readCredential(account)
+    const load = readValue
+      ?? (() => providerScoped && providerId
+        ? readAsrProviderCredential(providerId, account)
+        : readCredential(account));
+    load()
       .then(v => {
         if (cancelled) return;
         setValue(v ?? '');
@@ -682,7 +1010,7 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
     return () => {
       cancelled = true;
     };
-  }, [account]);
+  }, [account, providerId, providerScoped, valueKey]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -719,7 +1047,13 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
     setStatus('saving');
     emitSaved('saving', t('common.saving'));
     try {
-      await setCredential(account, v);
+      if (saveValue) {
+        await saveValue(v);
+      } else if (providerScoped && providerId) {
+        await setAsrProviderCredential(providerId, account, v);
+      } else {
+        await setCredential(account, v);
+      }
       if (!mountedRef.current) return;
       setDirty(false);
       showTemporaryStatus('saved');

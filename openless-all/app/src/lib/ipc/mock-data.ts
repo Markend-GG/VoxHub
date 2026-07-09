@@ -16,6 +16,7 @@ import type {
     CredentialsStatus,
     MicrophoneDevice,
     MeetingRecord,
+    AsrProviderCapabilities,
 } from "../types"
 import { OL_DATA } from "../mockData"
 import {
@@ -47,6 +48,13 @@ export let mockSettings: UserPreferences = {
     audioCueOnRecord: true,
     microphoneDeviceName: "",
     activeAsrProvider: "foundry-local-whisper",
+    meetingAsr: {
+        mode: "inherit_global",
+        providerId: null,
+        modelOverride: null,
+        modelProviderId: null,
+        silencePreset: "standard",
+    },
     activeLlmProvider: "ark",
     llmThinkingEnabled: false,
     restoreClipboardAfterPaste: true,
@@ -441,6 +449,50 @@ export const mockCredentialsStatus: CredentialsStatus = {
     volcengineConfigured: true,
     arkConfigured: true,
 }
+
+export const mockAsrProviderCapabilities: AsrProviderCapabilities[] = [
+    {
+        providerId: "volcengine",
+        supportsRealtime: true,
+        supportsDraftResult: false,
+        supportsFinalSegmentEvent: true,
+        supportsBatchResult: false,
+        supportsServerVad: false,
+        supportsVadSilencePreset: false,
+        supportsSentenceTimestamp: true,
+        supportsWordTimestamp: false,
+        supportsPunctuation: true,
+        supportsItn: true,
+    },
+    {
+        providerId: "bailian",
+        supportsRealtime: true,
+        supportsDraftResult: true,
+        supportsFinalSegmentEvent: true,
+        supportsBatchResult: false,
+        supportsServerVad: true,
+        supportsVadSilencePreset: true,
+        supportsSentenceTimestamp: true,
+        supportsWordTimestamp: true,
+        supportsPunctuation: true,
+        supportsItn: true,
+    },
+    ..."siliconflow,zhipu,groq,whisper,openrouter,xiaomi-mimo-asr,foundry-local-whisper,sherpa-onnx-local,local-qwen3,apple-speech"
+        .split(",")
+        .map(providerId => ({
+            providerId,
+            supportsRealtime: false,
+            supportsDraftResult: false,
+            supportsFinalSegmentEvent: false,
+            supportsBatchResult: true,
+            supportsServerVad: false,
+            supportsVadSilencePreset: false,
+            supportsSentenceTimestamp: false,
+            supportsWordTimestamp: false,
+            supportsPunctuation: false,
+            supportsItn: false,
+        })),
+]
 
 export const mockHotkeyStatus: HotkeyStatus = {
     adapter: "windowsLowLevel",

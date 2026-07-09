@@ -58,9 +58,15 @@ pub(super) fn ensure_microphone_permission(_inner: &Arc<Inner>) -> Result<(), St
 
 pub(super) fn ensure_asr_credentials() -> Result<(), String> {
     let active_asr = CredentialsVault::get_active_asr();
+    ensure_asr_credentials_for_provider(&active_asr, false)
+}
 
+pub(super) fn ensure_asr_credentials_for_provider(
+    active_asr: &str,
+    provider_specific: bool,
+) -> Result<(), String> {
     // 本地 Qwen3-ASR 没有"凭据"概念，但需要：(a) macOS 平台 (b) 模型已下载。
-    if crate::asr::local::is_local_qwen3(&active_asr) {
+    if crate::asr::local::is_local_qwen3(active_asr) {
         #[cfg(not(target_os = "macos"))]
         {
             return Err("本地 ASR 当前仅支持 macOS（Windows 见 issue #256）".to_string());
@@ -71,7 +77,7 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
         }
     }
 
-    if crate::asr::local::is_apple_speech(&active_asr) {
+    if crate::asr::local::is_apple_speech(active_asr) {
         #[cfg(not(target_os = "macos"))]
         {
             return Err("Apple Speech 当前仅支持 macOS".to_string());
@@ -82,7 +88,7 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
         }
     }
 
-    if crate::asr::local::foundry::is_foundry_local_whisper(&active_asr) {
+    if crate::asr::local::foundry::is_foundry_local_whisper(active_asr) {
         #[cfg(not(target_os = "windows"))]
         {
             return Err("Foundry Local Whisper 当前仅支持 Windows".to_string());
@@ -93,7 +99,7 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
         }
     }
 
-    if crate::asr::local::sherpa::is_sherpa_onnx_local(&active_asr) {
+    if crate::asr::local::sherpa::is_sherpa_onnx_local(active_asr) {
         #[cfg(not(target_os = "windows"))]
         {
             return Err("sherpa-onnx local ASR 当前仅支持 Windows".to_string());
@@ -104,21 +110,29 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
         }
     }
 
-    if is_whisper_compatible_provider(&active_asr)
-        || is_bailian_provider(&active_asr)
-        || is_mimo_provider(&active_asr)
+    if is_whisper_compatible_provider(active_asr)
+        || is_bailian_provider(active_asr)
+        || is_mimo_provider(active_asr)
     {
-        let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let api_key = if provider_specific {
+            CredentialsVault::get_asr_for_provider(active_asr, CredentialAccount::AsrApiKey)
+        } else {
+            CredentialsVault::get(CredentialAccount::AsrApiKey)
+        }
+        .ok()
+        .flatten()
+        .unwrap_or_default();
         if api_key.trim().is_empty() {
             return Err("请先在设置中填写 ASR 服务商 API Key".to_string());
         }
         return Ok(());
     }
 
-    let creds = read_volc_credentials();
+    let creds = if provider_specific {
+        read_volc_credentials_for_provider(active_asr)
+    } else {
+        read_volc_credentials()
+    };
     if creds.app_id.trim().is_empty() || creds.access_token.trim().is_empty() {
         Err("请先在设置中填写火山引擎 ASR App Key 和 Access Key".to_string())
     } else {
@@ -579,5 +593,153 @@ pub(super) async fn build_qa_asr_start_with_final_segment_sink(
                 bridge: Arc::new(DeferredAsrBridge::new()),
             })
         }
+    }
+}
+
+pub(super) struct MeetingAsrStartOptions {
+    pub(super) provider_id: String,
+    pub(super) final_segment_sink: Option<AsrFinalSegmentSink>,
+    pub(super) draft_segment_sink: Option<AsrDraftSegmentSink>,
+    pub(super) interruption_sink: Option<AsrInterruptionSink>,
+    pub(super) session_metadata: AsrSessionMetadata,
+    pub(super) silence_preset: crate::types::MeetingVadSilencePreset,
+    pub(super) model_override: Option<String>,
+}
+
+fn model_with_override(default_model: String, model_override: Option<&str>) -> String {
+    model_override
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or(default_model)
+}
+
+pub(super) async fn build_meeting_asr_start_with_options(
+    inner: &Arc<Inner>,
+    options: MeetingAsrStartOptions,
+) -> Result<QaAsrStart, String> {
+    let active_asr = options.provider_id.as_str();
+
+    #[cfg(target_os = "windows")]
+    if foundry::is_foundry_local_whisper(active_asr) || sherpa::is_sherpa_onnx_local(active_asr) {
+        return build_qa_asr_start_with_final_segment_sink(
+            inner,
+            active_asr,
+            options.final_segment_sink,
+        )
+        .await;
+    }
+
+    #[cfg(target_os = "macos")]
+    if crate::asr::local::is_local_qwen3(active_asr)
+        || crate::asr::local::is_apple_speech(active_asr)
+    {
+        return build_qa_asr_start_with_final_segment_sink(
+            inner,
+            active_asr,
+            options.final_segment_sink,
+        )
+        .await;
+    }
+
+    match active_asr_provider_kind(active_asr) {
+        ActiveAsrProviderKind::Bailian => {
+            let mut credentials = read_bailian_credentials_for_provider(active_asr);
+            credentials.model = model_with_override(
+                credentials.model,
+                options.model_override.as_deref(),
+            );
+            let mut asr = BailianRealtimeASR::new(credentials)
+                .with_session_metadata(options.session_metadata)
+                .with_interim_transcript_fallback(false)
+                .with_max_sentence_silence_ms(meeting_silence_preset_ms(
+                    options.silence_preset,
+                ));
+            if let Some(sink) = options.final_segment_sink {
+                asr = asr.with_final_segment_sink(sink);
+            }
+            if let Some(sink) = options.draft_segment_sink {
+                asr = asr.with_draft_segment_sink(sink);
+            }
+            if let Some(sink) = options.interruption_sink {
+                asr = asr.with_interruption_sink(sink);
+            }
+            Ok(QaAsrStart::Bailian {
+                asr: Arc::new(asr),
+                bridge: Arc::new(DeferredAsrBridge::new()),
+            })
+        }
+        ActiveAsrProviderKind::Mimo => {
+            let (api_key, base_url, model) = read_mimo_credentials_for_provider(active_asr);
+            let model = model_with_override(model, options.model_override.as_deref());
+            let mimo = Arc::new(MimoBatchASR::new(api_key, base_url, model));
+            let active = ActiveAsr::Mimo(Arc::clone(&mimo));
+            let consumer: Arc<dyn crate::recorder::AudioConsumer> = mimo;
+            Ok(QaAsrStart::Ready { active, consumer })
+        }
+        ActiveAsrProviderKind::WhisperCompatible => {
+            let (api_key, base_url, model) = read_whisper_credentials_for_provider(active_asr);
+            let model = model_with_override(model, options.model_override.as_deref());
+            let whisper_prompt =
+                crate::asr::whisper::build_prompt_from_phrases(&enabled_phrases(inner));
+            let whisper = Arc::new(
+                WhisperBatchASR::new(
+                    api_key,
+                    base_url,
+                    model,
+                    whisper_prompt,
+                    batch_asr_chunk_limit_ms(active_asr),
+                    whisper_supports_verbose_json(active_asr),
+                )
+                .with_request_format(whisper_request_format(active_asr)),
+            );
+            let active = ActiveAsr::Whisper(Arc::clone(&whisper));
+            let consumer: Arc<dyn crate::recorder::AudioConsumer> = whisper;
+            Ok(QaAsrStart::Ready { active, consumer })
+        }
+        ActiveAsrProviderKind::Volcengine => {
+            let asr = VolcengineStreamingASR::new(
+                read_volc_credentials_for_provider(active_asr),
+                enabled_hotwords(inner),
+            );
+            let asr = if let Some(sink) = options.final_segment_sink {
+                asr.with_final_segment_sink(sink)
+            } else {
+                asr
+            };
+            Ok(QaAsrStart::Volcengine {
+                asr: Arc::new(asr),
+                bridge: Arc::new(DeferredAsrBridge::new()),
+            })
+        }
+    }
+}
+
+fn meeting_silence_preset_ms(preset: crate::types::MeetingVadSilencePreset) -> Option<u32> {
+    match preset {
+        crate::types::MeetingVadSilencePreset::Short => Some(600),
+        crate::types::MeetingVadSilencePreset::Standard => Some(800),
+        crate::types::MeetingVadSilencePreset::Long => Some(1200),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_with_override;
+
+    #[test]
+    fn model_override_replaces_non_empty_default_model() {
+        assert_eq!(
+            model_with_override("whisper-1".to_string(), Some(" fun-asr-realtime ")),
+            "fun-asr-realtime"
+        );
+    }
+
+    #[test]
+    fn empty_model_override_keeps_default_model() {
+        assert_eq!(
+            model_with_override("whisper-1".to_string(), Some("  ")),
+            "whisper-1"
+        );
     }
 }

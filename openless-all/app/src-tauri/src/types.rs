@@ -592,6 +592,40 @@ pub enum TranscriptSegmentSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptTokenKind {
+    Word,
+    Char,
+    Token,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptTokenTimestamp {
+    pub text: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub provider_start_ms: Option<u64>,
+    pub provider_end_ms: Option<u64>,
+    pub kind: TranscriptTokenKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TranscriptSegmentMetadata {
+    pub provider_id: Option<String>,
+    pub provider_session_id: Option<String>,
+    pub provider_segment_id: Option<String>,
+    pub sentence_id: Option<String>,
+    pub sequence: Option<u64>,
+    pub audio_part_index: Option<u32>,
+    pub session_start_ms: Option<u64>,
+    pub provider_start_ms: Option<u64>,
+    pub provider_end_ms: Option<u64>,
+    pub token_timestamps: Vec<TranscriptTokenTimestamp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptSegment {
     pub id: String,
@@ -600,6 +634,8 @@ pub struct TranscriptSegment {
     pub end_ms: Option<u64>,
     pub text: String,
     pub source: TranscriptSegmentSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<TranscriptSegmentMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -663,6 +699,8 @@ pub struct MeetingRecordingSnapshot {
     pub phase: MeetingRecordingPhase,
     pub elapsed_ms: u64,
     pub active_asr_provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_provider_session_id: Option<String>,
     pub asr_interrupted: bool,
 }
 
@@ -671,6 +709,19 @@ pub struct MeetingRecordingSnapshot {
 pub struct MeetingTranscriptSegmentEvent {
     pub meeting_id: String,
     pub segment: TranscriptSegment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingTranscriptDraftEvent {
+    pub meeting_id: String,
+    pub provider_id: String,
+    pub provider_session_id: Option<String>,
+    pub text: String,
+    pub start_ms: Option<u64>,
+    pub end_ms: Option<u64>,
+    pub sequence: Option<u64>,
+    pub clear: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1157,7 +1208,8 @@ pub fn builtin_rewrite_style_pack() -> StylePack {
     StylePack {
         id: BUILTIN_STYLE_PACK_REWRITE_ID.into(),
         name: "智能重写".into(),
-        description: "改善表达的流畅度和清晰度，修正语法和标点错误，保持原文语气和正式程度。".into(),
+        description: "改善表达的流畅度和清晰度，修正语法和标点错误，保持原文语气和正式程度。"
+            .into(),
         author: Some("OpenLess".into()),
         version: "1.0.0".into(),
         kind: StylePackKind::Builtin,
@@ -1181,33 +1233,59 @@ pub fn builtin_rewrite_style_pack() -> StylePack {
 /// 内置重写风格包列表：为每个语音模式创建一个对应的重写风格包。
 pub fn builtin_rewrite_packs() -> Vec<StylePack> {
     let modes = [
-        (PolishMode::Raw, BUILTIN_STYLE_PACK_REWRITE_RAW_ID, "最小重写", "尽量保留原文，仅做必要的语法和标点修正。"),
-        (PolishMode::Light, BUILTIN_STYLE_PACK_REWRITE_LIGHT_ID, "流畅重写", "改善表达的流畅度和清晰度，修正语法和标点错误，保持原文语气。"),
-        (PolishMode::Structured, BUILTIN_STYLE_PACK_REWRITE_STRUCTURED_ID, "结构化重写", "重新组织文本结构，使其更清晰、更有条理。"),
-        (PolishMode::Formal, BUILTIN_STYLE_PACK_REWRITE_FORMAL_ID, "正式重写", "将文本转换为正式、专业的书面表达。"),
+        (
+            PolishMode::Raw,
+            BUILTIN_STYLE_PACK_REWRITE_RAW_ID,
+            "最小重写",
+            "尽量保留原文，仅做必要的语法和标点修正。",
+        ),
+        (
+            PolishMode::Light,
+            BUILTIN_STYLE_PACK_REWRITE_LIGHT_ID,
+            "流畅重写",
+            "改善表达的流畅度和清晰度，修正语法和标点错误，保持原文语气。",
+        ),
+        (
+            PolishMode::Structured,
+            BUILTIN_STYLE_PACK_REWRITE_STRUCTURED_ID,
+            "结构化重写",
+            "重新组织文本结构，使其更清晰、更有条理。",
+        ),
+        (
+            PolishMode::Formal,
+            BUILTIN_STYLE_PACK_REWRITE_FORMAL_ID,
+            "正式重写",
+            "将文本转换为正式、专业的书面表达。",
+        ),
     ];
-    modes.iter().map(|(mode, id, name, desc)| StylePack {
-        id: (*id).into(),
-        name: (*name).into(),
-        description: (*desc).into(),
-        author: Some("OpenLess".into()),
-        version: "1.0.0".into(),
-        kind: StylePackKind::Builtin,
-        base_mode: *mode,
-        prompt: format!("你是文本重写助手。请根据以下要求改写用户选中的文本：\n{}", desc),
-        examples: vec![],
-        tags: vec!["重写".into()],
-        icon_path: None,
-        created_at: None,
-        updated_at: None,
-        enabled: true,
-        active: false,
-        recommended_model: None,
-        compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
-        origin_pack_id: None,
-        origin_author_login: None,
-        scope: StylePackScope::Rewrite,
-    }).collect()
+    modes
+        .iter()
+        .map(|(mode, id, name, desc)| StylePack {
+            id: (*id).into(),
+            name: (*name).into(),
+            description: (*desc).into(),
+            author: Some("OpenLess".into()),
+            version: "1.0.0".into(),
+            kind: StylePackKind::Builtin,
+            base_mode: *mode,
+            prompt: format!(
+                "你是文本重写助手。请根据以下要求改写用户选中的文本：\n{}",
+                desc
+            ),
+            examples: vec![],
+            tags: vec!["重写".into()],
+            icon_path: None,
+            created_at: None,
+            updated_at: None,
+            enabled: true,
+            active: false,
+            recommended_model: None,
+            compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+            origin_pack_id: None,
+            origin_author_login: None,
+            scope: StylePackScope::Rewrite,
+        })
+        .collect()
 }
 
 pub fn builtin_style_packs() -> Vec<StylePack> {
@@ -1432,10 +1510,7 @@ pub struct UserPreferences {
     pub windows_sendinput_insertion_only: bool,
     /// Windows：SendInput 模式下是否在系统键盘列表（Win+Space）中显示 OpenLess TSF 输入法。
     /// 默认 true 保持现有行为；关闭后用户级禁用语言配置文件，无需管理员权限。
-    #[serde(
-        default = "default_true",
-        rename = "windowsShowOpenlessInKeyboardList"
-    )]
+    #[serde(default = "default_true", rename = "windowsShowOpenlessInKeyboardList")]
     pub windows_show_openless_in_keyboard_list: bool,
     /// 用户的工作语言（多选，原生名）。会作为前提注入 LLM polish/translate 的 system prompt 头部，
     /// 让模型知道该用户在哪些语言间工作。详见 issue #4。
@@ -1614,6 +1689,8 @@ pub struct UserPreferences {
     pub history_retention_days: u32,
     #[serde(default = "default_meeting_audio_retention_count")]
     pub meeting_audio_retention_count: u32,
+    #[serde(default)]
+    pub meeting_asr: MeetingAsrSettings,
     /// 对话感知 polish 的上下文窗口（分钟）：把最近 N 分钟的转写 + 已润色文本
     /// 作为多轮上下文喂给 LLM，让代词 / 不完整句子能被正确解析。
     /// 0 = 关闭（每次润色独立单轮，跟历史行为一致）。默认 5 分钟。
@@ -1748,6 +1825,55 @@ fn default_meeting_audio_retention_count() -> u32 {
 
 pub fn clamp_meeting_audio_retention_count(value: u32) -> u32 {
     value.min(100)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingAsrMode {
+    InheritGlobal,
+    ProviderSpecific,
+}
+
+impl Default for MeetingAsrMode {
+    fn default() -> Self {
+        Self::InheritGlobal
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingVadSilencePreset {
+    Short,
+    Standard,
+    Long,
+}
+
+impl Default for MeetingVadSilencePreset {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MeetingAsrSettings {
+    pub mode: MeetingAsrMode,
+    pub provider_id: Option<String>,
+    pub model_override: Option<String>,
+    pub model_provider_id: Option<String>,
+    pub silence_preset: MeetingVadSilencePreset,
+}
+
+impl Default for MeetingAsrSettings {
+    fn default() -> Self {
+        Self {
+            mode: MeetingAsrMode::InheritGlobal,
+            provider_id: None,
+            model_override: None,
+            model_provider_id: None,
+            silence_preset: MeetingVadSilencePreset::Standard,
+        }
+    }
 }
 
 fn default_polish_context_window_minutes() -> u32 {
@@ -1923,6 +2049,8 @@ struct UserPreferencesWire {
     history_retention_days: u32,
     #[serde(default = "default_meeting_audio_retention_count")]
     meeting_audio_retention_count: u32,
+    #[serde(default)]
+    meeting_asr: MeetingAsrSettings,
     #[serde(default = "default_polish_context_window_minutes")]
     polish_context_window_minutes: u32,
     #[serde(default)]
@@ -2056,6 +2184,7 @@ impl Default for UserPreferencesWire {
             update_channel: prefs.update_channel,
             history_retention_days: prefs.history_retention_days,
             meeting_audio_retention_count: prefs.meeting_audio_retention_count,
+            meeting_asr: prefs.meeting_asr,
             polish_context_window_minutes: prefs.polish_context_window_minutes,
             start_minimized: prefs.start_minimized,
             theme_mode: prefs.theme_mode,
@@ -2222,6 +2351,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             meeting_audio_retention_count: clamp_meeting_audio_retention_count(
                 wire.meeting_audio_retention_count,
             ),
+            meeting_asr: wire.meeting_asr,
             polish_context_window_minutes: wire.polish_context_window_minutes,
             start_minimized: wire.start_minimized,
             theme_mode: wire.theme_mode,
@@ -2235,8 +2365,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             audio_recording_max_entries: wire.audio_recording_max_entries,
             context_capture_enabled: wire.context_capture_enabled,
             context_vision_analysis_enabled: wire.context_vision_analysis_enabled,
-            context_vision_analysis_consent_accepted: wire
-                .context_vision_analysis_consent_accepted,
+            context_vision_analysis_consent_accepted: wire.context_vision_analysis_consent_accepted,
             marketplace_base_url: wire.marketplace_base_url,
             marketplace_dev_login: wire.marketplace_dev_login,
             android_insert_strategy: normalize_android_insert_strategy(
@@ -3052,6 +3181,7 @@ impl Default for UserPreferences {
             update_channel: UpdateChannel::default(),
             history_retention_days: default_history_retention_days(),
             meeting_audio_retention_count: default_meeting_audio_retention_count(),
+            meeting_asr: MeetingAsrSettings::default(),
             polish_context_window_minutes: default_polish_context_window_minutes(),
             start_minimized: false,
             theme_mode: ThemeMode::default(),
@@ -3812,7 +3942,10 @@ mod tests {
         let prefs: UserPreferences =
             serde_json::from_str(r#"{"windowsSendInputInsertionOnly": true}"#).unwrap();
         assert!(prefs.windows_sendinput_insertion_only);
-        assert_eq!(prefs.windows_insertion_mode, WindowsInsertionMode::SendInput);
+        assert_eq!(
+            prefs.windows_insertion_mode,
+            WindowsInsertionMode::SendInput
+        );
     }
 
     #[test]
@@ -3820,7 +3953,10 @@ mod tests {
         let prefs: UserPreferences =
             serde_json::from_str(r#"{"windowsSendinputInsertionOnly": true}"#).unwrap();
         assert!(prefs.windows_sendinput_insertion_only);
-        assert_eq!(prefs.windows_insertion_mode, WindowsInsertionMode::SendInput);
+        assert_eq!(
+            prefs.windows_insertion_mode,
+            WindowsInsertionMode::SendInput
+        );
     }
 
     #[test]
@@ -3886,7 +4022,10 @@ mod tests {
         assert!(json.contains(r#""windowsInsertionMode":"sendInput""#));
         let restored: UserPreferences = serde_json::from_str(&json).unwrap();
         assert!(restored.windows_sendinput_insertion_only);
-        assert_eq!(restored.windows_insertion_mode, WindowsInsertionMode::SendInput);
+        assert_eq!(
+            restored.windows_insertion_mode,
+            WindowsInsertionMode::SendInput
+        );
     }
 
     #[test]
@@ -3959,6 +4098,134 @@ mod tests {
         let too_large: UserPreferences =
             serde_json::from_str(r#"{"meetingAudioRetentionCount":150}"#).unwrap();
         assert_eq!(too_large.meeting_audio_retention_count, 100);
+    }
+
+    #[test]
+    fn transcript_segment_metadata_is_backward_compatible() {
+        let segment: TranscriptSegment = serde_json::from_str(
+            r#"{
+                "id":"seg-000001",
+                "speakerLabel":"未区分",
+                "startMs":0,
+                "endMs":1200,
+                "text":"我们开始吧",
+                "source":"realtime_asr"
+            }"#,
+        )
+        .unwrap();
+
+        assert!(segment.metadata.is_none());
+    }
+
+    #[test]
+    fn transcript_segment_metadata_round_trips_timestamp_fields() {
+        let segment = TranscriptSegment {
+            id: "seg-000001".to_string(),
+            speaker_label: "未区分".to_string(),
+            start_ms: 2400,
+            end_ms: Some(3600),
+            text: "确认下一步".to_string(),
+            source: TranscriptSegmentSource::RealtimeAsr,
+            metadata: Some(TranscriptSegmentMetadata {
+                provider_id: Some("bailian".to_string()),
+                provider_session_id: Some("session-1".to_string()),
+                provider_segment_id: Some("provider-seg-1".to_string()),
+                sentence_id: Some("7".to_string()),
+                sequence: Some(3),
+                audio_part_index: Some(2),
+                session_start_ms: Some(2000),
+                provider_start_ms: Some(400),
+                provider_end_ms: Some(1600),
+                token_timestamps: vec![TranscriptTokenTimestamp {
+                    text: "确认".to_string(),
+                    start_ms: 2400,
+                    end_ms: 2700,
+                    provider_start_ms: Some(400),
+                    provider_end_ms: Some(700),
+                    kind: TranscriptTokenKind::Word,
+                }],
+            }),
+        };
+
+        let value = serde_json::to_value(&segment).unwrap();
+        assert_eq!(value["metadata"]["providerId"], "bailian");
+        assert_eq!(value["metadata"]["audioPartIndex"], 2);
+        assert_eq!(value["metadata"]["sessionStartMs"], 2000);
+        assert_eq!(value["metadata"]["tokenTimestamps"][0]["kind"], "word");
+
+        let restored: TranscriptSegment = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, segment);
+    }
+
+    #[test]
+    fn meeting_snapshot_serializes_active_provider_session_id() {
+        let record = MeetingRecord {
+            id: "meeting-1".to_string(),
+            title: "会议记录".to_string(),
+            status: MeetingStatus::Recording,
+            started_at: "2026-07-08T09:00:00Z".to_string(),
+            ended_at: None,
+            duration_ms: None,
+            transcript_segments: vec![],
+            summary: MeetingSummary::default(),
+            audio: MeetingAudioMeta {
+                state: MeetingAudioState::Temporary,
+                retained: false,
+                path: None,
+            },
+            created_at: "2026-07-08T09:00:00Z".to_string(),
+            updated_at: "2026-07-08T09:00:00Z".to_string(),
+        };
+        let snapshot = MeetingRecordingSnapshot {
+            meeting: record,
+            phase: MeetingRecordingPhase::Recording,
+            elapsed_ms: 1234,
+            active_asr_provider: "bailian".to_string(),
+            active_provider_session_id: Some("session-1".to_string()),
+            asr_interrupted: false,
+        };
+
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["activeProviderSessionId"], "session-1");
+    }
+
+    #[test]
+    fn meeting_asr_settings_default_to_inherit_global_and_standard_silence() {
+        let prefs = UserPreferences::default();
+        assert_eq!(prefs.meeting_asr.mode, MeetingAsrMode::InheritGlobal);
+        assert_eq!(prefs.meeting_asr.provider_id, None);
+        assert_eq!(prefs.meeting_asr.model_override, None);
+        assert_eq!(prefs.meeting_asr.model_provider_id, None);
+        assert_eq!(
+            prefs.meeting_asr.silence_preset,
+            MeetingVadSilencePreset::Standard
+        );
+
+        let from_empty: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_empty.meeting_asr, MeetingAsrSettings::default());
+    }
+
+    #[test]
+    fn meeting_asr_settings_preserve_meeting_only_model_override() {
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{
+                "meetingAsr": {
+                    "mode": "inherit_global",
+                    "providerId": null,
+                    "modelOverride": "fun-asr-realtime",
+                    "modelProviderId": "bailian",
+                    "silencePreset": "standard"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(prefs.meeting_asr.model_override.as_deref(), Some("fun-asr-realtime"));
+        assert_eq!(prefs.meeting_asr.model_provider_id.as_deref(), Some("bailian"));
+
+        let value = serde_json::to_value(&prefs.meeting_asr).unwrap();
+        assert_eq!(value["modelOverride"], "fun-asr-realtime");
+        assert_eq!(value["modelProviderId"], "bailian");
     }
 
     #[test]

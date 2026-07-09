@@ -312,6 +312,30 @@ export type MeetingAudioState =
 
 export type TranscriptSegmentSource = 'realtime_asr' | 'retranscribed_asr';
 
+export type TranscriptTokenKind = 'word' | 'char' | 'token';
+
+export interface TranscriptTokenTimestamp {
+  text: string;
+  startMs: number;
+  endMs: number;
+  providerStartMs: number | null;
+  providerEndMs: number | null;
+  kind: TranscriptTokenKind;
+}
+
+export interface TranscriptSegmentMetadata {
+  providerId: string | null;
+  providerSessionId: string | null;
+  providerSegmentId: string | null;
+  sentenceId: string | null;
+  sequence: number | null;
+  audioPartIndex: number | null;
+  sessionStartMs: number | null;
+  providerStartMs: number | null;
+  providerEndMs: number | null;
+  tokenTimestamps: TranscriptTokenTimestamp[];
+}
+
 export interface TranscriptSegment {
   id: string;
   speakerLabel: string;
@@ -319,6 +343,7 @@ export interface TranscriptSegment {
   endMs: number | null;
   text: string;
   source: TranscriptSegmentSource;
+  metadata?: TranscriptSegmentMetadata | null;
 }
 
 export interface MeetingTodo {
@@ -369,12 +394,24 @@ export interface MeetingRecordingSnapshot {
   phase: MeetingRecordingPhase;
   elapsedMs: number;
   activeAsrProvider: string;
+  activeProviderSessionId?: string | null;
   asrInterrupted: boolean;
 }
 
 export interface MeetingTranscriptSegmentEvent {
   meetingId: string;
   segment: TranscriptSegment;
+}
+
+export interface MeetingTranscriptDraftEvent {
+  meetingId: string;
+  providerId: string;
+  providerSessionId: string | null;
+  text: string;
+  startMs: number | null;
+  endMs: number | null;
+  sequence: number | null;
+  clear: boolean;
 }
 
 export interface MeetingErrorEvent {
@@ -537,6 +574,18 @@ export type UpdateChannel = 'stable' | 'beta';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 
+export type MeetingAsrMode = 'inherit_global' | 'provider_specific';
+
+export type MeetingVadSilencePreset = 'short' | 'standard' | 'long';
+
+export interface MeetingAsrSettings {
+  mode: MeetingAsrMode;
+  providerId: string | null;
+  modelOverride: string | null;
+  modelProviderId: string | null;
+  silencePreset: MeetingVadSilencePreset;
+}
+
 export interface CustomStylePrompts {
   raw: string;
   light: string;
@@ -628,6 +677,7 @@ export interface UserPreferences {
   /** 录音输入设备名称。空字符串 = 使用系统默认麦克风。 */
   microphoneDeviceName: string;
   activeAsrProvider: string;
+  meetingAsr: MeetingAsrSettings;
   activeLlmProvider: string;
   /** LLM 思考模式开关。默认关闭；OpenAI 普通 chat 模型会跳过不支持的字段。详见 issue #402。 */
   llmThinkingEnabled: boolean;
@@ -954,6 +1004,20 @@ export interface CredentialsStatus {
   /** 兼容旧字段（过渡期保留）。 */
   volcengineConfigured: boolean;
   arkConfigured: boolean;
+}
+
+export interface AsrProviderCapabilities {
+  providerId: string;
+  supportsRealtime: boolean;
+  supportsDraftResult: boolean;
+  supportsFinalSegmentEvent: boolean;
+  supportsBatchResult: boolean;
+  supportsServerVad: boolean;
+  supportsVadSilencePreset: boolean;
+  supportsSentenceTimestamp: boolean;
+  supportsWordTimestamp: boolean;
+  supportsPunctuation: boolean;
+  supportsItn: boolean;
 }
 
 export interface TodayMetrics {

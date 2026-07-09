@@ -26,6 +26,7 @@ use crate::asr::local::{
     foundry, sherpa, FoundryLocalRuntime, FoundryLocalWhisperAsr, SherpaOnnxAsr, SherpaOnnxRuntime,
 };
 use crate::asr::{
+    AsrDraftSegmentSink, AsrFinalSegmentSink, AsrInterruptionSink, AsrSessionMetadata,
     BailianCredentials, BailianRealtimeASR, DictionaryHotword, MimoBatchASR, RawTranscript,
     VolcengineCredentials, VolcengineStreamingASR, WhisperBatchASR,
 };
@@ -43,8 +44,8 @@ use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::insertion::TextInserter;
 use crate::persistence::{
     sync_style_pack_preferences, ActivityStore, ContextAnalysisStore, ContextCaptureStore,
-    CorrectionRuleStore, CredentialAccount, CredentialsVault, DictionaryStore, GeneratedReportStore,
-    HistoryStore, PreferencesStore, ReportTemplateStore, RewriteHistoryStore,
+    CorrectionRuleStore, CredentialAccount, CredentialsVault, DictionaryStore,
+    GeneratedReportStore, HistoryStore, PreferencesStore, ReportTemplateStore, RewriteHistoryStore,
     ScreenshotAggregationStore, ScreenshotRecordStore, StylePackStore,
 };
 
@@ -75,10 +76,10 @@ mod hotkey_loops;
 mod meeting;
 mod meeting_summary;
 mod polish_flow;
-mod rewrite_flow;
 mod qa;
 mod qa_session;
 mod resources;
+mod rewrite_flow;
 
 use asr_wiring::*;
 use capsule_focus::*;
@@ -86,8 +87,8 @@ use hotkey_loops::*;
 use meeting::*;
 use meeting_summary::*;
 use polish_flow::*;
-use rewrite_flow::*;
 use qa_session::*;
+use rewrite_flow::*;
 
 // less_computer_sync 命令的数据源（浮窗 webview 冷加载竞态补偿，见 dictation.rs）。
 pub(crate) use dictation::less_computer_event_backlog;
@@ -429,27 +430,39 @@ impl Coordinator {
                 RewriteHistoryStore::new_fallback()
             });
             let context_capture = ContextCaptureStore::new().unwrap_or_else(|e| {
-                log::error!("[coord] ContextCaptureStore init failed: {e}; fallback to temp storage");
+                log::error!(
+                    "[coord] ContextCaptureStore init failed: {e}; fallback to temp storage"
+                );
                 ContextCaptureStore::new_fallback()
             });
             let context_analysis = ContextAnalysisStore::new().unwrap_or_else(|e| {
-                log::error!("[coord] ContextAnalysisStore init failed: {e}; fallback to temp storage");
+                log::error!(
+                    "[coord] ContextAnalysisStore init failed: {e}; fallback to temp storage"
+                );
                 ContextAnalysisStore::new_fallback()
             });
             let screenshot_records = ScreenshotRecordStore::new().unwrap_or_else(|e| {
-                log::error!("[coord] ScreenshotRecordStore init failed: {e}; fallback to temp storage");
+                log::error!(
+                    "[coord] ScreenshotRecordStore init failed: {e}; fallback to temp storage"
+                );
                 ScreenshotRecordStore::new_fallback()
             });
             let screenshot_aggregation = ScreenshotAggregationStore::new().unwrap_or_else(|e| {
-                log::error!("[coord] ScreenshotAggregationStore init failed: {e}; fallback to temp storage");
+                log::error!(
+                    "[coord] ScreenshotAggregationStore init failed: {e}; fallback to temp storage"
+                );
                 ScreenshotAggregationStore::new_fallback()
             });
             let report_templates = ReportTemplateStore::new().unwrap_or_else(|e| {
-                log::error!("[coord] ReportTemplateStore init failed: {e}; fallback to temp storage");
+                log::error!(
+                    "[coord] ReportTemplateStore init failed: {e}; fallback to temp storage"
+                );
                 ReportTemplateStore::new_fallback()
             });
             let generated_reports = GeneratedReportStore::new().unwrap_or_else(|e| {
-                log::error!("[coord] GeneratedReportStore init failed: {e}; fallback to temp storage");
+                log::error!(
+                    "[coord] GeneratedReportStore init failed: {e}; fallback to temp storage"
+                );
                 GeneratedReportStore::new_fallback()
             });
             let prefs = PreferencesStore::new().unwrap_or_else(|e| {
@@ -545,7 +558,7 @@ impl Coordinator {
                     #[cfg(not(mobile))]
                     remote_no_insert: AtomicBool::new(false),
                     less_computer_conversation: AtomicBool::new(false),
-            rewrite_in_progress: AtomicBool::new(false),
+                    rewrite_in_progress: AtomicBool::new(false),
                 }),
             }
         }
@@ -585,7 +598,9 @@ impl Coordinator {
             ScreenshotRecordStore::new_fallback()
         });
         let screenshot_aggregation = ScreenshotAggregationStore::new().unwrap_or_else(|e| {
-            log::error!("[coord] ScreenshotAggregationStore init failed: {e}; fallback to temp storage");
+            log::error!(
+                "[coord] ScreenshotAggregationStore init failed: {e}; fallback to temp storage"
+            );
             ScreenshotAggregationStore::new_fallback()
         });
         let report_templates = ReportTemplateStore::new().unwrap_or_else(|e| {
@@ -1269,7 +1284,6 @@ impl Coordinator {
         close_qa_panel(&self.inner);
     }
 
-
     /// 用户点 ✕ / 按 Esc 关 Less Computer 浮窗：隐藏窗口 + 结束连续对话
     /// （下次说话开新会话，不再 --continue 续旧上下文）。
     pub fn less_computer_window_dismiss(&self) {
@@ -1297,8 +1311,7 @@ impl Coordinator {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
             let session_id = crate::coordinator_state::new_session_id();
-            if let Err(e) =
-                dictation::run_voice_agent_transcript(&inner, session_id, text, 0).await
+            if let Err(e) = dictation::run_voice_agent_transcript(&inner, session_id, text, 0).await
             {
                 log::warn!("[less-computer] text submit run failed: {e}");
             }
@@ -2125,9 +2138,11 @@ pub(super) fn insert_via_non_tsf_fallback(
     let prefs = inner.prefs.get();
     let sendinput_options = dictation::windows_sendinput_options_from_prefs(&prefs);
     let status = finish_non_tsf_insertion_fallback(
-        || inner
-            .inserter
-            .insert_via_unicode_keystrokes(polished, sendinput_options),
+        || {
+            inner
+                .inserter
+                .insert_via_unicode_keystrokes(polished, sendinput_options)
+        },
         || inner.inserter.copy_fallback(polished),
     );
 
@@ -2246,6 +2261,24 @@ fn read_whisper_credentials() -> (String, String, String) {
     (api_key, base_url, model)
 }
 
+fn read_whisper_credentials_for_provider(provider_id: &str) -> (String, String, String) {
+    let api_key = CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrApiKey)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let base_url =
+        CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrEndpoint)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+    let model = CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrModel)
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "whisper-1".to_string());
+    (api_key, base_url, model)
+}
+
 fn read_mimo_credentials() -> (String, String, String) {
     let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
         .ok()
@@ -2257,6 +2290,25 @@ fn read_mimo_credentials() -> (String, String, String) {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| crate::asr::mimo::DEFAULT_ENDPOINT.to_string());
     let model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::mimo::DEFAULT_MODEL.to_string());
+    (api_key, base_url, model)
+}
+
+fn read_mimo_credentials_for_provider(provider_id: &str) -> (String, String, String) {
+    let api_key = CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrApiKey)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let base_url =
+        CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrEndpoint)
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| crate::asr::mimo::DEFAULT_ENDPOINT.to_string());
+    let model = CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrModel)
         .ok()
         .flatten()
         .filter(|s| !s.trim().is_empty())
@@ -2291,6 +2343,35 @@ fn read_bailian_credentials() -> BailianCredentials {
     }
 }
 
+fn read_bailian_credentials_for_provider(provider_id: &str) -> BailianCredentials {
+    let api_key = CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrApiKey)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let endpoint =
+        CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrEndpoint)
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| crate::asr::bailian::DEFAULT_ENDPOINT.to_string());
+    let model = CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrModel)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::bailian::DEFAULT_MODEL.to_string());
+    let vocabulary_id =
+        CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrVocabularyId)
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty());
+    BailianCredentials {
+        api_key,
+        endpoint,
+        model,
+        vocabulary_id,
+    }
+}
+
 fn read_volc_credentials() -> VolcengineCredentials {
     let app_id = CredentialsVault::get(CredentialAccount::VolcengineAppKey)
         .ok()
@@ -2305,6 +2386,32 @@ fn read_volc_credentials() -> VolcengineCredentials {
         .flatten()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| VolcengineCredentials::default_resource_id().to_string());
+    VolcengineCredentials {
+        app_id,
+        access_token,
+        resource_id,
+    }
+}
+
+fn read_volc_credentials_for_provider(provider_id: &str) -> VolcengineCredentials {
+    let app_id =
+        CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::VolcengineAppKey)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+    let access_token =
+        CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::VolcengineAccessKey)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+    let resource_id = CredentialsVault::get_asr_for_provider(
+        provider_id,
+        CredentialAccount::VolcengineResourceId,
+    )
+    .ok()
+    .flatten()
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| VolcengineCredentials::default_resource_id().to_string());
     VolcengineCredentials {
         app_id,
         access_token,

@@ -18,18 +18,21 @@ export {
 export { isTauri, invokeOrMock, getPlatformCapabilities } from "./shared"
 
 // settings
-export { getSettings, getDefaultStyleSystemPrompts, setSettings } from "./settings"
+export { getSettings, getDefaultStyleSystemPrompts, setSettings, listAsrProviderCapabilities } from "./settings"
 
 // asr-credentials
 export type { ProviderCheckResult, ProviderModelsResult } from "./asr-credentials"
 export {
     getCredentials,
     setCredential,
+    setAsrProviderCredential,
     setActiveAsrProvider,
     setActiveLlmProvider,
     readCredential,
+    readAsrProviderCredential,
     validateProviderCredentials,
     listProviderModels,
+    listAsrProviderModels,
 } from "./asr-credentials"
 
 // history

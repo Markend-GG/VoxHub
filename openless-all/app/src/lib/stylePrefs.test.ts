@@ -35,6 +35,13 @@ const previousPrefs: UserPreferences = {
   audioCueOnRecord: true,
   microphoneDeviceName: '',
   activeAsrProvider: 'volcengine',
+  meetingAsr: {
+    mode: 'inherit_global',
+    providerId: null,
+    modelOverride: null,
+    modelProviderId: null,
+    silencePreset: 'standard',
+  },
   activeLlmProvider: 'ark',
   llmThinkingEnabled: false,
   restoreClipboardAfterPaste: true,

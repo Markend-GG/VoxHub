@@ -13,6 +13,11 @@ pub struct ProviderModelsResult {
 }
 
 #[tauri::command]
+pub fn list_asr_provider_capabilities() -> Vec<crate::asr::AsrProviderCapabilities> {
+    crate::asr::list_asr_provider_capabilities()
+}
+
+#[tauri::command]
 pub async fn validate_provider_credentials(kind: String) -> Result<ProviderCheckResult, String> {
     match kind.as_str() {
         "llm" => validate_llm_provider()
@@ -51,6 +56,41 @@ pub async fn list_provider_models(kind: String) -> Result<ProviderModelsResult, 
     fetch_provider_models(&config)
         .await
         .map(|models| ProviderModelsResult { models })
+}
+
+#[tauri::command]
+pub async fn list_asr_provider_models(provider: String) -> Result<ProviderModelsResult, String> {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return Err("provider is empty".to_string());
+    }
+    if provider == crate::asr::bailian::PROVIDER_ID {
+        return Ok(ProviderModelsResult {
+            models: vec![crate::asr::bailian::DEFAULT_MODEL.to_string()],
+        });
+    }
+    if provider == crate::asr::mimo::PROVIDER_ID {
+        return Ok(ProviderModelsResult {
+            models: vec![crate::asr::mimo::DEFAULT_MODEL.to_string()],
+        });
+    }
+    if active_asr_is_keyless_for_validation(provider) || provider == "volcengine" {
+        return Ok(ProviderModelsResult { models: Vec::new() });
+    }
+    if !is_whisper_compatible_asr_provider(provider) {
+        return Ok(ProviderModelsResult { models: Vec::new() });
+    }
+    let config = read_openai_asr_provider_config(provider)?;
+    fetch_provider_models(&config)
+        .await
+        .map(|models| ProviderModelsResult { models })
+}
+
+fn is_whisper_compatible_asr_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter"
+    )
 }
 
 pub(crate) struct ProviderConfig {
@@ -101,6 +141,28 @@ fn read_openai_provider_config(kind: &str) -> Result<ProviderConfig, String> {
         base_url,
         api_key,
         extra_headers,
+    })
+}
+
+fn read_openai_asr_provider_config(provider: &str) -> Result<ProviderConfig, String> {
+    let api_key = CredentialsVault::get_asr_for_provider(provider, CredentialAccount::AsrApiKey)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    let base_url = CredentialsVault::get_asr_for_provider(provider, CredentialAccount::AsrEndpoint)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    if api_key.trim().is_empty() {
+        return Err("API Key 涓虹┖".to_string());
+    }
+    if base_url.trim().is_empty() {
+        return Err("Endpoint 涓虹┖".to_string());
+    }
+    crate::coordinator::validate_llm_endpoint(&base_url)
+        .map_err(|_| "endpointInvalid".to_string())?;
+    Ok(ProviderConfig {
+        base_url,
+        api_key,
+        extra_headers: HashMap::new(),
     })
 }
 

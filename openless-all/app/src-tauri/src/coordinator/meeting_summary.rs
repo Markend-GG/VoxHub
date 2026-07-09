@@ -706,6 +706,7 @@ mod tests {
             end_ms: Some(18_000),
             text: text.to_string(),
             source: TranscriptSegmentSource::RealtimeAsr,
+            metadata: None,
         }
     }
 

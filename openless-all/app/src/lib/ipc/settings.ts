@@ -1,7 +1,7 @@
-import type { StyleSystemPrompts, UserPreferences } from "../types"
+import type { AsrProviderCapabilities, StyleSystemPrompts, UserPreferences } from "../types"
 export type { UpdateChannel } from "../types"
 import { invokeOrMock } from "./shared"
-import { mockSettings, mockDefaultStyleSystemPrompts, mockSetSettings } from "./mock-data"
+import { mockAsrProviderCapabilities, mockSettings, mockDefaultStyleSystemPrompts, mockSetSettings } from "./mock-data"
 
 export function getSettings(): Promise<UserPreferences> {
     return invokeOrMock("get_settings", undefined, () => ({ ...mockSettings }))
@@ -18,4 +18,8 @@ export function setSettings(prefs: UserPreferences): Promise<void> {
         mockSetSettings(prefs)
         return undefined
     })
+}
+
+export function listAsrProviderCapabilities(): Promise<AsrProviderCapabilities[]> {
+    return invokeOrMock("list_asr_provider_capabilities", undefined, () => mockAsrProviderCapabilities)
 }

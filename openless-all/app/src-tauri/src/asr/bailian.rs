@@ -21,7 +21,11 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
-use super::{AsrFinalSegment, AsrFinalSegmentSink, AudioConsumer, RawTranscript};
+use super::{
+    AsrDraftSegment, AsrDraftSegmentSink, AsrFinalSegment, AsrFinalSegmentSink,
+    AsrInterruptionSink, AsrSessionMetadata, AudioConsumer, RawTranscript,
+};
+use crate::types::{TranscriptTokenKind, TranscriptTokenTimestamp};
 
 pub const PROVIDER_ID: &str = "bailian";
 pub const DEFAULT_ENDPOINT: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
@@ -95,6 +99,7 @@ struct SyncState {
     start: Option<Instant>,
     final_tx: Option<oneshot::Sender<Result<RawTranscript, BailianASRError>>>,
     send_tx: Option<mpsc::UnboundedSender<SendItem>>,
+    next_sequence: u64,
     /// sentence_id → text，按 sentence_id 排序拼接得到最终文本。
     /// 同一 sentence_id 的后到结果覆盖前一个，消除累积文本导致的重复。
     final_segments: BTreeMap<i64, String>,
@@ -102,6 +107,7 @@ struct SyncState {
     /// 收到同 sentence_id 的 final 结果时将内容移入 final_segments。
     partial_segments: BTreeMap<i64, String>,
     last_result_text: String,
+    interrupted_error: Option<String>,
 }
 
 pub struct BailianRealtimeASR {
@@ -111,6 +117,11 @@ pub struct BailianRealtimeASR {
     final_rx: ParkingMutex<Option<oneshot::Receiver<Result<RawTranscript, BailianASRError>>>>,
     task_started: Arc<Notify>,
     final_segment_sink: ParkingMutex<Option<AsrFinalSegmentSink>>,
+    draft_segment_sink: ParkingMutex<Option<AsrDraftSegmentSink>>,
+    interruption_sink: ParkingMutex<Option<AsrInterruptionSink>>,
+    session_metadata: AsrSessionMetadata,
+    max_sentence_silence_ms: Option<u32>,
+    interim_transcript_fallback: bool,
 }
 
 impl BailianRealtimeASR {
@@ -122,11 +133,41 @@ impl BailianRealtimeASR {
             final_rx: ParkingMutex::new(None),
             task_started: Arc::new(Notify::new()),
             final_segment_sink: ParkingMutex::new(None),
+            draft_segment_sink: ParkingMutex::new(None),
+            interruption_sink: ParkingMutex::new(None),
+            session_metadata: AsrSessionMetadata::default(),
+            max_sentence_silence_ms: None,
+            interim_transcript_fallback: true,
         }
     }
 
     pub fn with_final_segment_sink(self, sink: AsrFinalSegmentSink) -> Self {
         *self.final_segment_sink.lock() = Some(sink);
+        self
+    }
+
+    pub fn with_draft_segment_sink(self, sink: AsrDraftSegmentSink) -> Self {
+        *self.draft_segment_sink.lock() = Some(sink);
+        self
+    }
+
+    pub fn with_interruption_sink(self, sink: AsrInterruptionSink) -> Self {
+        *self.interruption_sink.lock() = Some(sink);
+        self
+    }
+
+    pub fn with_session_metadata(mut self, metadata: AsrSessionMetadata) -> Self {
+        self.session_metadata = metadata;
+        self
+    }
+
+    pub fn with_max_sentence_silence_ms(mut self, value: Option<u32>) -> Self {
+        self.max_sentence_silence_ms = value;
+        self
+    }
+
+    pub fn with_interim_transcript_fallback(mut self, enabled: bool) -> Self {
+        self.interim_transcript_fallback = enabled;
         self
     }
 
@@ -192,6 +233,7 @@ impl BailianRealtimeASR {
                 &task_id,
                 &self.credentials.normalized_model(),
                 self.credentials.vocabulary_id.as_deref(),
+                self.max_sentence_silence_ms,
             ),
         )
         .await?;
@@ -281,6 +323,10 @@ impl BailianRealtimeASR {
             .map_err(|_| BailianASRError::NoFinalResult)?
     }
 
+    pub fn interrupted_error(&self) -> Option<String> {
+        self.state.lock().interrupted_error.clone()
+    }
+
     pub fn cancel(&self) {
         let mut st = self.state.lock();
         st.pending_audio.clear();
@@ -338,7 +384,7 @@ impl BailianRealtimeASR {
                     .and_then(Value::as_str)
                     .unwrap_or("task failed")
                     .to_string();
-                self.finish_error(BailianASRError::TaskFailed(message));
+                self.finish_with_partial_or_error(BailianASRError::TaskFailed(message));
                 false
             }
             _ => true,
@@ -386,7 +432,7 @@ impl BailianRealtimeASR {
         let Some(text) = sentence.get("text").and_then(Value::as_str) else {
             return;
         };
-        let trimmed = text.trim();
+        let trimmed = normalize_provider_text(text);
         if trimmed.is_empty() {
             return;
         }
@@ -406,33 +452,62 @@ impl BailianRealtimeASR {
             None => end_time > 0,
         };
 
-        let sentence_id = sentence
-            .get("sentence_id")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
+        let sentence_id_value = sentence.get("sentence_id").and_then(Value::as_i64);
+        let sentence_id = sentence_id_value.unwrap_or(0);
+        let provider_start_ms = millis_field(
+            sentence,
+            &["begin_time", "beginTime", "start_time", "startTime"],
+        );
+        let provider_end_ms = millis_field(sentence, &["end_time", "endTime"]);
+        let metadata = self.session_metadata.clone();
+        let start_ms = meeting_relative_ms(metadata.session_start_ms, provider_start_ms);
+        let end_ms = meeting_relative_ms(metadata.session_start_ms, provider_end_ms);
+        let token_timestamps = token_timestamps_from_sentence(sentence, metadata.session_start_ms);
 
         let mut st = self.state.lock();
-        st.last_result_text = trimmed.to_string();
+        st.last_result_text = trimmed.clone();
+        st.next_sequence = st.next_sequence.saturating_add(1);
+        let sequence = Some(st.next_sequence);
 
         if is_sentence_final {
             // 所有 final 结果（含 sentence_id == 0）都存入 final_segments。
             // BTreeMap 覆盖语义保证同一 sentence_id 不会重复追加。
-            st.final_segments.insert(sentence_id, trimmed.to_string());
+            st.final_segments.insert(sentence_id, trimmed.clone());
             // 清理该句的 interim 缓存
             st.partial_segments.remove(&sentence_id);
             if let Some(sink) = self.final_segment_sink.lock().clone() {
                 sink(AsrFinalSegment {
-                    text: trimmed.to_string(),
-                    start_ms: millis_field(
-                        sentence,
-                        &["begin_time", "beginTime", "start_time", "startTime"],
-                    ),
-                    end_ms: millis_field(sentence, &["end_time", "endTime"]),
+                    text: trimmed,
+                    start_ms: provider_start_ms,
+                    end_ms: provider_end_ms,
+                    provider_id: Some(PROVIDER_ID.to_string()),
+                    provider_session_id: metadata.provider_session_id.clone(),
+                    provider_segment_id: None,
+                    sentence_id: sentence_id_value.map(|value| value.to_string()),
+                    sequence,
+                    audio_part_index: metadata.audio_part_index,
+                    session_start_ms: metadata.session_start_ms,
+                    provider_start_ms,
+                    provider_end_ms,
+                    token_timestamps,
                 });
             }
         } else {
             // interim 结果暂存 partial，同一 sentence_id 后到覆盖前到
-            st.partial_segments.insert(sentence_id, trimmed.to_string());
+            st.partial_segments.insert(sentence_id, trimmed.clone());
+            if let Some(sink) = self.draft_segment_sink.lock().clone() {
+                sink(AsrDraftSegment {
+                    provider_id: PROVIDER_ID.to_string(),
+                    provider_session_id: metadata.provider_session_id,
+                    text: trimmed,
+                    start_ms,
+                    end_ms,
+                    sequence,
+                    audio_part_index: metadata.audio_part_index,
+                    session_start_ms: metadata.session_start_ms,
+                    clear: false,
+                });
+            }
         }
     }
 
@@ -444,8 +519,10 @@ impl BailianRealtimeASR {
             }
             st.task_finished = true;
             st.send_tx.take();
-            let text = if st.final_segments.is_empty() {
+            let text = if st.final_segments.is_empty() && self.interim_transcript_fallback {
                 st.last_result_text.clone()
+            } else if st.final_segments.is_empty() {
+                String::new()
             } else {
                 let segments: Vec<String> = st.final_segments.values().cloned().collect();
                 merge_segments(&segments)
@@ -472,11 +549,28 @@ impl BailianRealtimeASR {
                 || !st.final_segments.is_empty()
                 || !st.partial_segments.is_empty()
         };
+        self.report_interruption_once(&error);
         if has_partial {
             // 与 Volcengine 保持一致：连接异常但已有 partial 时优先兜底返回，避免丢失用户已识别出的内容。
             self.finish_success();
         } else {
             self.finish_error(error);
+        }
+    }
+
+    fn report_interruption_once(&self, error: &BailianASRError) {
+        let message = error.to_string();
+        let sink = {
+            let mut st = self.state.lock();
+            if st.interrupted_error.is_some() {
+                None
+            } else {
+                st.interrupted_error = Some(message.clone());
+                self.interruption_sink.lock().clone()
+            }
+        };
+        if let Some(sink) = sink {
+            sink(message);
         }
     }
 
@@ -580,13 +674,106 @@ fn millis_field(value: &Value, names: &[&str]) -> Option<u64> {
     None
 }
 
-fn run_task_message(task_id: &str, model: &str, vocabulary_id: Option<&str>) -> String {
+fn meeting_relative_ms(session_start_ms: Option<u64>, provider_ms: Option<u64>) -> Option<u64> {
+    provider_ms.map(|ms| session_start_ms.unwrap_or_default().saturating_add(ms))
+}
+
+fn token_timestamps_from_sentence(
+    sentence: &Value,
+    session_start_ms: Option<u64>,
+) -> Vec<TranscriptTokenTimestamp> {
+    let Some(words) = sentence.get("words").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    words
+        .iter()
+        .filter_map(|word| {
+            let text = word
+                .get("text")
+                .or_else(|| word.get("word"))
+                .or_else(|| word.get("token"))
+                .and_then(Value::as_str)?
+                .trim()
+                .to_string();
+            if text.is_empty() {
+                return None;
+            }
+            let provider_start_ms = millis_field(
+                word,
+                &["begin_time", "beginTime", "start_time", "startTime"],
+            )?;
+            let provider_end_ms = millis_field(word, &["end_time", "endTime"])?;
+            Some(TranscriptTokenTimestamp {
+                start_ms: session_start_ms
+                    .unwrap_or_default()
+                    .saturating_add(provider_start_ms),
+                end_ms: session_start_ms
+                    .unwrap_or_default()
+                    .saturating_add(provider_end_ms),
+                provider_start_ms: Some(provider_start_ms),
+                provider_end_ms: Some(provider_end_ms),
+                kind: transcript_token_kind(&text),
+                text,
+            })
+        })
+        .collect()
+}
+
+fn transcript_token_kind(text: &str) -> TranscriptTokenKind {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return TranscriptTokenKind::Token;
+    };
+    if chars.next().is_none() {
+        if is_cjk_char(first) {
+            return TranscriptTokenKind::Char;
+        }
+        if first.is_ascii_alphanumeric() {
+            return TranscriptTokenKind::Word;
+        }
+        return TranscriptTokenKind::Token;
+    }
+    if text
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '\'' | '-' | '_'))
+    {
+        return TranscriptTokenKind::Word;
+    }
+    TranscriptTokenKind::Token
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&ch)
+        || ('\u{3400}'..='\u{4DBF}').contains(&ch)
+        || ('\u{F900}'..='\u{FAFF}').contains(&ch)
+}
+
+fn normalize_provider_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(*ch, '\n' | '\t'))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn run_task_message(
+    task_id: &str,
+    model: &str,
+    vocabulary_id: Option<&str>,
+    max_sentence_silence_ms: Option<u32>,
+) -> String {
     let mut parameters = json!({
         "sample_rate": 16000,
         "format": "pcm"
     });
     if let Some(vocabulary_id) = vocabulary_id.map(str::trim).filter(|id| !id.is_empty()) {
         parameters["vocabulary_id"] = Value::String(vocabulary_id.to_string());
+    }
+    if let Some(value) = max_sentence_silence_ms {
+        parameters["max_sentence_silence"] = Value::Number(value.into());
     }
 
     json!({
@@ -779,9 +966,15 @@ mod tests {
     fn final_sentence_segment_sink_receives_sentence_end() {
         let seen = Arc::new(ParkingMutex::new(Vec::new()));
         let seen_for_sink = Arc::clone(&seen);
-        let asr = create_test_asr().with_final_segment_sink(Arc::new(move |segment| {
-            seen_for_sink.lock().push(segment);
-        }));
+        let asr = create_test_asr()
+            .with_session_metadata(AsrSessionMetadata {
+                provider_session_id: Some("session-1".to_string()),
+                audio_part_index: Some(2),
+                session_start_ms: Some(1_000),
+            })
+            .with_final_segment_sink(Arc::new(move |segment| {
+                seen_for_sink.lock().push(segment);
+            }));
 
         asr.record_result(&json!({
             "payload": {
@@ -791,7 +984,11 @@ mod tests {
                         "text": "最终片段",
                         "sentence_end": true,
                         "begin_time": 200,
-                        "end_time": 900
+                        "end_time": 900,
+                        "words": [
+                            { "text": "最", "begin_time": 200, "end_time": 300 },
+                            { "text": "final", "begin_time": 300, "end_time": 600 }
+                        ]
                     }
                 }
             }
@@ -802,6 +999,65 @@ mod tests {
         assert_eq!(seen[0].text, "最终片段");
         assert_eq!(seen[0].start_ms, Some(200));
         assert_eq!(seen[0].end_ms, Some(900));
+        assert_eq!(seen[0].provider_id.as_deref(), Some(PROVIDER_ID));
+        assert_eq!(seen[0].provider_session_id.as_deref(), Some("session-1"));
+        assert_eq!(seen[0].sentence_id.as_deref(), Some("1"));
+        assert_eq!(seen[0].audio_part_index, Some(2));
+        assert_eq!(seen[0].session_start_ms, Some(1_000));
+        assert_eq!(seen[0].provider_start_ms, Some(200));
+        assert_eq!(seen[0].provider_end_ms, Some(900));
+        assert_eq!(seen[0].token_timestamps.len(), 2);
+        assert_eq!(seen[0].token_timestamps[0].text, "最");
+        assert_eq!(seen[0].token_timestamps[0].start_ms, 1_200);
+        assert_eq!(seen[0].token_timestamps[0].provider_start_ms, Some(200));
+        assert_eq!(seen[0].token_timestamps[0].kind, TranscriptTokenKind::Char);
+        assert_eq!(seen[0].token_timestamps[1].kind, TranscriptTokenKind::Word);
+    }
+
+    #[test]
+    fn interim_sentence_emits_draft_without_final_segment() {
+        let drafts = Arc::new(ParkingMutex::new(Vec::new()));
+        let drafts_for_sink = Arc::clone(&drafts);
+        let finals = Arc::new(ParkingMutex::new(Vec::new()));
+        let finals_for_sink = Arc::clone(&finals);
+        let asr = create_test_asr()
+            .with_session_metadata(AsrSessionMetadata {
+                provider_session_id: Some("session-2".to_string()),
+                audio_part_index: Some(3),
+                session_start_ms: Some(2_000),
+            })
+            .with_draft_segment_sink(Arc::new(move |segment| {
+                drafts_for_sink.lock().push(segment);
+            }))
+            .with_final_segment_sink(Arc::new(move |segment| {
+                finals_for_sink.lock().push(segment);
+            }));
+
+        asr.record_result(&json!({
+            "payload": {
+                "output": {
+                    "sentence": {
+                        "sentence_id": 7,
+                        "text": "正在识别",
+                        "sentence_end": false,
+                        "begin_time": 100,
+                        "end_time": 500
+                    }
+                }
+            }
+        }));
+
+        assert!(finals.lock().is_empty());
+        let drafts = drafts.lock();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].text, "正在识别");
+        assert_eq!(drafts[0].provider_id, PROVIDER_ID);
+        assert_eq!(drafts[0].provider_session_id.as_deref(), Some("session-2"));
+        assert_eq!(drafts[0].start_ms, Some(2_100));
+        assert_eq!(drafts[0].end_ms, Some(2_500));
+        assert_eq!(drafts[0].audio_part_index, Some(3));
+        assert_eq!(drafts[0].session_start_ms, Some(2_000));
+        assert!(!drafts[0].clear);
     }
 
     #[test]
@@ -938,6 +1194,79 @@ mod tests {
         assert_eq!(result.text, "中间结果");
     }
 
+    #[test]
+    fn partial_connection_error_preserves_raw_and_marks_interrupted() {
+        let asr = create_test_asr();
+        asr.record_result(&make_result_event(1, "partial text", false));
+
+        let (tx, mut rx) = oneshot::channel();
+        {
+            let mut st = asr.state.lock();
+            st.final_tx = Some(tx);
+            st.bytes_received = 10000;
+        }
+
+        asr.finish_with_partial_or_error(BailianASRError::ConnectionFailed(
+            "network dropped".to_string(),
+        ));
+
+        let result = rx.try_recv().unwrap().unwrap();
+        assert_eq!(result.text, "partial text");
+        assert_eq!(
+            asr.interrupted_error().as_deref(),
+            Some("connection failed: network dropped")
+        );
+    }
+
+    #[test]
+    fn partial_connection_error_drops_interim_when_fallback_disabled() {
+        let asr = create_test_asr().with_interim_transcript_fallback(false);
+        asr.record_result(&make_result_event(1, "partial text", false));
+
+        let (tx, mut rx) = oneshot::channel();
+        {
+            let mut st = asr.state.lock();
+            st.final_tx = Some(tx);
+            st.bytes_received = 10000;
+        }
+
+        asr.finish_with_partial_or_error(BailianASRError::ConnectionFailed(
+            "network dropped".to_string(),
+        ));
+
+        let result = rx.try_recv().unwrap().unwrap();
+        assert_eq!(result.text, "");
+        assert_eq!(
+            asr.interrupted_error().as_deref(),
+            Some("connection failed: network dropped")
+        );
+    }
+
+    #[test]
+    fn partial_connection_error_notifies_interruption_sink() {
+        let observed = Arc::new(ParkingMutex::new(Vec::<String>::new()));
+        let observed_for_sink = Arc::clone(&observed);
+        let asr = create_test_asr()
+            .with_interruption_sink(Arc::new(move |error| observed_for_sink.lock().push(error)));
+        asr.record_result(&make_result_event(1, "partial text", false));
+
+        let (tx, _rx) = oneshot::channel();
+        {
+            let mut st = asr.state.lock();
+            st.final_tx = Some(tx);
+            st.bytes_received = 10000;
+        }
+
+        asr.finish_with_partial_or_error(BailianASRError::ConnectionFailed(
+            "network dropped".to_string(),
+        ));
+
+        assert_eq!(
+            observed.lock().as_slice(),
+            ["connection failed: network dropped"]
+        );
+    }
+
     // ---- existing tests kept ----
 
     #[test]
@@ -955,20 +1284,26 @@ mod tests {
     #[test]
     fn run_task_message_uses_pcm_16k() {
         let value: Value =
-            serde_json::from_str(&run_task_message("abc", DEFAULT_MODEL, None)).unwrap();
+            serde_json::from_str(&run_task_message("abc", DEFAULT_MODEL, None, None)).unwrap();
         assert_eq!(value["header"]["action"], "run-task");
         assert_eq!(value["payload"]["model"], DEFAULT_MODEL);
         assert_eq!(value["payload"]["parameters"]["sample_rate"], 16000);
         assert_eq!(value["payload"]["parameters"]["format"], "pcm");
         assert!(value["payload"]["parameters"]["vocabulary_id"].is_null());
+        assert!(value["payload"]["parameters"]["max_sentence_silence"].is_null());
     }
 
     #[test]
     fn run_task_message_includes_optional_vocabulary_id() {
-        let value: Value =
-            serde_json::from_str(&run_task_message("abc", DEFAULT_MODEL, Some(" vocab-123 ")))
-                .unwrap();
+        let value: Value = serde_json::from_str(&run_task_message(
+            "abc",
+            DEFAULT_MODEL,
+            Some(" vocab-123 "),
+            Some(800),
+        ))
+        .unwrap();
         assert_eq!(value["payload"]["parameters"]["vocabulary_id"], "vocab-123");
+        assert_eq!(value["payload"]["parameters"]["max_sentence_silence"], 800);
     }
 
     #[test]
