@@ -21,6 +21,7 @@ import { OL_DATA } from "../mockData"
 import {
     defaultAppShortcutModifiers,
     defaultQaShortcut,
+    defaultRewriteShortcut,
 } from "../hotkey"
 
 export let mockSettings: UserPreferences = {
@@ -68,7 +69,7 @@ export let mockSettings: UserPreferences = {
         modifiers: defaultAppShortcutModifiers(),
     },
     openAppHotkey: { primary: "O", modifiers: defaultAppShortcutModifiers() },
-    rewriteHotkey: { primary: "R", modifiers: defaultAppShortcutModifiers() },
+    rewriteHotkey: defaultRewriteShortcut(),
     screenshotRecordHotkey: { primary: "Enter", modifiers: [] },
     screenshotRecordEnabled: false,
     screenshotRecordPaused: false,

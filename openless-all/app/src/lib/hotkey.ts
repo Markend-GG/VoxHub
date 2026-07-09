@@ -23,7 +23,7 @@ export function defaultOpenAppShortcut(): ShortcutBinding {
 }
 
 export function defaultRewriteShortcut(): ShortcutBinding {
-  return { primary: 'R', modifiers: defaultAppShortcutModifiers() };
+  return { primary: 'R', modifiers: ['alt', 'shift'] };
 }
 
 export function defaultScreenshotRecordShortcut(): ShortcutBinding {

@@ -2307,7 +2307,7 @@ fn default_open_app_hotkey() -> Option<ShortcutBinding> {
 fn default_rewrite_hotkey() -> Option<ShortcutBinding> {
     Some(ShortcutBinding {
         primary: "R".into(),
-        modifiers: default_app_shortcut_modifiers(),
+        modifiers: vec!["alt".into(), "shift".into()],
     })
 }
 
@@ -3967,6 +3967,9 @@ mod tests {
         let prefs = UserPreferences::default();
         assert!(prefs.switch_style_hotkey.is_some());
         assert!(prefs.open_app_hotkey.is_some());
+        let rewrite = prefs.rewrite_hotkey.expect("rewrite hotkey should default to enabled");
+        assert_eq!(rewrite.primary, "R");
+        assert_eq!(rewrite.modifiers, vec!["alt".to_string(), "shift".to_string()]);
     }
 
     #[test]
