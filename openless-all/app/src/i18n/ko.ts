@@ -467,6 +467,17 @@ export const ko: typeof zhCN = {
       missing: '오디오 없음',
       unavailable: '사용 가능한 오디오 없음',
     },
+    audioPlayback: {
+      title: '회의 오디오',
+      play: '재생',
+      pause: '일시정지',
+      loading: '로딩 중…',
+      speed: '속도',
+      volume: '볼륨',
+      progress: '재생 위치',
+      missing: '회의 오디오가 정리되었거나 존재하지 않습니다.',
+      loadFailed: '회의 오디오 로드 실패: {{err}}',
+    },
     source: {
       realtimeAsr: '실시간 ASR',
       retranscribedAsr: '다시 전사',

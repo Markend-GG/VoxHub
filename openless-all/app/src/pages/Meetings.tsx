@@ -8,9 +8,13 @@ import {
   type MutableRefObject,
   type ReactNode,
 } from 'react';
+import { Volume2 } from 'lucide-react';
+import { convertFileSrc } from '@tauri-apps/api/core';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import {
+  type BinaryPayload,
   deleteMeetingRecord,
   exportMeetingMarkdown,
   generateMeetingSummary,
@@ -19,6 +23,7 @@ import {
   retryMeetingSummary,
   listMeetings,
   pauseMeetingRecording,
+  prepareMeetingAudioPlayback,
   resumeMeetingRecording,
   retranscribeMeeting,
   startMeetingRecording,
@@ -29,6 +34,7 @@ import type {
   MeetingCloseRequestEvent,
   MeetingAudioState,
   MeetingErrorEvent,
+  MeetingListItem,
   MeetingRecord,
   MeetingRecordingPhase,
   MeetingRecordingSnapshot,
@@ -45,6 +51,8 @@ import { Btn, Card, PageHeader, Pill, type PillTone } from './_atoms';
 
 type ActionLoading = 'start' | 'pause' | 'resume' | 'stop' | 'summary' | 'save' | 'delete' | 'export' | 'retranscribe' | null;
 type ActiveControlMode = 'recording' | 'paused';
+const PLAYBACK_SPEEDS = [0.75, 1, 1.25, 1.5, 2] as const;
+type PlaybackSpeed = typeof PLAYBACK_SPEEDS[number];
 
 interface MeetingEditDraft {
   id: string;
@@ -67,7 +75,8 @@ interface MeetingTodoDraft {
 export function Meetings() {
   const { t } = useTranslation();
   const mobile = useMobileLayout();
-  const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
+  const [meetings, setMeetings] = useState<MeetingListItem[]>([]);
+  const [meetingDetails, setMeetingDetails] = useState<Record<string, MeetingRecord>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeSnapshot, setActiveSnapshot] = useState<MeetingRecordingSnapshot | null>(null);
   const [query, setQuery] = useState('');
@@ -75,6 +84,9 @@ export function Meetings() {
   const [actionLoading, setActionLoading] = useState<ActionLoading>(null);
   const [activeControlMode, setActiveControlMode] = useState<{ meetingId: string; mode: ActiveControlMode } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailRetryNonce, setDetailRetryNonce] = useState(0);
   const [actionError, setActionError] = useState<string | null>(null);
   const [eventError, setEventError] = useState<MeetingErrorEvent | null>(null);
   const [draftByMeetingId, setDraftByMeetingId] = useState<Record<string, MeetingTranscriptDraftEvent>>({});
@@ -84,7 +96,9 @@ export function Meetings() {
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const transcriptStickToBottomRef = useRef(true);
-  const meetingsRef = useRef<MeetingRecord[]>([]);
+  const meetingsRef = useRef<MeetingListItem[]>([]);
+  const meetingDetailsRef = useRef<Record<string, MeetingRecord>>({});
+  const detailRequestRef = useRef(0);
   const activeSnapshotRef = useRef<MeetingRecordingSnapshot | null>(null);
 
   useEffect(() => {
@@ -92,8 +106,17 @@ export function Meetings() {
   }, [meetings]);
 
   useEffect(() => {
+    meetingDetailsRef.current = meetingDetails;
+  }, [meetingDetails]);
+
+  useEffect(() => {
     activeSnapshotRef.current = activeSnapshot;
   }, [activeSnapshot]);
+
+  const cacheMeetingRecord = useCallback((record: MeetingRecord) => {
+    setMeetings(prev => upsertMeetingListItem(prev, meetingListItemFromRecord(record)));
+    setMeetingDetails(prev => ({ ...prev, [record.id]: record }));
+  }, []);
 
   const syncActiveSnapshot = useCallback(async (expectedMeetingId?: string) => {
     try {
@@ -105,7 +128,7 @@ export function Meetings() {
       }
       if (expectedMeetingId && snapshot.meeting.id !== expectedMeetingId) return;
       setActiveSnapshot(snapshot);
-      setMeetings(prev => upsertMeeting(prev, snapshot.meeting));
+      cacheMeetingRecord(snapshot.meeting);
       setSelectedId(prev => prev ?? snapshot.meeting.id);
       setActiveControlMode(prev => {
         const nextMode = controlModeForPhase(snapshot.phase);
@@ -115,7 +138,7 @@ export function Meetings() {
     } catch (error) {
       console.warn('[meetings] active snapshot refresh failed', error);
     }
-  }, []);
+  }, [cacheMeetingRecord]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -125,10 +148,15 @@ export function Meetings() {
         getActiveMeetingRecording(),
         listMeetings(),
       ]);
-      const nextRecords = active ? upsertMeeting(records, active.meeting) : records;
+      const nextRecords = active
+        ? upsertMeetingListItem(records, meetingListItemFromRecord(active.meeting))
+        : records;
       setActiveSnapshot(active);
       setActiveControlMode(active ? controlModeForSnapshot(active) : null);
       setMeetings(nextRecords);
+      if (active) {
+        setMeetingDetails(prev => ({ ...prev, [active.meeting.id]: active.meeting }));
+      }
       setSelectedId(prev => {
         if (active) return active.meeting.id;
         if (prev && nextRecords.some(record => record.id === prev)) return prev;
@@ -168,7 +196,7 @@ export function Meetings() {
             if (finalSnapshot) return null;
             return controlModeForSnapshot(snapshot) ?? (prev?.meetingId === snapshot.meeting.id ? prev : null);
           });
-          setMeetings(prev => upsertMeeting(prev, snapshot.meeting));
+          cacheMeetingRecord(snapshot.meeting);
           setSelectedId(prev => prev ?? snapshot.meeting.id);
           if (finalSnapshot) {
             setDraftByMeetingId(prev => removeDraft(prev, snapshot.meeting.id));
@@ -207,7 +235,22 @@ export function Meetings() {
           if (!staleForActiveSession) {
             setDraftByMeetingId(prev => removeDraft(prev, payload.meetingId));
           }
-          setMeetings(prev => appendSegment(prev, payload.meetingId, payload.segment));
+          const knownRecord = meetingDetailsRef.current[payload.meetingId]
+            ?? (snapshot?.meeting.id === payload.meetingId ? snapshot.meeting : null);
+          if (!knownRecord || !hasSegment(knownRecord, payload.segment.id)) {
+            setMeetings(prev => appendSegmentToMeetingList(prev, payload.meetingId, payload.segment));
+          }
+          setMeetingDetails(prev => {
+            const record = prev[payload.meetingId];
+            if (!record || hasSegment(record, payload.segment.id)) return prev;
+            return {
+              ...prev,
+              [payload.meetingId]: {
+                ...record,
+                transcriptSegments: [...record.transcriptSegments, payload.segment],
+              },
+            };
+          });
           setActiveSnapshot(prev => {
             if (!prev || prev.meeting.id !== payload.meetingId) return prev;
             if (hasSegment(prev.meeting, payload.segment.id)) return prev;
@@ -229,7 +272,7 @@ export function Meetings() {
           if (cancelled) return;
           const payload = event.payload;
           if (payload.meeting) {
-            setMeetings(prev => upsertMeeting(prev, payload.meeting!));
+            cacheMeetingRecord(payload.meeting);
             setSelectedId(prev => prev ?? payload.meeting!.id);
           }
           if (payload.error) setEventError(payload.error);
@@ -239,7 +282,7 @@ export function Meetings() {
           const { snapshot } = normalizeMeetingCloseRequest(event.payload);
           setActiveSnapshot(snapshot);
           setActiveControlMode(controlModeForSnapshot(snapshot));
-          setMeetings(prev => upsertMeeting(prev, snapshot.meeting));
+          cacheMeetingRecord(snapshot.meeting);
           setSelectedId(snapshot.meeting.id);
           setActionError(t('meetings.closeGuard.message'));
           if (mobile) setMobileDetailOpen(true);
@@ -274,7 +317,7 @@ export function Meetings() {
       unlistenSummary?.();
       unlistenClose?.();
     };
-  }, [mobile, syncActiveSnapshot, t]);
+  }, [cacheMeetingRecord, mobile, syncActiveSnapshot, t]);
 
   const filteredMeetings = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -287,9 +330,12 @@ export function Meetings() {
     return visibleSelected ?? filteredMeetings[0] ?? null;
   }, [filteredMeetings, selectedId]);
 
+  const cachedDetail = selectedMeeting ? meetingDetails[selectedMeeting.id] : null;
   const detailMeeting = activeSnapshot && selectedMeeting?.id === activeSnapshot.meeting.id
     ? activeSnapshot.meeting
-    : selectedMeeting;
+    : selectedMeeting && cachedDetail?.updatedAt === selectedMeeting.updatedAt
+      ? cachedDetail
+      : null;
   const selectedActiveSnapshot = activeSnapshot && detailMeeting?.id === activeSnapshot.meeting.id
     ? activeSnapshot
     : null;
@@ -300,26 +346,67 @@ export function Meetings() {
   const transcriptCount = detailMeeting?.transcriptSegments.length ?? 0;
 
   useEffect(() => {
+    const meetingId = selectedMeeting?.id;
+    if (!meetingId || activeSnapshot?.meeting.id === meetingId) {
+      detailRequestRef.current += 1;
+      setDetailLoading(false);
+      setDetailError(null);
+      return;
+    }
+    const cached = meetingDetailsRef.current[meetingId];
+    if (cached?.updatedAt === selectedMeeting.updatedAt) {
+      setDetailLoading(false);
+      setDetailError(null);
+      return;
+    }
+
+    const requestId = ++detailRequestRef.current;
+    setDetailLoading(true);
+    setDetailError(null);
+    void getMeeting(meetingId)
+      .then(record => {
+        if (detailRequestRef.current !== requestId) return;
+        cacheMeetingRecord(record);
+      })
+      .catch(error => {
+        if (detailRequestRef.current !== requestId) return;
+        console.error('[meetings] failed to load meeting detail', error);
+        setDetailError(t('meetings.detailLoadFailed', { err: errorMessage(error) }));
+      })
+      .finally(() => {
+        if (detailRequestRef.current === requestId) setDetailLoading(false);
+      });
+  }, [activeSnapshot?.meeting.id, cacheMeetingRecord, detailRetryNonce, selectedMeeting?.id, selectedMeeting?.updatedAt, t]);
+
+  const markMeetingAudioMissing = useCallback((meetingId: string) => {
+    setMeetings(prev => prev.map(item => (
+      item.id === meetingId
+        ? { ...item, audio: missingMeetingAudio() }
+        : item
+    )));
+    setMeetingDetails(prev => {
+      const record = prev[meetingId];
+      return record
+        ? { ...prev, [meetingId]: withMissingAudio(record) }
+        : prev;
+    });
+  }, []);
+
+  useEffect(() => {
     if (!transcriptStickToBottomRef.current) return;
     const el = transcriptScrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [detailMeeting?.id, selectedDraft?.text, transcriptCount]);
 
-  const selectMeeting = async (id: string) => {
+  const selectMeeting = (id: string) => {
     setSelectedId(id);
     setActionError(null);
+    setDetailError(null);
     setEditDraft(null);
     setDeleteConfirmId(null);
     setRewriteConfirmId(null);
     if (mobile) setMobileDetailOpen(true);
-    try {
-      const record = await getMeeting(id);
-      setMeetings(prev => upsertMeeting(prev, record));
-    } catch (error) {
-      console.error('[meetings] failed to load meeting detail', error);
-      setActionError(t('meetings.detailLoadFailed', { err: errorMessage(error) }));
-    }
   };
 
   const runStart = async () => {
@@ -330,7 +417,7 @@ export function Meetings() {
       const snapshot = await startMeetingRecording();
       setActiveSnapshot(snapshot);
       setActiveControlMode({ meetingId: snapshot.meeting.id, mode: 'recording' });
-      setMeetings(prev => upsertMeeting(prev, snapshot.meeting));
+      cacheMeetingRecord(snapshot.meeting);
       setSelectedId(snapshot.meeting.id);
       if (mobile) setMobileDetailOpen(true);
     } catch (error) {
@@ -356,7 +443,7 @@ export function Meetings() {
           risksAndOpenQuestions: linesFromDraft(editDraft.risksAndOpenQuestions),
         },
       });
-      setMeetings(prev => upsertMeeting(prev, updated));
+      cacheMeetingRecord(updated);
       setSelectedId(updated.id);
       setEditDraft(null);
       setActionError(null);
@@ -381,6 +468,11 @@ export function Meetings() {
       await deleteMeetingRecord(record.id);
       const remaining = meetingsRef.current.filter(item => item.id !== record.id);
       setMeetings(remaining);
+      setMeetingDetails(prev => {
+        const next = { ...prev };
+        delete next[record.id];
+        return next;
+      });
       setEditDraft(null);
       setDeleteConfirmId(null);
       setEventError(prev => (prev?.meetingId === record.id ? null : prev));
@@ -420,7 +512,7 @@ export function Meetings() {
     setEventError(null);
     try {
       const updated = await retranscribeMeeting(record.id);
-      setMeetings(prev => upsertMeeting(prev, updated));
+      cacheMeetingRecord(updated);
       setSelectedId(updated.id);
       setActionError(t('meetings.retranscribeSuccess'));
     } catch (error) {
@@ -438,7 +530,7 @@ export function Meetings() {
       const snapshot = await pauseMeetingRecording(id);
       setActiveSnapshot(snapshot.meeting.endedAt == null ? snapshot : null);
       setActiveControlMode(snapshot.meeting.endedAt == null ? { meetingId: snapshot.meeting.id, mode: 'paused' } : null);
-      setMeetings(prev => upsertMeeting(prev, snapshot.meeting));
+      cacheMeetingRecord(snapshot.meeting);
       setDraftByMeetingId(prev => removeDraft(prev, id));
     } catch (error) {
       console.error('[meetings] pause failed', error);
@@ -455,7 +547,7 @@ export function Meetings() {
       const snapshot = await resumeMeetingRecording(id);
       setActiveSnapshot(snapshot.meeting.endedAt == null ? snapshot : null);
       setActiveControlMode(snapshot.meeting.endedAt == null ? { meetingId: snapshot.meeting.id, mode: 'recording' } : null);
-      setMeetings(prev => upsertMeeting(prev, snapshot.meeting));
+      cacheMeetingRecord(snapshot.meeting);
     } catch (error) {
       console.error('[meetings] resume failed', error);
       setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
@@ -471,7 +563,7 @@ export function Meetings() {
       const record = await stopMeetingRecording(id);
       setActiveSnapshot(null);
       setActiveControlMode(null);
-      setMeetings(prev => upsertMeeting(prev, record));
+      cacheMeetingRecord(record);
       setDraftByMeetingId(prev => removeDraft(prev, id));
       setSelectedId(record.id);
       if (mobile) setMobileDetailOpen(true);
@@ -491,7 +583,7 @@ export function Meetings() {
     setEventError(null);
     try {
       const record = await retryMeetingSummary(id);
-      setMeetings(prev => upsertMeeting(prev, record));
+      cacheMeetingRecord(record);
       setSelectedId(record.id);
     } catch (error) {
       console.error('[meetings] retry summary failed', error);
@@ -512,7 +604,7 @@ export function Meetings() {
     setEventError(null);
     try {
       const record = await generateMeetingSummary(id);
-      setMeetings(prev => upsertMeeting(prev, record));
+      cacheMeetingRecord(record);
       setSelectedId(record.id);
       setRewriteConfirmId(null);
     } catch (error) {
@@ -648,6 +740,17 @@ export function Meetings() {
                       {t('meetings.asrInterrupted')}
                     </ErrorBanner>
                   )}
+                  {detailMeeting.audio.state === 'missing' && (
+                    <ErrorBanner tone="warning">
+                      {t('meetings.audioPlayback.missing')}
+                    </ErrorBanner>
+                  )}
+                  {canPlayMeetingAudio(detailMeeting, activeSnapshot) && (
+                    <MeetingAudioPlayer
+                      meetingId={detailMeeting.id}
+                      onMissing={() => markMeetingAudioMissing(detailMeeting.id)}
+                    />
+                  )}
                   <SummarySection
                     record={detailMeeting}
                     draft={editDraft?.id === detailMeeting.id ? editDraft : null}
@@ -675,7 +778,25 @@ export function Meetings() {
               </>
             ) : (
               <div style={{ padding: 40, textAlign: 'center', fontSize: 13, color: 'var(--ol-ink-4)' }}>
-                {loading ? t('common.loading') : loadError ? t('meetings.loadFailed', { err: loadError }) : t('meetings.selectHint')}
+                {mobile && selectedMeeting && (
+                  <div style={{ marginBottom: 12 }}>
+                    <Btn icon="chevLeft" variant="ghost" size="sm" onClick={() => setMobileDetailOpen(false)}>
+                      {t('meetings.backToList')}
+                    </Btn>
+                  </div>
+                )}
+                {detailLoading || loading ? t('common.loading') : null}
+                {!detailLoading && detailError && (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+                    <span>{detailError}</span>
+                    <Btn size="sm" variant="ghost" onClick={() => setDetailRetryNonce(value => value + 1)}>
+                      {t('common.retry')}
+                    </Btn>
+                  </div>
+                )}
+                {!detailLoading && !detailError && !loading && (
+                  loadError ? t('meetings.loadFailed', { err: loadError }) : t('meetings.selectHint')
+                )}
               </div>
             )}
           </Card>
@@ -742,13 +863,13 @@ function MeetingListItem({
   active,
   onSelect,
 }: {
-  record: MeetingRecord;
+  record: MeetingListItem;
   selected: boolean;
   active: boolean;
   onSelect: () => void;
 }) {
   const { t } = useTranslation();
-  const preview = meetingPreview(record);
+  const preview = record.transcriptPreview;
   return (
     <button
       type="button"
@@ -943,6 +1064,15 @@ function TranscriptList({
 }) {
   const { t } = useTranslation();
   const hasTranscriptRows = record.transcriptSegments.length > 0;
+  const rowCount = record.transcriptSegments.length + (draft ? 1 : 0);
+  const virtualizer = useVirtualizer({
+    count: rowCount,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 92,
+    getItemKey: index => record.transcriptSegments[index]?.id ?? 'draft',
+    overscan: 6,
+  });
+  const virtualRows = virtualizer.getVirtualItems();
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: 260 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexShrink: 0 }}>
@@ -971,11 +1101,27 @@ function TranscriptList({
             {t('meetings.noTranscript')}
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {record.transcriptSegments.map(segment => (
-              <TranscriptRow key={segment.id} segment={segment} />
-            ))}
-            {draft && <TranscriptDraftRow draft={draft} />}
+          <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
+            {virtualRows.map(virtualRow => {
+              const segment = record.transcriptSegments[virtualRow.index];
+              return (
+                <div
+                  key={virtualRow.key}
+                  data-index={virtualRow.index}
+                  ref={virtualizer.measureElement}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    transform: `translateY(${virtualRow.start}px)`,
+                    paddingBottom: 8,
+                  }}
+                >
+                  {segment ? <TranscriptRow segment={segment} /> : draft ? <TranscriptDraftRow draft={draft} /> : null}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -1342,7 +1488,318 @@ function ErrorBanner({ children, tone }: { children: ReactNode; tone: 'error' | 
   );
 }
 
-function upsertMeeting(records: MeetingRecord[], record: MeetingRecord): MeetingRecord[] {
+function MeetingAudioPlayer({
+  meetingId,
+  onMissing,
+}: {
+  meetingId: string;
+  onMissing: () => void;
+}) {
+  const { t } = useTranslation();
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const limiterNodeRef = useRef<DynamicsCompressorNode | null>(null);
+  const loadRequestRef = useRef(0);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'missing' | 'error'>('idle');
+  const [errorText, setErrorText] = useState<string | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [speed, setSpeed] = useState<PlaybackSpeed>(1);
+  const [volume, setVolume] = useState(1);
+
+  useEffect(() => {
+    return () => {
+      loadRequestRef.current += 1;
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+      void audioContextRef.current?.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    loadRequestRef.current += 1;
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+    }
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
+    }
+    setStatus('idle');
+    setErrorText(null);
+    setIsPlaying(false);
+    setDuration(0);
+    setCurrentTime(0);
+  }, [meetingId]);
+
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.playbackRate = speed;
+  }, [speed]);
+
+  useEffect(() => {
+    const gainNode = gainNodeRef.current;
+    if (gainNode) {
+      gainNode.gain.value = volume;
+    } else if (audioRef.current) {
+      audioRef.current.volume = Math.min(volume, 1);
+    }
+  }, [volume]);
+
+  const syncTiming = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    setCurrentTime(Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
+    setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+  };
+
+  const playCurrentAudio = async (requestId = loadRequestRef.current) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    try {
+      let context = audioContextRef.current;
+      if (!context) {
+        context = new AudioContext();
+        audioContextRef.current = context;
+        const source = context.createMediaElementSource(audio);
+        const gainNode = context.createGain();
+        const limiterNode = context.createDynamicsCompressor();
+        limiterNode.threshold.value = -3;
+        limiterNode.knee.value = 0;
+        limiterNode.ratio.value = 20;
+        limiterNode.attack.value = 0.003;
+        limiterNode.release.value = 0.25;
+        source.connect(gainNode).connect(limiterNode).connect(context.destination);
+        audioSourceRef.current = source;
+        gainNodeRef.current = gainNode;
+        limiterNodeRef.current = limiterNode;
+        audio.volume = 1;
+        gainNode.gain.value = volume;
+      }
+      if (context.state === 'suspended') await context.resume();
+      if (loadRequestRef.current !== requestId) return;
+      await audio.play();
+    } catch (error) {
+      if (loadRequestRef.current !== requestId) return;
+      console.error('[meetings] play audio failed', error);
+      setStatus('error');
+      setErrorText(errorMessage(error));
+    }
+  };
+
+  const loadAudio = async (playAfterLoad: boolean) => {
+    const requestId = ++loadRequestRef.current;
+    setStatus('loading');
+    setErrorText(null);
+    let candidateObjectUrl: string | null = null;
+    try {
+      const source = await prepareMeetingAudioPlayback(meetingId);
+      let audioUrl: string;
+      if (typeof source === 'string') {
+        audioUrl = convertFileSrc(source);
+      } else {
+        if (binaryPayloadLength(source) === 0) throw new Error('empty meeting recording');
+        const buffer = binaryPayloadToArrayBuffer(source);
+        const blob = new Blob([buffer], { type: 'audio/wav' });
+        audioUrl = URL.createObjectURL(blob);
+        candidateObjectUrl = audioUrl;
+      }
+
+      if (loadRequestRef.current !== requestId) {
+        if (candidateObjectUrl) URL.revokeObjectURL(candidateObjectUrl);
+        return;
+      }
+      const audio = audioRef.current;
+      if (!audio) {
+        if (candidateObjectUrl) URL.revokeObjectURL(candidateObjectUrl);
+        return;
+      }
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = candidateObjectUrl;
+      audio.src = audioUrl;
+      audio.playbackRate = speed;
+      audio.currentTime = 0;
+      setCurrentTime(0);
+      setDuration(0);
+      setStatus('ready');
+      if (playAfterLoad) await playCurrentAudio(requestId);
+    } catch (error) {
+      if (candidateObjectUrl) URL.revokeObjectURL(candidateObjectUrl);
+      if (loadRequestRef.current !== requestId) return;
+      console.error('[meetings] load audio failed', error);
+      const msg = errorMessage(error);
+      if (msg.includes('meeting recording not found') || msg.includes('not found')) {
+        setStatus('missing');
+        onMissing();
+        return;
+      }
+      setStatus('error');
+      setErrorText(msg);
+    }
+  };
+
+  const togglePlayback = () => {
+    if (status !== 'ready') {
+      void loadAudio(true);
+      return;
+    }
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (audio.paused) {
+      void playCurrentAudio();
+    } else {
+      audio.pause();
+    }
+  };
+
+  const seekTo = (value: string) => {
+    const next = Number(value);
+    if (!Number.isFinite(next)) return;
+    const audio = audioRef.current;
+    if (audio) audio.currentTime = next;
+    setCurrentTime(next);
+  };
+
+  const changeVolume = (value: string) => {
+    const next = Number(value);
+    if (!Number.isFinite(next)) return;
+    setVolume(Math.min(2, Math.max(0, next)));
+  };
+
+  return (
+    <div style={{
+      marginBottom: 14,
+      padding: 12,
+      border: '0.5px solid var(--ol-line)',
+      borderRadius: 8,
+      background: 'var(--ol-surface-2)',
+    }}>
+      <audio
+        ref={audioRef}
+        crossOrigin="anonymous"
+        preload="metadata"
+        onLoadedMetadata={syncTiming}
+        onDurationChange={syncTiming}
+        onTimeUpdate={syncTiming}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onEnded={() => setIsPlaying(false)}
+      />
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
+          {t('meetings.audioPlayback.title')}
+        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('meetings.audioPlayback.speed')}</span>
+          <div style={{ display: 'flex', border: '0.5px solid var(--ol-line)', borderRadius: 8, overflow: 'hidden', background: 'var(--ol-surface)' }}>
+            {PLAYBACK_SPEEDS.map(value => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={speed === value}
+                onClick={() => setSpeed(value)}
+                style={{
+                  minWidth: 44,
+                  height: 28,
+                  padding: '0 8px',
+                  border: 0,
+                  borderLeft: value === PLAYBACK_SPEEDS[0] ? 0 : '0.5px solid var(--ol-line-soft)',
+                  background: speed === value ? 'rgba(37,99,235,0.10)' : 'transparent',
+                  color: speed === value ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
+                  fontSize: 11,
+                  fontFamily: 'var(--ol-font-mono)',
+                  cursor: 'default',
+                }}
+              >
+                {formatPlaybackSpeed(value)}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'auto minmax(120px, 1fr) auto', alignItems: 'center', gap: 10 }}>
+        <Btn
+          icon={isPlaying ? 'pause' : 'play'}
+          variant={isPlaying ? 'blue' : 'ghost'}
+          size="sm"
+          onClick={togglePlayback}
+          disabled={status === 'loading'}
+        >
+          {status === 'loading'
+            ? t('meetings.audioPlayback.loading')
+            : isPlaying
+              ? t('meetings.audioPlayback.pause')
+              : t('meetings.audioPlayback.play')}
+        </Btn>
+        <input
+          type="range"
+          min={0}
+          max={duration > 0 ? duration : 0}
+          step={0.1}
+          value={duration > 0 ? Math.min(currentTime, duration) : 0}
+          onChange={event => seekTo(event.target.value)}
+          disabled={status !== 'ready' || duration <= 0}
+          aria-label={t('meetings.audioPlayback.progress')}
+          style={{ width: '100%', accentColor: 'var(--ol-blue)' }}
+        />
+        <span style={{ fontSize: 11, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)', whiteSpace: 'nowrap' }}>
+          {formatPlaybackTime(currentTime)} / {formatPlaybackTime(duration)}
+        </span>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 8 }}>
+        <Volume2 size={14} aria-hidden="true" style={{ color: 'var(--ol-ink-4)', flexShrink: 0 }} />
+        <input
+          type="range"
+          min={0}
+          max={2}
+          step={0.1}
+          value={volume}
+          onChange={event => changeVolume(event.target.value)}
+          aria-label={t('meetings.audioPlayback.volume')}
+          title={t('meetings.audioPlayback.volume')}
+          style={{ width: 112, accentColor: 'var(--ol-blue)' }}
+        />
+        <span style={{ width: 36, textAlign: 'right', fontSize: 11, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)' }}>
+          {Math.round(volume * 100)}%
+        </span>
+      </div>
+      {status === 'missing' && (
+        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--ol-ink-4)' }}>
+          {t('meetings.audioPlayback.missing')}
+        </div>
+      )}
+      {status === 'error' && (
+        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--ol-red, #ef4444)' }}>
+          {t('meetings.audioPlayback.loadFailed', { err: errorText ?? '-' })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function meetingListItemFromRecord(record: MeetingRecord): MeetingListItem {
+  return {
+    id: record.id,
+    title: record.title,
+    status: record.status,
+    startedAt: record.startedAt,
+    endedAt: record.endedAt,
+    durationMs: record.durationMs,
+    summaryOverview: record.summary.overview,
+    transcriptPreview: record.transcriptSegments.find(segment => segment.text.trim())?.text.trim().slice(0, 180) ?? '',
+    transcriptSegmentCount: record.transcriptSegments.length,
+    audio: record.audio,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function upsertMeetingListItem(records: MeetingListItem[], record: MeetingListItem): MeetingListItem[] {
   const exists = records.some(item => item.id === record.id);
   const next = exists
     ? records.map(item => (item.id === record.id ? record : item))
@@ -1350,14 +1807,35 @@ function upsertMeeting(records: MeetingRecord[], record: MeetingRecord): Meeting
   return [...next].sort((a, b) => dateMs(b.startedAt) - dateMs(a.startedAt));
 }
 
-function appendSegment(records: MeetingRecord[], meetingId: string, segment: TranscriptSegment): MeetingRecord[] {
+function appendSegmentToMeetingList(
+  records: MeetingListItem[],
+  meetingId: string,
+  segment: TranscriptSegment,
+): MeetingListItem[] {
   return records.map(record => {
-    if (record.id !== meetingId || hasSegment(record, segment.id)) return record;
+    if (record.id !== meetingId) return record;
+    const text = segment.text.trim();
     return {
       ...record,
-      transcriptSegments: [...record.transcriptSegments, segment],
+      transcriptPreview: record.transcriptPreview || text.slice(0, 180),
+      transcriptSegmentCount: record.transcriptSegmentCount + 1,
     };
   });
+}
+
+function missingMeetingAudio(): MeetingRecord['audio'] {
+  return {
+    state: 'missing',
+    retained: false,
+    path: null,
+  };
+}
+
+function withMissingAudio(record: MeetingRecord): MeetingRecord {
+  return {
+    ...record,
+    audio: missingMeetingAudio(),
+  };
 }
 
 function removeDraft(
@@ -1394,6 +1872,13 @@ function canRetranscribeMeeting(record: MeetingRecord, snapshot: MeetingRecordin
     && record.status !== 'recording'
     && record.status !== 'paused'
     && record.status !== 'summarizing';
+}
+
+function canPlayMeetingAudio(record: MeetingRecord, snapshot: MeetingRecordingSnapshot | null): boolean {
+  if (snapshot) return false;
+  return record.audio.state === 'retained'
+    && record.status !== 'recording'
+    && record.status !== 'paused';
 }
 
 function createEditDraft(record: MeetingRecord): MeetingEditDraft {
@@ -1434,24 +1919,8 @@ function todosFromDraft(value: MeetingTodoDraft[], record: MeetingRecord): Meeti
     .filter(todo => todo.content.length > 0);
 }
 
-function meetingPreview(record: MeetingRecord): string {
-  return record.transcriptSegments.find(segment => segment.text.trim().length > 0)?.text.trim() ?? '';
-}
-
-function meetingSearchText(record: MeetingRecord): string {
-  return [
-    record.title,
-    record.summary.overview,
-    ...record.summary.keyDecisions,
-    ...record.summary.risksAndOpenQuestions,
-    ...record.summary.todos.flatMap(todo => [
-      todo.content,
-      todo.owner ?? '',
-      todo.dueDate ?? '',
-      todo.sourceQuote ?? '',
-    ]),
-    ...record.transcriptSegments.map(segment => segment.text),
-  ].join('\n').toLowerCase();
+function meetingSearchText(record: MeetingListItem): string {
+  return `${record.title}\n${record.summaryOverview}`.toLowerCase();
 }
 
 function statusLabel(status: MeetingStatus, t: ReturnType<typeof useTranslation>['t']): string {
@@ -1521,6 +1990,46 @@ function formatTimestamp(ms: number): string {
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatPlaybackTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '00:00';
+  const totalSeconds = Math.floor(seconds);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const sec = totalSeconds % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  }
+  return `${String(minutes).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+
+function formatPlaybackSpeed(value: PlaybackSpeed): string {
+  return `${value}x`;
+}
+
+function binaryPayloadLength(payload: BinaryPayload): number {
+  if (payload instanceof ArrayBuffer) return payload.byteLength;
+  if (ArrayBuffer.isView(payload)) return payload.byteLength;
+  return payload.length;
+}
+
+function binaryPayloadToArrayBuffer(payload: BinaryPayload): ArrayBuffer {
+  if (payload instanceof ArrayBuffer) return payload;
+  if (ArrayBuffer.isView(payload)
+    && payload.byteOffset === 0
+    && payload.byteLength === payload.buffer.byteLength
+    && payload.buffer instanceof ArrayBuffer) {
+    return payload.buffer;
+  }
+  const buffer = new ArrayBuffer(binaryPayloadLength(payload));
+  const target = new Uint8Array(buffer);
+  if (ArrayBuffer.isView(payload)) {
+    target.set(new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength));
+  } else {
+    target.set(payload);
+  }
+  return buffer;
 }
 
 function formatDateTime(iso: string): string {

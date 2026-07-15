@@ -382,6 +382,21 @@ export interface MeetingRecord {
   updatedAt: string;
 }
 
+export interface MeetingListItem {
+  id: string;
+  title: string;
+  status: MeetingStatus;
+  startedAt: string;
+  endedAt: string | null;
+  durationMs: number | null;
+  summaryOverview: string;
+  transcriptPreview: string;
+  transcriptSegmentCount: number;
+  audio: MeetingAudioMeta;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type MeetingRecordingPhase =
   | 'starting'
   | 'recording'

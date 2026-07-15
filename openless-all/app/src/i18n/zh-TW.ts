@@ -465,6 +465,17 @@ export const zhTW: typeof zhCN = {
       missing: '音頻缺失',
       unavailable: '無可用音頻',
     },
+    audioPlayback: {
+      title: '會議音頻',
+      play: '播放',
+      pause: '暫停',
+      loading: '載入中…',
+      speed: '倍速',
+      volume: '音量',
+      progress: '播放進度',
+      missing: '會議音頻已清理或不存在。',
+      loadFailed: '載入會議音頻失敗：{{err}}',
+    },
     source: {
       realtimeAsr: '即時 ASR',
       retranscribedAsr: '重新轉寫',

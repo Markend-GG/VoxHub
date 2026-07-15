@@ -27,6 +27,7 @@
     "@formkit/auto-animate": "^0.9.0",
     "@shadcn/react": "^0.2.0",
     "@tailwindcss/vite": "^4.3.2",
+    "@tanstack/react-virtual": "^3.14.6",
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-dialog": "^2.7.1",

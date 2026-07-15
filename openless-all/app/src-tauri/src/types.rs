@@ -683,6 +683,50 @@ pub struct MeetingRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingListItem {
+    pub id: String,
+    pub title: String,
+    pub status: MeetingStatus,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub summary_overview: String,
+    pub transcript_preview: String,
+    pub transcript_segment_count: usize,
+    pub audio: MeetingAudioMeta,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<&MeetingRecord> for MeetingListItem {
+    fn from(record: &MeetingRecord) -> Self {
+        let transcript_preview = record
+            .transcript_segments
+            .iter()
+            .find_map(|segment| {
+                let text = segment.text.trim();
+                (!text.is_empty()).then(|| text.chars().take(180).collect())
+            })
+            .unwrap_or_default();
+        Self {
+            id: record.id.clone(),
+            title: record.title.clone(),
+            status: record.status.clone(),
+            started_at: record.started_at.clone(),
+            ended_at: record.ended_at.clone(),
+            duration_ms: record.duration_ms,
+            summary_overview: record.summary.overview.clone(),
+            transcript_preview,
+            transcript_segment_count: record.transcript_segments.len(),
+            audio: record.audio.clone(),
+            created_at: record.created_at.clone(),
+            updated_at: record.updated_at.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MeetingRecordingPhase {
     Starting,
@@ -4220,8 +4264,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(prefs.meeting_asr.model_override.as_deref(), Some("fun-asr-realtime"));
-        assert_eq!(prefs.meeting_asr.model_provider_id.as_deref(), Some("bailian"));
+        assert_eq!(
+            prefs.meeting_asr.model_override.as_deref(),
+            Some("fun-asr-realtime")
+        );
+        assert_eq!(
+            prefs.meeting_asr.model_provider_id.as_deref(),
+            Some("bailian")
+        );
 
         let value = serde_json::to_value(&prefs.meeting_asr).unwrap();
         assert_eq!(value["modelOverride"], "fun-asr-realtime");
@@ -4234,9 +4284,14 @@ mod tests {
         let prefs = UserPreferences::default();
         assert!(prefs.switch_style_hotkey.is_some());
         assert!(prefs.open_app_hotkey.is_some());
-        let rewrite = prefs.rewrite_hotkey.expect("rewrite hotkey should default to enabled");
+        let rewrite = prefs
+            .rewrite_hotkey
+            .expect("rewrite hotkey should default to enabled");
         assert_eq!(rewrite.primary, "R");
-        assert_eq!(rewrite.modifiers, vec!["alt".to_string(), "shift".to_string()]);
+        assert_eq!(
+            rewrite.modifiers,
+            vec!["alt".to_string(), "shift".to_string()]
+        );
     }
 
     #[test]

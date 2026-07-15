@@ -48,6 +48,7 @@ export {
 } from "./history"
 
 // meetings
+export type { BinaryPayload } from "./meetings"
 export {
     listMeetings,
     getMeeting,
@@ -62,6 +63,7 @@ export {
     generateMeetingSummary,
     retryMeetingSummary,
     exportMeetingMarkdown,
+    prepareMeetingAudioPlayback,
     retranscribeMeeting,
     hideMainWindowAfterMeetingGuard,
     exitAppAfterMeetingGuard,

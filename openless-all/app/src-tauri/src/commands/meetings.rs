@@ -1,26 +1,41 @@
 use super::*;
 use chrono::Utc;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
+};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use crate::types::{MeetingAudioState, MeetingStatus, TranscriptSegment, TranscriptSegmentSource};
+use crate::types::{
+    MeetingAudioState, MeetingListItem, MeetingStatus, TranscriptSegment, TranscriptSegmentSource,
+};
+
+const WAV_HEADER_BYTES: u64 = 44;
+const RETRANSCRIBE_PCM_CHUNK_BYTES: usize = 16_000 * 2 * 60 * 5;
+static PLAYBACK_CACHE_LOCKS: OnceLock<
+    tokio::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+> = OnceLock::new();
 
 #[tauri::command]
-pub fn list_meetings() -> Result<Vec<MeetingRecord>, String> {
-    MeetingStore::new()
-        .map_err(|e| e.to_string())?
-        .list()
-        .map_err(|e| e.to_string())
+pub fn list_meetings() -> Result<Vec<MeetingListItem>, String> {
+    let store = MeetingStore::new().map_err(|e| e.to_string())?;
+    let mut records = store.list().map_err(|e| e.to_string())?;
+    sync_missing_meeting_audio_states(&store, &mut records);
+    Ok(records.iter().map(MeetingListItem::from).collect())
 }
 
 #[tauri::command]
 pub fn get_meeting(id: String) -> Result<MeetingRecord, String> {
     validate_meeting_id(&id)?;
-    MeetingStore::new()
-        .map_err(|e| e.to_string())?
+    let store = MeetingStore::new().map_err(|e| e.to_string())?;
+    let mut record = store
         .get(&id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "meeting not found".to_string())
+        .ok_or_else(|| "meeting not found".to_string())?;
+    sync_missing_meeting_audio_states(&store, std::slice::from_mut(&mut record));
+    Ok(record)
 }
 
 #[tauri::command]
@@ -145,6 +160,35 @@ pub fn export_meeting_markdown(id: String, target_path: String) -> Result<(), St
 }
 
 #[tauri::command]
+pub async fn prepare_meeting_audio_playback(id: String) -> Result<String, String> {
+    validate_meeting_id(&id)?;
+    let store = MeetingStore::new().map_err(|e| e.to_string())?;
+    let mut record = store
+        .get(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    if record.audio.state != MeetingAudioState::Retained {
+        return Err("meeting audio is not retained".into());
+    }
+
+    let path = crate::persistence::meeting_recording_existing_path_for_id(&id)
+        .map_err(|e| e.to_string())?;
+    if !path.exists() {
+        mark_meeting_audio_missing(&store, &mut record);
+        return Err("meeting recording not found".into());
+    }
+    match meeting_audio_playback_path(&path).await {
+        Ok(playback_path) => Ok(playback_path.to_string_lossy().into_owned()),
+        Err(error) => {
+            if error.contains("not found") {
+                mark_meeting_audio_missing(&store, &mut record);
+            }
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
 pub async fn retranscribe_meeting(
     id: String,
     coord: CoordinatorState<'_>,
@@ -168,20 +212,64 @@ pub async fn retranscribe_meeting(
     let path = crate::persistence::meeting_recording_existing_path_for_id(&id)
         .map_err(|e| e.to_string())?;
     if !path.exists() {
+        mark_meeting_audio_missing(&store, &mut record);
         return Err("meeting recording not found".into());
     }
-    let pcm = read_meeting_audio_pcm(&path).await?;
-    let text = coord.retranscribe_pcm(pcm).await?;
-    if text.trim().is_empty() {
+    let segments = match retranscribe_meeting_audio_in_chunks(&path, coord.inner().as_ref()).await {
+        Ok(segments) => segments,
+        Err(error) => {
+            if error.contains("not found") {
+                mark_meeting_audio_missing(&store, &mut record);
+            }
+            return Err(error);
+        }
+    };
+    if segments.is_empty() {
         return Err("meeting retranscribe returned empty transcript".into());
     }
 
-    replace_transcript_with_retranscribed_text(&mut record, text);
+    replace_transcript_with_retranscribed_segments(&mut record, segments);
     store
         .update(record.clone())
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "meeting not found".to_string())?;
     Ok(record)
+}
+
+async fn retranscribe_meeting_audio_in_chunks(
+    path: &Path,
+    coord: &crate::coordinator::Coordinator,
+) -> Result<Vec<TranscriptSegment>, String> {
+    let part_paths = meeting_audio_wav_paths(path)?;
+    let mut segments = Vec::new();
+    let mut offset_ms = 0u64;
+    for part_path in part_paths {
+        let mut wav = open_meeting_wav(&part_path).await?;
+        let mut remaining = read_wav_header(&mut wav, &part_path).await?;
+        while remaining > 0 {
+            let pcm =
+                read_wav_pcm_chunk(&mut wav, &mut remaining, RETRANSCRIBE_PCM_CHUNK_BYTES).await?;
+            if pcm.is_empty() {
+                break;
+            }
+            let chunk_duration_ms = pcm_duration_ms(pcm.len());
+            let text = coord.retranscribe_pcm(pcm).await?;
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                segments.push(TranscriptSegment {
+                    id: format!("retranscribed-{}", Uuid::new_v4()),
+                    speaker_label: "未区分".to_string(),
+                    start_ms: offset_ms,
+                    end_ms: Some(offset_ms.saturating_add(chunk_duration_ms)),
+                    text: trimmed.to_string(),
+                    source: TranscriptSegmentSource::RetranscribedAsr,
+                    metadata: None,
+                });
+            }
+            offset_ms = offset_ms.saturating_add(chunk_duration_ms);
+        }
+    }
+    Ok(segments)
 }
 
 fn prune_with_current_preference(store: &MeetingStore) -> Result<(), String> {
@@ -227,6 +315,57 @@ fn ensure_no_active_meeting_recording(active: Option<&MeetingRecord>) -> Result<
     } else {
         Ok(())
     }
+}
+
+fn mark_meeting_audio_missing(store: &MeetingStore, record: &mut MeetingRecord) {
+    apply_meeting_audio_missing(record);
+    if let Err(error) = store.update(record.clone()) {
+        log::warn!(
+            "[meetings] failed to persist missing audio state for {}: {error}",
+            record.id
+        );
+    }
+}
+
+fn sync_missing_meeting_audio_states(store: &MeetingStore, records: &mut [MeetingRecord]) {
+    for record in records {
+        if !meeting_audio_file_missing(record) {
+            continue;
+        }
+        mark_meeting_audio_missing(store, record);
+    }
+}
+
+fn meeting_audio_file_missing(record: &MeetingRecord) -> bool {
+    meeting_audio_file_missing_with_resolver(record, |id| {
+        crate::persistence::meeting_recording_existing_path_for_id(id)
+    })
+}
+
+fn meeting_audio_file_missing_with_resolver<F>(record: &MeetingRecord, path_for_id: F) -> bool
+where
+    F: Fn(&str) -> anyhow::Result<PathBuf>,
+{
+    if record.audio.state != MeetingAudioState::Retained {
+        return false;
+    }
+    match path_for_id(&record.id) {
+        Ok(path) => !path.exists(),
+        Err(error) => {
+            log::warn!(
+                "[meetings] failed to resolve audio path for {}: {error}",
+                record.id
+            );
+            false
+        }
+    }
+}
+
+fn apply_meeting_audio_missing(record: &mut MeetingRecord) {
+    record.audio.state = MeetingAudioState::Missing;
+    record.audio.retained = false;
+    record.audio.path = None;
+    record.updated_at = Utc::now().to_rfc3339();
 }
 
 fn delete_meeting_record_with_cleanup<G, D, R>(
@@ -360,35 +499,191 @@ fn format_duration_hms(ms: u64) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
-async fn read_meeting_audio_pcm(path: &Path) -> Result<Vec<u8>, String> {
-    if path.is_dir() {
-        read_segmented_meeting_audio_pcm(path).await
-    } else {
-        let wav = tokio::fs::read(path).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "meeting recording not found".to_string()
-            } else {
-                format!("read meeting wav failed: {e}")
-            }
-        })?;
-        pcm_from_wav_bytes(&wav)
+async fn meeting_audio_playback_path(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_dir() {
+        return Ok(path.to_path_buf());
     }
-}
 
-async fn read_segmented_meeting_audio_pcm(dir: &Path) -> Result<Vec<u8>, String> {
-    let mut parts = meeting_audio_part_paths(dir)?;
+    let mut parts = meeting_audio_part_paths(path)?;
     if parts.is_empty() {
         return Err("meeting recording not found".into());
     }
     parts.sort();
-    let mut pcm = Vec::new();
-    for part in parts {
-        let wav = tokio::fs::read(&part)
-            .await
-            .map_err(|e| format!("read meeting wav failed: {e}"))?;
-        pcm.extend(pcm_from_wav_bytes(&wav)?);
+    if parts.len() == 1 {
+        return Ok(parts.remove(0));
     }
+
+    let playback_path = path.join("playback.wav");
+    let cache_lock = playback_cache_lock(&playback_path).await;
+    let _cache_guard = cache_lock.lock().await;
+    let expected_data_size = expected_wav_data_size(&parts).await?;
+    if playback_cache_is_valid(&playback_path, expected_data_size).await {
+        return Ok(playback_path);
+    }
+    if playback_path.exists() {
+        tokio::fs::remove_file(&playback_path)
+            .await
+            .map_err(|e| format!("remove invalid meeting playback wav failed: {e}"))?;
+    }
+    write_playback_cache_atomically(&parts, &playback_path, expected_data_size).await?;
+    if !playback_cache_is_valid(&playback_path, expected_data_size).await {
+        let _ = tokio::fs::remove_file(&playback_path).await;
+        return Err("meeting playback cache is empty or corrupt".into());
+    }
+    Ok(playback_path)
+}
+
+async fn playback_cache_lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let locks = PLAYBACK_CACHE_LOCKS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().await;
+    Arc::clone(
+        locks
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
+}
+
+fn meeting_audio_wav_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
+    if !path.is_dir() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let mut parts = meeting_audio_part_paths(path)?;
+    if parts.is_empty() {
+        return Err("meeting recording not found".into());
+    }
+    parts.sort();
+    Ok(parts)
+}
+
+async fn expected_wav_data_size(parts: &[PathBuf]) -> Result<u64, String> {
+    let mut total = 0u64;
+    for part in parts {
+        let mut file = open_meeting_wav(part).await?;
+        total = total
+            .checked_add(read_wav_header(&mut file, part).await?)
+            .ok_or_else(|| "meeting recording is too large to play".to_string())?;
+    }
+    Ok(total)
+}
+
+async fn playback_cache_is_valid(path: &Path, expected_data_size: u64) -> bool {
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return false;
+    };
+    matches!(read_wav_header(&mut file, path).await, Ok(size) if size == expected_data_size)
+}
+
+async fn write_playback_cache_atomically(
+    parts: &[PathBuf],
+    playback_path: &Path,
+    data_size: u64,
+) -> Result<(), String> {
+    let data_size_u32 = u32::try_from(data_size)
+        .map_err(|_| "meeting recording is too large to play".to_string())?;
+    let mut first = open_meeting_wav(&parts[0]).await?;
+    let mut header = [0u8; WAV_HEADER_BYTES as usize];
+    first
+        .read_exact(&mut header)
+        .await
+        .map_err(|e| format!("read meeting wav header failed: {e}"))?;
+    header[4..8].copy_from_slice(&(36 + data_size_u32).to_le_bytes());
+    header[40..44].copy_from_slice(&data_size_u32.to_le_bytes());
+
+    let temp_path =
+        playback_path.with_file_name(format!(".playback-{}.tmp", Uuid::new_v4().simple()));
+    let write_result = async {
+        let mut output = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .await
+            .map_err(|e| format!("create meeting playback cache failed: {e}"))?;
+        output
+            .write_all(&header)
+            .await
+            .map_err(|e| format!("write meeting playback header failed: {e}"))?;
+        for part in parts {
+            let mut input = open_meeting_wav(part).await?;
+            let part_data_size = read_wav_header(&mut input, part).await?;
+            tokio::io::copy(&mut input.take(part_data_size), &mut output)
+                .await
+                .map_err(|e| format!("write meeting playback audio failed: {e}"))?;
+        }
+        output
+            .flush()
+            .await
+            .map_err(|e| format!("flush meeting playback cache failed: {e}"))?;
+        output
+            .sync_all()
+            .await
+            .map_err(|e| format!("sync meeting playback cache failed: {e}"))?;
+        tokio::fs::rename(&temp_path, playback_path)
+            .await
+            .map_err(|e| format!("commit meeting playback cache failed: {e}"))
+    }
+    .await;
+    if write_result.is_err() {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+    }
+    write_result
+}
+
+async fn open_meeting_wav(path: &Path) -> Result<tokio::fs::File, String> {
+    tokio::fs::File::open(path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "meeting recording not found".to_string()
+        } else {
+            format!("read meeting wav failed: {e}")
+        }
+    })
+}
+
+async fn read_wav_header(file: &mut tokio::fs::File, path: &Path) -> Result<u64, String> {
+    file.seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|e| format!("seek meeting wav failed: {e}"))?;
+    let mut header = [0u8; WAV_HEADER_BYTES as usize];
+    file.read_exact(&mut header)
+        .await
+        .map_err(|_| "meeting recording is empty or corrupt".to_string())?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" || &header[36..40] != b"data" {
+        return Err("meeting recording is empty or corrupt".into());
+    }
+    let data_size = u32::from_le_bytes(header[40..44].try_into().unwrap()) as u64;
+    let file_size = file
+        .metadata()
+        .await
+        .map_err(|e| format!("read meeting wav metadata failed: {e}"))?
+        .len();
+    if data_size == 0 || data_size % 2 != 0 || file_size != WAV_HEADER_BYTES + data_size {
+        log::warn!("[meetings] invalid wav size for {}", path.display());
+        return Err("meeting recording is empty or corrupt".into());
+    }
+    Ok(data_size)
+}
+
+async fn read_wav_pcm_chunk(
+    file: &mut tokio::fs::File,
+    remaining: &mut u64,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    if max_bytes == 0 || max_bytes % 2 != 0 {
+        return Err("meeting PCM chunk size must be a positive even number".into());
+    }
+    let chunk_size = (*remaining).min(max_bytes as u64) as usize;
+    if chunk_size == 0 {
+        return Ok(Vec::new());
+    }
+    let mut pcm = vec![0u8; chunk_size];
+    file.read_exact(&mut pcm)
+        .await
+        .map_err(|_| "meeting recording is empty or corrupt".to_string())?;
+    *remaining -= chunk_size as u64;
     Ok(pcm)
+}
+
+fn pcm_duration_ms(byte_len: usize) -> u64 {
+    (byte_len as u64).saturating_mul(1000) / (16_000 * 2)
 }
 
 fn meeting_audio_part_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -406,24 +701,12 @@ fn meeting_audio_part_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
-fn pcm_from_wav_bytes(wav: &[u8]) -> Result<Vec<u8>, String> {
-    if wav.len() <= 44 {
-        return Err("meeting recording is empty or corrupt".into());
-    }
-    Ok(wav[44..].to_vec())
-}
-
-fn replace_transcript_with_retranscribed_text(record: &mut MeetingRecord, text: String) {
+fn replace_transcript_with_retranscribed_segments(
+    record: &mut MeetingRecord,
+    segments: Vec<TranscriptSegment>,
+) {
     let now = Utc::now().to_rfc3339();
-    record.transcript_segments = vec![TranscriptSegment {
-        id: format!("retranscribed-{}", Uuid::new_v4()),
-        speaker_label: "未区分".to_string(),
-        start_ms: 0,
-        end_ms: record.duration_ms,
-        text: text.trim().to_string(),
-        source: TranscriptSegmentSource::RetranscribedAsr,
-        metadata: None,
-    }];
+    record.transcript_segments = segments;
     if record.status != MeetingStatus::Summarizing {
         record.status = MeetingStatus::Completed;
     }
@@ -523,29 +806,128 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn pcm_from_wav_bytes_strips_header_and_rejects_empty() {
-        let wav = encode_wav_16k_mono(&[1, -2]);
-        assert_eq!(pcm_from_wav_bytes(&wav).unwrap(), wav[44..].to_vec());
-        assert_eq!(
-            pcm_from_wav_bytes(&[0u8; 44]),
-            Err("meeting recording is empty or corrupt".to_string())
+    #[tokio::test]
+    async fn wav_pcm_reader_keeps_chunks_bounded() {
+        let path = std::env::temp_dir().join(format!("meeting-audio-{}.wav", Uuid::new_v4()));
+        std::fs::write(&path, encode_wav_16k_mono(&[1, 2, 3, 4, 5])).expect("write wav");
+        let mut file = open_meeting_wav(&path).await.expect("open wav");
+        let mut remaining = read_wav_header(&mut file, &path)
+            .await
+            .expect("read header");
+
+        let first = read_wav_pcm_chunk(&mut file, &mut remaining, 4)
+            .await
+            .expect("first chunk");
+        let second = read_wav_pcm_chunk(&mut file, &mut remaining, 4)
+            .await
+            .expect("second chunk");
+        let third = read_wav_pcm_chunk(&mut file, &mut remaining, 4)
+            .await
+            .expect("third chunk");
+
+        assert_eq!(first.len(), 4);
+        assert_eq!(second.len(), 4);
+        assert_eq!(third.len(), 2);
+        assert_eq!(remaining, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn meeting_audio_playback_path_caches_segmented_parts() {
+        let dir = std::env::temp_dir().join(format!("meeting-audio-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::write(dir.join("part-0002.wav"), encode_wav_16k_mono(&[3, 4]))
+            .expect("write part");
+        std::fs::write(dir.join("part-0001.wav"), encode_wav_16k_mono(&[1, 2]))
+            .expect("write part");
+        std::fs::write(dir.join("playback.wav"), b"corrupt").expect("write corrupt cache");
+
+        let playback_path = meeting_audio_playback_path(&dir)
+            .await
+            .expect("prepare playback");
+        let wav = std::fs::read(&playback_path).expect("read playback wav");
+
+        assert_eq!(playback_path, dir.join("playback.wav"));
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        let expected = encode_wav_16k_mono(&[1, 2, 3, 4]);
+        assert_eq!(&wav[44..], &expected[44..]);
+        assert!(std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn meeting_audio_playback_path_serializes_concurrent_cache_writes() {
+        let dir = std::env::temp_dir().join(format!("meeting-audio-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::write(dir.join("part-0001.wav"), encode_wav_16k_mono(&[1, 2]))
+            .expect("write part");
+        std::fs::write(dir.join("part-0002.wav"), encode_wav_16k_mono(&[3, 4]))
+            .expect("write part");
+
+        let (first, second) = tokio::join!(
+            meeting_audio_playback_path(&dir),
+            meeting_audio_playback_path(&dir),
         );
+
+        assert_eq!(first.unwrap(), dir.join("playback.wav"));
+        assert_eq!(second.unwrap(), dir.join("playback.wav"));
+        assert!(playback_cache_is_valid(&dir.join("playback.wav"), 8).await);
+        assert!(std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn playback_cache_locks_are_scoped_per_meeting_path() {
+        let root = std::env::temp_dir().join(format!("meeting-audio-{}", Uuid::new_v4()));
+        let first = playback_cache_lock(&root.join("first/playback.wav")).await;
+        let first_again = playback_cache_lock(&root.join("first/playback.wav")).await;
+        let second = playback_cache_lock(&root.join("second/playback.wav")).await;
+
+        assert!(Arc::ptr_eq(&first, &first_again));
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn meeting_audio_playback_path_reuses_single_part() {
+        let dir = std::env::temp_dir().join(format!("meeting-audio-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let part = dir.join("part-0001.wav");
+        std::fs::write(&part, encode_wav_16k_mono(&[1, 2])).expect("write part");
+
+        assert_eq!(meeting_audio_playback_path(&dir).await.unwrap(), part);
+        assert!(!dir.join("playback.wav").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn replace_transcript_sets_retranscribed_source_and_preserves_summary() {
         let mut record = fixture_record();
         record.summary.overview = "保留总结".to_string();
+        let segment = TranscriptSegment {
+            id: "retranscribed-1".to_string(),
+            speaker_label: "未区分".to_string(),
+            start_ms: 0,
+            end_ms: Some(1_000),
+            text: "新原文".to_string(),
+            source: TranscriptSegmentSource::RetranscribedAsr,
+            metadata: None,
+        };
 
-        replace_transcript_with_retranscribed_text(&mut record, "  新原文  ".to_string());
+        replace_transcript_with_retranscribed_segments(&mut record, vec![segment]);
 
         assert_eq!(record.transcript_segments.len(), 1);
         let segment = &record.transcript_segments[0];
         assert_eq!(segment.text, "新原文");
         assert_eq!(segment.source, TranscriptSegmentSource::RetranscribedAsr);
         assert_eq!(segment.speaker_label, "未区分");
-        assert_eq!(segment.end_ms, record.duration_ms);
+        assert_eq!(segment.end_ms, Some(1_000));
         assert_eq!(record.summary.overview, "保留总结");
         assert_eq!(record.status, MeetingStatus::Completed);
     }
@@ -596,6 +978,38 @@ mod tests {
     }
 
     #[test]
+    fn missing_meeting_audio_state_clears_retention_flags() {
+        let mut record = fixture_record();
+
+        apply_meeting_audio_missing(&mut record);
+
+        assert_eq!(record.audio.state, MeetingAudioState::Missing);
+        assert!(!record.audio.retained);
+        assert_eq!(record.audio.path, None);
+    }
+
+    #[test]
+    fn retained_meeting_audio_missing_detects_deleted_file() {
+        let record = fixture_record();
+        let missing_path = std::env::temp_dir().join(format!("missing-{}.wav", Uuid::new_v4()));
+
+        assert!(meeting_audio_file_missing_with_resolver(&record, |_id| {
+            Ok(missing_path.clone())
+        }));
+    }
+
+    #[test]
+    fn non_retained_meeting_audio_does_not_report_missing() {
+        let mut record = fixture_record();
+        record.audio.state = MeetingAudioState::Pruned;
+        let missing_path = std::env::temp_dir().join(format!("missing-{}.wav", Uuid::new_v4()));
+
+        assert!(!meeting_audio_file_missing_with_resolver(&record, |_id| {
+            Ok(missing_path.clone())
+        }));
+    }
+
+    #[test]
     fn meeting_delete_removes_audio_before_record_so_cleanup_failure_preserves_record() {
         let record = fixture_record();
         let mut record_deleted = false;
@@ -615,6 +1029,30 @@ mod tests {
             Err("delete meeting audio failed: locked".to_string())
         );
         assert!(!record_deleted);
+    }
+
+    #[test]
+    fn meeting_list_item_serialization_omits_full_detail() {
+        let mut record = fixture_record();
+        record.summary.overview = "摘要概览".to_string();
+        record.transcript_segments = vec![TranscriptSegment {
+            id: "segment-1".to_string(),
+            speaker_label: "未区分".to_string(),
+            start_ms: 0,
+            end_ms: Some(1_000),
+            text: "原文预览".repeat(100),
+            source: TranscriptSegmentSource::RealtimeAsr,
+            metadata: None,
+        }];
+
+        let item = MeetingListItem::from(&record);
+        let value = serde_json::to_value(&item).expect("serialize meeting list item");
+
+        assert_eq!(item.summary_overview, "摘要概览");
+        assert_eq!(item.transcript_segment_count, 1);
+        assert_eq!(item.transcript_preview.chars().count(), 180);
+        assert!(value.get("transcriptSegments").is_none());
+        assert!(value.get("summary").is_none());
     }
 
     fn fixture_record() -> MeetingRecord {

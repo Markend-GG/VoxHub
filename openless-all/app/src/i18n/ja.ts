@@ -467,6 +467,17 @@ export const ja: typeof zhCN = {
       missing: '音声なし',
       unavailable: '利用可能な音声なし',
     },
+    audioPlayback: {
+      title: '会議音声',
+      play: '再生',
+      pause: '一時停止',
+      loading: '読み込み中…',
+      speed: '速度',
+      volume: '音量',
+      progress: '再生位置',
+      missing: '会議音声は削除済み、または存在しません。',
+      loadFailed: '会議音声の読み込みに失敗：{{err}}',
+    },
     source: {
       realtimeAsr: 'リアルタイム ASR',
       retranscribedAsr: '再文字起こし',

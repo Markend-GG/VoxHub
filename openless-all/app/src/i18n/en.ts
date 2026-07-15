@@ -465,6 +465,17 @@ export const en: typeof zhCN = {
       missing: 'Audio missing',
       unavailable: 'No audio',
     },
+    audioPlayback: {
+      title: 'Meeting audio',
+      play: 'Play',
+      pause: 'Pause',
+      loading: 'Loading…',
+      speed: 'Speed',
+      volume: 'Volume',
+      progress: 'Playback progress',
+      missing: 'Meeting audio was cleaned up or does not exist.',
+      loadFailed: 'Failed to load meeting audio: {{err}}',
+    },
     source: {
       realtimeAsr: 'Realtime ASR',
       retranscribedAsr: 'Retranscribed',

@@ -463,6 +463,17 @@ export const zhCN = {
       missing: '音频缺失',
       unavailable: '无可用音频',
     },
+    audioPlayback: {
+      title: '会议音频',
+      play: '播放',
+      pause: '暂停',
+      loading: '加载中…',
+      speed: '倍速',
+      volume: '音量',
+      progress: '播放进度',
+      missing: '会议音频已清理或不存在。',
+      loadFailed: '加载会议音频失败：{{err}}',
+    },
     source: {
       realtimeAsr: '实时 ASR',
       retranscribedAsr: '重新转写',

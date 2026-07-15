@@ -54,6 +54,7 @@ export const ICONS: Record<string, string> = {
   close: 'M18 6L6 18M6 6l12 12', // Close / X
   more: 'M5 12h.01M12 12h.01M19 12h.01', // More (horizontal dots)
   play: 'M5 3l14 9-14 9V3z', // Play
+  pause: 'M8 5v14M16 5v14', // Pause
   download: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3', // Download
 };
 

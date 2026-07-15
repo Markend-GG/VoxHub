@@ -1,9 +1,11 @@
-import type { MeetingRecord, MeetingRecordingSnapshot } from "../types"
+import type { MeetingListItem, MeetingRecord, MeetingRecordingSnapshot } from "../types"
 import { invokeOrMock } from "./shared"
 import { mockMeetings } from "./mock-data"
 
-export function listMeetings(): Promise<MeetingRecord[]> {
-    return invokeOrMock("list_meetings", undefined, () => mockMeetings)
+export type BinaryPayload = Uint8Array | ArrayBuffer | number[]
+
+export function listMeetings(): Promise<MeetingListItem[]> {
+    return invokeOrMock("list_meetings", undefined, () => mockMeetings.map(meetingListItemFromRecord))
 }
 
 export function getMeeting(id: string): Promise<MeetingRecord> {
@@ -106,6 +108,10 @@ export function exportMeetingMarkdown(id: string, targetPath: string): Promise<v
     return invokeOrMock("export_meeting_markdown", { id, targetPath }, () => undefined)
 }
 
+export function prepareMeetingAudioPlayback(id: string): Promise<string | BinaryPayload> {
+    return invokeOrMock("prepare_meeting_audio_playback", { id }, mockMeetingAudioWav)
+}
+
 export function retranscribeMeeting(id: string): Promise<MeetingRecord> {
     return invokeOrMock("retranscribe_meeting", { id }, () => ({
         ...mockMeetings[0],
@@ -123,4 +129,48 @@ export function hideMainWindowAfterMeetingGuard(): Promise<void> {
 
 export function exitAppAfterMeetingGuard(): Promise<void> {
     return invokeOrMock("exit_app_after_meeting_guard", undefined, () => undefined)
+}
+
+function mockMeetingAudioWav(): Uint8Array {
+    const sampleCount = 1600
+    const dataSize = sampleCount * 2
+    const bytes = new Uint8Array(44 + dataSize)
+    const view = new DataView(bytes.buffer)
+    writeAscii(bytes, 0, "RIFF")
+    view.setUint32(4, 36 + dataSize, true)
+    writeAscii(bytes, 8, "WAVE")
+    writeAscii(bytes, 12, "fmt ")
+    view.setUint32(16, 16, true)
+    view.setUint16(20, 1, true)
+    view.setUint16(22, 1, true)
+    view.setUint32(24, 16000, true)
+    view.setUint32(28, 32000, true)
+    view.setUint16(32, 2, true)
+    view.setUint16(34, 16, true)
+    writeAscii(bytes, 36, "data")
+    view.setUint32(40, dataSize, true)
+    return bytes
+}
+
+function writeAscii(bytes: Uint8Array, offset: number, value: string): void {
+    for (let i = 0; i < value.length; i += 1) {
+        bytes[offset + i] = value.charCodeAt(i)
+    }
+}
+
+function meetingListItemFromRecord(record: MeetingRecord): MeetingListItem {
+    return {
+        id: record.id,
+        title: record.title,
+        status: record.status,
+        startedAt: record.startedAt,
+        endedAt: record.endedAt,
+        durationMs: record.durationMs,
+        summaryOverview: record.summary.overview,
+        transcriptPreview: record.transcriptSegments.find(segment => segment.text.trim())?.text.trim().slice(0, 180) ?? "",
+        transcriptSegmentCount: record.transcriptSegments.length,
+        audio: record.audio,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+    }
 }
