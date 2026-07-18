@@ -64,6 +64,7 @@ export {
     hideMeetingCompanion,
     startMeetingCompanionDrag,
     saveMeetingCompanionPosition,
+    dismissCompletedMeetingCompanion,
     generateMeetingSummary,
     retryMeetingSummary,
     exportMeetingMarkdown,

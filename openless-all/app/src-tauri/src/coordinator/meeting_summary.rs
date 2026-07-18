@@ -563,6 +563,16 @@ fn emit_meeting_summary(
                 error,
             },
         );
+        #[cfg(not(mobile))]
+        match record.status {
+            MeetingStatus::Completed => {
+                crate::meeting_companion::schedule_completed_fallback_dismissal(&app, &record.id);
+            }
+            MeetingStatus::SummaryFailed => {
+                crate::meeting_companion::dismiss_failed_hidden_meeting(&app, &record.id);
+            }
+            _ => {}
+        }
     }
 }
 

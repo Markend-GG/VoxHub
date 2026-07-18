@@ -104,6 +104,10 @@ export function saveMeetingCompanionPosition(): Promise<void> {
     return invokeOrMock("save_meeting_companion_position", undefined, () => undefined)
 }
 
+export function dismissCompletedMeetingCompanion(meetingId: string): Promise<boolean> {
+    return invokeOrMock("dismiss_completed_meeting_companion", { meetingId }, () => true)
+}
+
 export function generateMeetingSummary(id: string): Promise<MeetingRecord> {
     return invokeOrMock("generate_meeting_summary", { id }, () => ({
         ...mockMeetings[0],

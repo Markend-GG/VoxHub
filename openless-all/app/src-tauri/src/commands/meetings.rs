@@ -128,14 +128,9 @@ pub async fn resume_meeting_recording(
 pub async fn stop_meeting_recording(
     id: String,
     coord: CoordinatorState<'_>,
-    app: AppHandle,
 ) -> Result<MeetingRecord, String> {
     validate_meeting_id(&id)?;
-    let stopped_id = id.clone();
-    let record = coord.stop_meeting_recording(id).await?;
-    #[cfg(not(mobile))]
-    crate::meeting_companion::meeting_ended(&app, &stopped_id);
-    Ok(record)
+    coord.stop_meeting_recording(id).await
 }
 
 #[tauri::command]

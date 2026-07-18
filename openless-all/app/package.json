@@ -23,7 +23,8 @@
     "check:android-updater-pubkey": "node scripts/check-android-updater-pubkey.mjs",
     "check:meeting-companion-assets": "node scripts/check-meeting-companion-assets.mjs",
     "check:meeting-companion-state": "npx tsx src/lib/meetingCompanionState.test.ts",
-    "check:meeting-companion-runtime": "npx tsx src/lib/meetingCompanionRuntime.test.ts"
+    "check:meeting-companion-runtime": "npx tsx src/lib/meetingCompanionRuntime.test.ts",
+    "check:meeting-companion-sync": "npx tsx src/lib/meetingCompanionSync.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

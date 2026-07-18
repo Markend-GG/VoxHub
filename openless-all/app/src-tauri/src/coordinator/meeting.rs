@@ -1,9 +1,8 @@
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use parking_lot::Mutex;
 use tauri::Emitter;
 use uuid::Uuid;
 
@@ -17,8 +16,8 @@ use crate::persistence::{
 };
 use crate::recorder::{Recorder, RecorderError};
 use crate::types::{
-    MeetingAsrMode, MeetingAudioMeta, MeetingAudioState, MeetingErrorEvent, MeetingRecord,
-    MeetingRecordingPhase, MeetingRecordingSnapshot, MeetingStatus, MeetingSummary,
+    MeetingAsrMode, MeetingAudioLevelEvent, MeetingAudioMeta, MeetingAudioState, MeetingErrorEvent,
+    MeetingRecord, MeetingRecordingPhase, MeetingRecordingSnapshot, MeetingStatus, MeetingSummary,
     MeetingTranscriptDraftEvent, MeetingTranscriptSegmentEvent, MeetingVadSilencePreset,
     TranscriptSegment, TranscriptSegmentMetadata, TranscriptSegmentSource,
 };
@@ -30,6 +29,60 @@ use super::{
     selected_microphone_device_name, stop_microphone_preview_monitor, ActiveAsr, Inner,
     MeetingAsrStartOptions, QaAsrStart, COORDINATOR_GLOBAL_TIMEOUT_SECS,
 };
+
+const MEETING_AUDIO_LEVEL_INTERVAL: Duration = Duration::from_millis(100);
+const MEETING_STATE_TICK_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Debug, Default)]
+struct MeetingAudioLevelThrottle {
+    last_emit_elapsed: Option<Duration>,
+}
+
+impl MeetingAudioLevelThrottle {
+    fn should_emit(&mut self, elapsed: Duration) -> bool {
+        if matches!(
+            self.last_emit_elapsed,
+            Some(previous) if elapsed.saturating_sub(previous) < MEETING_AUDIO_LEVEL_INTERVAL
+        ) {
+            return false;
+        }
+        self.last_emit_elapsed = Some(elapsed);
+        true
+    }
+}
+
+fn normalize_meeting_audio_level(level: f32) -> f32 {
+    if level.is_finite() {
+        level.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn try_queue_meeting_audio_level(sender: &mpsc::SyncSender<f32>, level: f32) -> bool {
+    sender
+        .try_send(normalize_meeting_audio_level(level))
+        .is_ok()
+}
+
+fn meeting_audio_level_delivery_allowed(
+    meeting_matches: bool,
+    recording: bool,
+    recorder_active: bool,
+    companion_visible: bool,
+) -> bool {
+    meeting_matches && recording && recorder_active && companion_visible
+}
+
+#[cfg(not(mobile))]
+fn meeting_companion_audio_level_reporting_enabled() -> bool {
+    crate::meeting_companion::audio_level_reporting_enabled()
+}
+
+#[cfg(mobile)]
+fn meeting_companion_audio_level_reporting_enabled() -> bool {
+    false
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MeetingSessionPhase {
@@ -295,9 +348,6 @@ impl MeetingSession {
                     MeetingRecordingPhase::TranscribingInterrupted
                 }
                 MeetingSessionPhase::Recording => MeetingRecordingPhase::Recording,
-                MeetingSessionPhase::Paused if self.asr_interrupted => {
-                    MeetingRecordingPhase::TranscribingInterrupted
-                }
                 MeetingSessionPhase::Paused => MeetingRecordingPhase::Paused,
             },
             elapsed_ms: self.elapsed_ms_at(now),
@@ -647,6 +697,10 @@ pub(super) async fn stop_meeting_recording(
 ) -> Result<MeetingRecord, String> {
     ensure_active_meeting_id(inner, meeting_id)?;
     stop_meeting_recorder(inner);
+    if let Some(mut snapshot) = meeting_snapshot(inner, Utc::now())? {
+        snapshot.phase = MeetingRecordingPhase::Stopping;
+        emit_meeting_state(inner, &snapshot);
+    }
     let flush_result = flush_current_meeting_asr(inner).await;
     emit_meeting_transcript_draft_clear(inner, meeting_id);
 
@@ -777,18 +831,10 @@ async fn start_meeting_recorder(
     let path =
         meeting_recording_part_path_for_id(meeting_id, part_index).map_err(|e| e.to_string())?;
     let microphone_device_name = selected_microphone_device_name(inner);
-    let inner_for_level = Arc::clone(inner);
-    let last_emit_at = Arc::new(Mutex::new(None::<Instant>));
-    let level_handler: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |_level| {
-        let now = Instant::now();
-        let mut last = last_emit_at.lock();
-        if matches!(*last, Some(prev) if now.duration_since(prev).as_millis() < 500) {
-            return;
-        }
-        *last = Some(now);
-        if let Ok(Some(snapshot)) = meeting_snapshot(&inner_for_level, Utc::now()) {
-            emit_meeting_state(&inner_for_level, &snapshot);
-        }
+    let (level_sender, level_receiver) = mpsc::sync_channel(1);
+    spawn_meeting_audio_level_reporter(inner, meeting_id.to_string(), level_receiver);
+    let level_handler: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |level| {
+        let _ = try_queue_meeting_audio_level(&level_sender, level);
     });
 
     stop_microphone_preview_monitor(inner, "meeting recorder");
@@ -804,6 +850,65 @@ async fn start_meeting_recorder(
             release_recording_mute(inner, "meeting");
             Err(error.to_string())
         }
+    }
+}
+
+fn spawn_meeting_audio_level_reporter(
+    inner: &Arc<Inner>,
+    meeting_id: String,
+    receiver: mpsc::Receiver<f32>,
+) {
+    let inner = Arc::clone(inner);
+    if let Err(error) = std::thread::Builder::new()
+        .name("openless-meeting-audio-level".into())
+        .spawn(move || {
+            let started = Instant::now();
+            let mut audio_throttle = MeetingAudioLevelThrottle::default();
+            let mut last_state_tick: Option<Duration> = None;
+
+            for level in receiver {
+                let elapsed = started.elapsed();
+                if !matches!(
+                    last_state_tick,
+                    Some(previous) if elapsed.saturating_sub(previous) < MEETING_STATE_TICK_INTERVAL
+                ) {
+                    last_state_tick = Some(elapsed);
+                    if inner.meeting_recorder.lock().is_some() {
+                        if let Ok(Some(snapshot)) = meeting_snapshot(&inner, Utc::now()) {
+                            emit_meeting_state(&inner, &snapshot);
+                        }
+                    }
+                }
+
+                if !audio_throttle.should_emit(elapsed) {
+                    continue;
+                }
+                let (meeting_matches, recording) = {
+                    let guard = inner.meeting_session.lock();
+                    guard
+                        .as_ref()
+                        .map(|session| {
+                            (
+                                session.record().id == meeting_id,
+                                session.phase == MeetingSessionPhase::Recording,
+                            )
+                        })
+                        .unwrap_or((false, false))
+                };
+                let recorder_active = inner.meeting_recorder.lock().is_some();
+                if !meeting_audio_level_delivery_allowed(
+                    meeting_matches,
+                    recording,
+                    recorder_active,
+                    meeting_companion_audio_level_reporting_enabled(),
+                ) {
+                    continue;
+                }
+                emit_meeting_audio_level(&inner, &meeting_id, level);
+            }
+        })
+    {
+        log::warn!("[meeting] audio level reporter spawn failed: {error}");
     }
 }
 
@@ -1626,6 +1731,18 @@ fn emit_meeting_state(inner: &Arc<Inner>, snapshot: &MeetingRecordingSnapshot) {
     }
 }
 
+fn emit_meeting_audio_level(inner: &Arc<Inner>, meeting_id: &str, level: f32) {
+    if let Some(app) = inner.app.lock().clone() {
+        let _ = app.emit(
+            "meeting:audio-level",
+            MeetingAudioLevelEvent {
+                meeting_id: meeting_id.to_string(),
+                level: normalize_meeting_audio_level(level),
+            },
+        );
+    }
+}
+
 fn emit_meeting_transcript_segment(
     inner: &Arc<Inner>,
     meeting_id: &str,
@@ -1706,6 +1823,51 @@ mod tests {
     use super::*;
     use crate::types::TranscriptSegmentSource;
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn meeting_companion_audio_level_is_throttled_to_ten_hz() {
+        let mut throttle = MeetingAudioLevelThrottle::default();
+        let samples = [0, 25, 99, 100, 150, 199, 200, 299, 300];
+        let emitted = samples
+            .into_iter()
+            .filter(|millis| throttle.should_emit(Duration::from_millis(*millis)))
+            .collect::<Vec<_>>();
+
+        assert_eq!(emitted, vec![0, 100, 200, 300]);
+    }
+
+    #[test]
+    fn meeting_companion_audio_level_requires_active_visible_recording() {
+        assert!(meeting_audio_level_delivery_allowed(true, true, true, true));
+        assert!(!meeting_audio_level_delivery_allowed(
+            true, false, true, true
+        ));
+        assert!(!meeting_audio_level_delivery_allowed(
+            true, true, false, true
+        ));
+        assert!(!meeting_audio_level_delivery_allowed(
+            true, true, true, false
+        ));
+        assert!(!meeting_audio_level_delivery_allowed(
+            false, true, true, true
+        ));
+    }
+
+    #[test]
+    fn meeting_companion_audio_level_is_clamped() {
+        assert_eq!(normalize_meeting_audio_level(-0.5), 0.0);
+        assert_eq!(normalize_meeting_audio_level(0.4), 0.4);
+        assert_eq!(normalize_meeting_audio_level(1.5), 1.0);
+        assert_eq!(normalize_meeting_audio_level(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn meeting_companion_audio_level_callback_never_blocks_on_full_queue() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        assert!(try_queue_meeting_audio_level(&sender, 0.25));
+        assert!(!try_queue_meeting_audio_level(&sender, 0.75));
+        assert_eq!(receiver.recv().expect("queued level"), 0.25);
+    }
 
     #[test]
     fn meeting_session_starts_from_idle() {
@@ -1819,6 +1981,25 @@ mod tests {
             session.record().status,
             crate::types::MeetingStatus::TranscribingInterrupted
         );
+    }
+
+    #[test]
+    fn meeting_session_pause_keeps_control_phase_when_asr_is_interrupted() {
+        let started = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 0).unwrap();
+        let interrupted = Utc.with_ymd_and_hms(2026, 7, 4, 9, 31, 0).unwrap();
+        let paused = Utc.with_ymd_and_hms(2026, 7, 4, 9, 32, 0).unwrap();
+        let mut session = MeetingSession::new(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            started,
+            "whisper".to_string(),
+        );
+
+        session.mark_asr_interrupted(interrupted);
+        session.pause(paused).unwrap();
+        let snapshot = session.snapshot(paused);
+
+        assert_eq!(snapshot.phase, MeetingRecordingPhase::Paused);
+        assert!(snapshot.asr_interrupted);
     }
 
     #[test]
@@ -2064,7 +2245,10 @@ mod tests {
             meeting_model_override_for_provider(&settings, "bailian").as_deref(),
             Some("fun-asr-realtime")
         );
-        assert_eq!(meeting_model_override_for_provider(&settings, "whisper"), None);
+        assert_eq!(
+            meeting_model_override_for_provider(&settings, "whisper"),
+            None
+        );
     }
 
     #[test]
@@ -2078,7 +2262,10 @@ mod tests {
             Some("fun-asr-realtime".to_string()),
         );
 
-        assert_eq!(session.model_override().as_deref(), Some("fun-asr-realtime"));
+        assert_eq!(
+            session.model_override().as_deref(),
+            Some("fun-asr-realtime")
+        );
     }
 
     #[test]

@@ -748,6 +748,13 @@ pub struct MeetingRecordingSnapshot {
     pub asr_interrupted: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingAudioLevelEvent {
+    pub meeting_id: String,
+    pub level: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingTranscriptSegmentEvent {

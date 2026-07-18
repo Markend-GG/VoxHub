@@ -38,6 +38,7 @@ export type MeetingCompanionAction =
   | { type: 'stop-accepted'; meetingId: string }
   | { type: 'summary-succeeded'; meetingId: string }
   | { type: 'summary-failed'; meetingId: string; message?: string | null }
+  | { type: 'transcribing-interrupted'; meetingId: string; message?: string | null }
   | { type: 'command-failed'; meetingId: string; message: string }
   | { type: 'clear-error'; meetingId: string }
   | { type: 'hide'; meetingId: string }
@@ -142,18 +143,23 @@ export function meetingCompanionReducer(
     return withDerivedVisualState(next);
   }
 
-  if (!matchesMeeting(state, action.meetingId)) return state;
+  const canEstablishTerminalMeeting = state.meetingId === null
+    && (action.type === 'stop-accepted'
+      || action.type === 'summary-succeeded'
+      || action.type === 'summary-failed');
+  if (!matchesMeeting(state, action.meetingId) && !canEstablishTerminalMeeting) return state;
+  const current = canEstablishTerminalMeeting ? { ...state, meetingId: action.meetingId } : state;
 
   switch (action.type) {
     case 'idle-finished':
-      return withDerivedVisualState({ ...state, idlePending: false });
+      return withDerivedVisualState({ ...current, idlePending: false });
     case 'quiet-changed':
-      return withDerivedVisualState({ ...state, quiet: action.quiet });
+      return withDerivedVisualState({ ...current, quiet: action.quiet });
     case 'stop-accepted':
-      return withDerivedVisualState({ ...state, stopAccepted: true, summaryOutcome: null });
+      return withDerivedVisualState({ ...current, stopAccepted: true, summaryOutcome: null });
     case 'summary-succeeded':
       return withDerivedVisualState({
-        ...state,
+        ...current,
         stopAccepted: false,
         summaryOutcome: 'completed',
         hiddenByUser: false,
@@ -161,23 +167,28 @@ export function meetingCompanionReducer(
       });
     case 'summary-failed':
       return withDerivedVisualState({
-        ...state,
+        ...current,
         stopAccepted: false,
         summaryOutcome: 'failed',
         hiddenByUser: false,
         error: { kind: 'summary_failed', message: action.message ?? null },
       });
+    case 'transcribing-interrupted':
+      return withDerivedVisualState({
+        ...current,
+        error: { kind: 'transcribing_interrupted', message: action.message ?? null },
+      });
     case 'command-failed':
       return withDerivedVisualState({
-        ...state,
+        ...current,
         stopAccepted: false,
         error: { kind: 'command_failed', message: action.message },
       });
     case 'clear-error':
-      return { ...state, error: null };
+      return { ...current, error: null };
     case 'hide':
-      return withDerivedVisualState({ ...state, hiddenByUser: true });
+      return withDerivedVisualState({ ...current, hiddenByUser: true });
     case 'show':
-      return withDerivedVisualState({ ...state, hiddenByUser: false });
+      return withDerivedVisualState({ ...current, hiddenByUser: false });
   }
 }

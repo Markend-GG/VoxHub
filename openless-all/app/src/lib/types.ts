@@ -413,6 +413,11 @@ export interface MeetingRecordingSnapshot {
   asrInterrupted: boolean;
 }
 
+export interface MeetingAudioLevelEvent {
+  meetingId: string;
+  level: number;
+}
+
 export interface MeetingCompanionPosition {
   x: number;
   y: number;

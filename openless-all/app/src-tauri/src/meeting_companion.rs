@@ -1,5 +1,6 @@
 //! Meeting companion window lifecycle and monitor-aware position persistence.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -17,9 +18,11 @@ const WINDOW_WIDTH: f64 = 350.0;
 const WINDOW_HEIGHT: f64 = 280.0;
 const EDGE_MARGIN: f64 = 16.0;
 const DRAG_SETTLE_DELAY: Duration = Duration::from_millis(350);
+const COMPLETED_DISMISS_FALLBACK_DELAY: Duration = Duration::from_secs(9);
 
 static LIFECYCLE: OnceLock<Mutex<LifecycleState>> = OnceLock::new();
 static WINDOW_CREATION: OnceLock<Mutex<()>> = OnceLock::new();
+static AUDIO_LEVEL_REPORTING_ENABLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Default)]
 struct LifecycleState {
@@ -56,7 +59,7 @@ impl LifecycleState {
         self.drag_epoch = self.drag_epoch.wrapping_add(1);
     }
 
-    fn meeting_ended(&mut self, meeting_id: &str) -> bool {
+    fn completion_finished(&mut self, meeting_id: &str) -> bool {
         if self.active_meeting_id.as_deref() != Some(meeting_id) {
             return false;
         }
@@ -65,6 +68,13 @@ impl LifecycleState {
         self.drag_active = false;
         self.drag_epoch = self.drag_epoch.wrapping_add(1);
         true
+    }
+
+    fn hidden_failure_finished(&mut self, meeting_id: &str) -> bool {
+        if self.manually_hidden_meeting_id.as_deref() != Some(meeting_id) {
+            return false;
+        }
+        self.completion_finished(meeting_id)
     }
 
     fn claim_window_creation(&mut self, window_exists: bool) -> bool {
@@ -159,8 +169,26 @@ pub(crate) fn meeting_started(app: &AppHandle, meeting_id: &str, enabled: bool) 
     }
 }
 
-pub(crate) fn meeting_ended(app: &AppHandle, meeting_id: &str) {
-    if lifecycle().lock().meeting_ended(meeting_id) {
+pub(crate) fn audio_level_reporting_enabled() -> bool {
+    AUDIO_LEVEL_REPORTING_ENABLED.load(Ordering::Relaxed)
+}
+
+pub(crate) fn schedule_completed_fallback_dismissal(app: &AppHandle, meeting_id: &str) {
+    if lifecycle().lock().active_meeting_id.as_deref() != Some(meeting_id) {
+        return;
+    }
+    let app = app.clone();
+    let meeting_id = meeting_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(COMPLETED_DISMISS_FALLBACK_DELAY).await;
+        if lifecycle().lock().completion_finished(&meeting_id) {
+            destroy_window(&app);
+        }
+    });
+}
+
+pub(crate) fn dismiss_failed_hidden_meeting(app: &AppHandle, meeting_id: &str) {
+    if lifecycle().lock().hidden_failure_finished(meeting_id) {
         destroy_window(app);
     }
 }
@@ -219,15 +247,33 @@ pub fn save_meeting_companion_position(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn dismiss_completed_meeting_companion(
+    app: AppHandle,
+    meeting_id: String,
+) -> Result<bool, String> {
+    if meeting_id.trim().is_empty() {
+        return Err("meeting id is required".to_string());
+    }
+    let should_destroy = lifecycle().lock().completion_finished(&meeting_id);
+    if should_destroy {
+        destroy_window(&app);
+    }
+    Ok(should_destroy)
+}
+
 fn show_window(app: &AppHandle) -> Result<(), String> {
     let window = ensure_window(app)?;
     if let Err(error) = restore_window_position(app, &window) {
         log::warn!("[meeting-companion] position restore failed: {error}");
     }
-    window.show().map_err(|error| error.to_string())
+    window.show().map_err(|error| error.to_string())?;
+    AUDIO_LEVEL_REPORTING_ENABLED.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 fn hide_window(app: &AppHandle) -> Result<(), String> {
+    AUDIO_LEVEL_REPORTING_ENABLED.store(false, Ordering::Relaxed);
     lifecycle().lock().manual_hide();
     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
         window.hide().map_err(|error| error.to_string())?;
@@ -236,6 +282,7 @@ fn hide_window(app: &AppHandle) -> Result<(), String> {
 }
 
 fn destroy_window(app: &AppHandle) {
+    AUDIO_LEVEL_REPORTING_ENABLED.store(false, Ordering::Relaxed);
     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
         if let Err(error) = window.destroy() {
             log::warn!("[meeting-companion] destroy failed: {error}");
@@ -784,5 +831,26 @@ mod tests {
         state.manual_hide();
         assert!(!state.meeting_started("meeting-a", true));
         assert!(state.meeting_started("meeting-b", true));
+    }
+
+    #[test]
+    fn completed_dismissal_only_clears_the_matching_meeting() {
+        let mut state = LifecycleState::default();
+        assert!(state.meeting_started("meeting-a", true));
+        assert!(!state.completion_finished("meeting-old"));
+        assert_eq!(state.active_meeting_id.as_deref(), Some("meeting-a"));
+        assert!(state.completion_finished("meeting-a"));
+        assert_eq!(state.active_meeting_id, None);
+    }
+
+    #[test]
+    fn failed_summary_only_dismisses_a_manually_hidden_meeting() {
+        let mut state = LifecycleState::default();
+        assert!(state.meeting_started("meeting-a", true));
+        assert!(!state.hidden_failure_finished("meeting-a"));
+        state.manual_hide();
+        assert!(!state.hidden_failure_finished("meeting-old"));
+        assert!(state.hidden_failure_finished("meeting-a"));
+        assert_eq!(state.active_meeting_id, None);
     }
 }
