@@ -5,6 +5,9 @@
 关联文档：
 
 - `docs/meeting-recording-v1-spec.md`
+- `docs/meeting-companion-v1-spec.md`
+- `docs/meeting-companion-v1-acceptance-checklist.md`
+- `docs/meeting-companion-v1-implementation-plan.md`
 
 ## 背景
 
@@ -60,6 +63,8 @@
 
 ### 7. 悬浮入口与独立实时展示
 
+2026-07-18 更新：其中“会议期间的可见状态与暂停 / 继续 / 停止控制”已拆为独立的会议桌宠 V1，范围以 `docs/meeting-companion-v1-spec.md` 为准。桌宠 V1 不包含从悬浮窗新建会议和实时原文展示，以下未被新 spec 覆盖的能力仍属于 future。
+
 - 后续计划支持在悬浮球内直接发起会议记录，不要求用户先进入主界面的“会议”页。
 - 发起会议记录后，可单独弹窗或悬浮展示实时会议记录内容。
 - 弹窗/悬浮展示需要覆盖录音状态、暂停/继续、停止、实时原文和错误状态。
@@ -91,7 +96,8 @@
 - V2-1：会议专用 ASR 配置、`fun-asr-realtime` realtime ASR（实时语音转文字）、draft + final（临时识别 + 最终片段）、timestamp metadata（时间戳元数据）。
 - V2-2：local VAD（本地语音活动检测）作为 speaker diarization（说话人分离）前置能力，停止会议后做本地 speaker diarization 与 transcript alignment（原文对齐）。
 - V2-3：上传音频生成会议记录，复用会议 ASR 配置、会议记录结构、音频保留和删除策略。
-- V3 / future：realtime speaker labels（实时说话人标签）、subtitle-grade streaming（字幕级低延迟流式刷新）、system audio capture（系统声音采集）、悬浮入口与独立实时展示、长会议总结质量增强、Word/PDF 导出、第三方任务系统集成和高级文本后处理。
+- 已进入独立 V1 spec：会议桌宠的可见录音状态、暂停 / 继续 / 停止控制、拖动和安全隐藏。
+- V3 / future：realtime speaker labels（实时说话人标签）、subtitle-grade streaming（字幕级低延迟流式刷新）、system audio capture（系统声音采集）、从悬浮入口新建会议、独立实时原文展示、长会议总结质量增强、Word/PDF 导出、第三方任务系统集成和高级文本后处理。
 
 ## 当前结论
 
@@ -112,6 +118,7 @@ V1 优先保证：
 - [ ] 为说话人分离写技术预研，比较在线、本地和混合方案。
 - [ ] 为实时标点和字幕级流式体验写 UI/数据流设计。
 - [ ] 为系统声音采集写平台能力调研，分别覆盖 Windows 和 macOS。
-- [ ] 为悬浮球发起会议记录、独立弹窗和悬浮实时展示写交互设计。
+- [x] 为会议期间的桌宠状态、暂停 / 继续 / 停止控制、拖动和安全隐藏写独立 V1 spec。
+- [ ] 为从悬浮入口新建会议和悬浮实时原文展示写后续交互设计。
 - [ ] 为 Word/PDF 导出写后续导出格式设计。
 - [ ] 为上传音频生成会议记录写单独 spec，覆盖格式限制、转写流程、音频保留和删除策略。
