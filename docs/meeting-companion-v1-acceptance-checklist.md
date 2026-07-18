@@ -41,10 +41,10 @@
 | MC-V1-015 | 隐藏、桌宠窗口关闭和桌宠失败均不停止录音；主页面可重新显示。 | Spec 9-10、15.5、15.13-14 | done | close request 转 `hide`；当前会议记录手动隐藏抑制；主会议页提供精确 show IPC；窗口失败只记录 warning，不回滚会议命令 | Windows Tauri 实测 Alt+F4 后录音继续、等待后不被会议事件重弹、主页面可恢复、重复恢复仍唯一；停止后销毁且下一场重新自动显示 | 主窗口退出仍复用现有 close guard。 |
 | MC-V1-016 | 停止后正确显示 `processing`；成功后播放 `completed` 并在 3 秒后隐藏。 | Spec 4、6、15.6 | missing | - | summary success 人工验证 | completed 不循环。 |
 | MC-V1-017 | 总结失败不播放 `completed`，显示错误徽标和打开会议页入口。 | Spec 4、11、15.7 | missing | - | summary failure 人工验证 | 不在桌宠内重试总结。 |
-| MC-V1-018 | 粉色计时器显示后端权威已录时长，暂停冻结，停止后保留最终时长。 | Spec 8、15.10 | missing | - | fake clock（伪时钟）测试；人工对时 | 不以桌宠本地计时为权威值。 |
-| MC-V1-019 | WebM 加载前显示 poster；视频失败回退 poster；poster 失败回退最小状态 UI。 | Spec 7.2、11 | missing | - | 媒体失败测试；手动改名素材冒烟 | - |
-| MC-V1-020 | 同时只解码一个视频；桌宠隐藏后停止解码、timer 和音量刷新。 | Spec 7.2、12、15.12 | missing | - | DOM / 媒体状态检查；任务管理器对比 | - |
-| MC-V1-021 | reduced motion 显示 poster；图标按钮有 tooltip、键盘焦点和可访问名称。 | Spec 5.4、7.2、13 | missing | - | 无障碍检查；键盘人工验证 | - |
+| MC-V1-018 | 粉色计时器显示后端权威已录时长，暂停冻结，停止后保留最终时长。 | Spec 8、15.10 | done | `MeetingCompanion` 接收显式 `timerInput`；`MeetingCompanionElapsedClock` 以 `elapsedMs` 对齐基线，仅用 `performance.now()` 插值显示 | fake clock 覆盖运行、暂停、停止、新 snapshot 重对齐和 meeting id 切换；格式覆盖 `00:00`、`59:59`、`01:00:00`和 `02:04:05`；Playwright 放大截图确认文字位于粉色计时器屏幕内 | Phase 3 不订阅会议事件；后续由 Phase 4 将后端 snapshot 传入该显式接口。 |
+| MC-V1-019 | WebM 加载前显示 poster；视频失败回退 poster；poster 失败回退最小状态 UI。 | Spec 7.2、11 | done | runtime manifest 驱动当前状态媒体；单媒体控制器实现 2 秒超时、error、play reject、运行中错误和过期结果隔离 | `npm run check:meeting-companion-runtime`；Playwright 阻断 WebM 时保留 1 张 poster，同时阻断 WebM/poster 时显示含 `00:00` 的最小 UI | 媒体失败仅更改桌宠展示状态，不调用会议 IPC。 |
+| MC-V1-020 | 同时只解码一个视频；桌宠隐藏后停止解码、timer 和音量刷新。 | Spec 7.2、12、15.12 | done | DOM 只挂载当前状态 video；切换/隐藏/卸载统一执行 pause、`currentTime = 0`、移除 `src` 和 `load()`，并清理 timeout/interval/listener | 定向测试覆盖快速切换、单活动视频和卸载释放；Playwright 正常路径始终 1 个 video，页面不可见后降为 0 个且 poster 恢复 | Phase 4 尚未引入音量事件，因此当前无额外音量刷新需停止。 |
+| MC-V1-021 | reduced motion 显示 poster；图标按钮有 tooltip、键盘焦点和可访问名称。 | Spec 5.4、7.2、13 | partial | `prefers-reduced-motion: reduce` 和页面不可见均不创建活跃 video，只保留 poster | 定向逻辑测试；Playwright reduced motion 路径为 0 个 video、1 张 poster | 图标按钮、tooltip、键盘焦点和可访问名称属于 Phase 5，本阶段不得标记 done。 |
 | MC-V1-022 | 中文、英文、日文、韩文、繁体中文文案键完整。 | 项目 UI 回归要求 | missing | - | i18n（国际化）key 扫描；build | 用户可见文案不硬编码。 |
 | MC-V1-023 | TypeScript、Rust、状态机、RMS 滞回、位置恢复和素材校验测试通过。 | Spec 15.15 | missing | - | 按计划中的自动命令 | - |
 | MC-V1-024 | Windows 真实桌面全流程、多屏、DPI、透明边缘和隐藏不停录音验收通过。 | Spec 16 | missing | - | Tauri dev 人工冒烟 | V1 最终门槛。 |
