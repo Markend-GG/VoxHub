@@ -88,6 +88,22 @@ export function getActiveMeetingRecording(): Promise<MeetingRecordingSnapshot | 
     return invokeOrMock("get_active_meeting_recording", undefined, () => null)
 }
 
+export function showMeetingCompanion(): Promise<void> {
+    return invokeOrMock("show_meeting_companion", undefined, () => undefined)
+}
+
+export function hideMeetingCompanion(): Promise<void> {
+    return invokeOrMock("hide_meeting_companion", undefined, () => undefined)
+}
+
+export function startMeetingCompanionDrag(): Promise<boolean> {
+    return invokeOrMock("start_meeting_companion_drag", undefined, () => true)
+}
+
+export function saveMeetingCompanionPosition(): Promise<void> {
+    return invokeOrMock("save_meeting_companion_position", undefined, () => undefined)
+}
+
 export function generateMeetingSummary(id: string): Promise<MeetingRecord> {
     return invokeOrMock("generate_meeting_summary", { id }, () => ({
         ...mockMeetings[0],

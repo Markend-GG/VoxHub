@@ -284,6 +284,9 @@ pub fn set_settings(
     // 没有 HotkeySettingsContext，必须靠事件感知录音键变化，否则面板可见时
     // 用户改键会让浮窗里的 "{recordHotkey}" 文案一直停留在旧值。
     persist_settings(&*coord, prefs.clone())?;
+    if remote_prev.meeting_companion_enabled && !prefs.meeting_companion_enabled {
+        crate::meeting_companion::setting_disabled(&app);
+    }
     #[cfg(target_os = "android")]
     coord.apply_android_overlay_settings_change(&remote_prev, &prefs);
     // refresh_tray_microphone_menu 内部会调用 NSStatusItem.set_menu，必须在主线程上跑。

@@ -94,8 +94,16 @@ pub fn delete_meeting_record(id: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn start_meeting_recording(
     coord: CoordinatorState<'_>,
+    app: AppHandle,
 ) -> Result<MeetingRecordingSnapshot, String> {
-    coord.start_meeting_recording().await
+    let snapshot = coord.start_meeting_recording().await?;
+    #[cfg(not(mobile))]
+    crate::meeting_companion::meeting_started(
+        &app,
+        &snapshot.meeting.id,
+        coord.prefs().get().meeting_companion_enabled,
+    );
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -120,9 +128,14 @@ pub async fn resume_meeting_recording(
 pub async fn stop_meeting_recording(
     id: String,
     coord: CoordinatorState<'_>,
+    app: AppHandle,
 ) -> Result<MeetingRecord, String> {
     validate_meeting_id(&id)?;
-    coord.stop_meeting_recording(id).await
+    let stopped_id = id.clone();
+    let record = coord.stop_meeting_recording(id).await?;
+    #[cfg(not(mobile))]
+    crate::meeting_companion::meeting_ended(&app, &stopped_id);
+    Ok(record)
 }
 
 #[tauri::command]

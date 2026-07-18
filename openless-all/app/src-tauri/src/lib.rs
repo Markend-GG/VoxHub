@@ -47,6 +47,8 @@ mod insertion;
 #[cfg(target_os = "linux")]
 mod linux_fcitx;
 mod llm_gemini;
+#[cfg(not(mobile))]
+mod meeting_companion;
 #[cfg(mobile)]
 mod mobile_runtime;
 mod net;
@@ -210,6 +212,10 @@ macro_rules! app_invoke_handler_desktop {
             commands::resume_meeting_recording,
             commands::stop_meeting_recording,
             commands::get_active_meeting_recording,
+            meeting_companion::show_meeting_companion,
+            meeting_companion::hide_meeting_companion,
+            meeting_companion::start_meeting_companion_drag,
+            meeting_companion::save_meeting_companion_position,
             commands::generate_meeting_summary,
             commands::retry_meeting_summary,
             commands::export_meeting_markdown,

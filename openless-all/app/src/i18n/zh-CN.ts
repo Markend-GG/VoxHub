@@ -479,6 +479,7 @@ export const zhCN = {
       retranscribedAsr: '重新转写',
     },
     actions: {
+      showCompanion: '显示会议助手',
       start: '开始会议',
       starting: '启动中…',
       pause: '暂停',

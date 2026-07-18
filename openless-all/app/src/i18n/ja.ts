@@ -483,6 +483,7 @@ export const ja: typeof zhCN = {
       retranscribedAsr: '再文字起こし',
     },
     actions: {
+      showCompanion: '会議アシスタントを表示',
       start: '会議を開始',
       starting: '開始中…',
       pause: '一時停止',

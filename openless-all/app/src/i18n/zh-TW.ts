@@ -481,6 +481,7 @@ export const zhTW: typeof zhCN = {
       retranscribedAsr: '重新轉寫',
     },
     actions: {
+      showCompanion: '顯示會議助手',
       start: '開始會議',
       starting: '啟動中…',
       pause: '暫停',

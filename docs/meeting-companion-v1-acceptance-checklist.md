@@ -25,11 +25,11 @@
 | ID | Requirement（需求） | Source（来源） | Status（状态） | Evidence（证据） | Verification（验证） | Notes（备注） |
 | --- | --- | --- | --- | --- | --- | --- |
 | MC-V1-001 | 新增可持久化的“会议桌宠”开关，默认关闭。 | Spec 4、5.2、15.1 | done | `UserPreferences` 新增启用、位置锁定和位置字段；`MeetingCompanionSection` 复用现有设置持久化 | Rust 默认值、空配置迁移和序列化往返测试通过；`npm run build` 通过 | 默认关闭；真实窗口重启体验留待 Windows 最终冒烟。 |
-| MC-V1-002 | 会议开始后懒创建并显示唯一 `meeting-companion` 透明窗口。 | Spec 5.1、15.1-2 | missing | - | Rust 窗口测试；Windows Tauri 冒烟 | 不复用 `capsule`。 |
+| MC-V1-002 | 会议开始后懒创建并显示唯一 `meeting-companion` 透明窗口。 | Spec 5.1、15.1-2 | done | `meeting_companion.rs` 使用独立 label、创建锁和 `?window=meeting-companion` 懒创建；会议开始/停止分别显示和销毁 | 8 线程并发创建 claim 测试通过；Windows Tauri 实测关闭设置不建窗、开启后只建 1 个窗口、重复显示仍唯一、下一场会议重新创建 | 不复用 `capsule`；停止后无额外桌宠 WebView。 |
 | MC-V1-003 | 桌宠使用 `?window=meeting-companion` 最小前端路由，不加载完整主窗口 UI。 | Spec 5.1 | done | `main.tsx` / `App.tsx` 路由懒加载 `MeetingCompanion`；生产构建生成独立约 0.75 kB chunk | `npm run build`；Playwright 实测 1 个桌宠根节点、1 张 poster、0 个设置主界面节点，舞台 `350 x 280` | Phase 1 仅显示 `idle` poster，不创建 Tauri 窗口。 |
-| MC-V1-004 | 桌宠窗口无边框、透明、置顶、跳过任务栏、不可自由缩放。 | Spec 5.1、15.2 | missing | - | Windows 人工检查 | 角色舞台 `350 x 280`。 |
-| MC-V1-005 | 支持左键拖动、16px 边缘吸附、位置记忆和位置锁定。 | Spec 5.2-5.3、15.8 | missing | - | 位置纯函数测试；多屏人工验证 | 锁定不影响按钮和右键菜单。 |
-| MC-V1-006 | 位置恢复覆盖负坐标、DPI 变化、显示器移除和分辨率变化。 | Spec 5.3、15.9 | missing | - | Rust 位置测试；125% / 150% DPI 冒烟 | - |
+| MC-V1-004 | 桌宠窗口无边框、透明、置顶、跳过任务栏、不可自由缩放。 | Spec 5.1、15.2 | partial | 独立 builder 固定 `decorations(false)`、`transparent(true)`、`always_on_top(true)`、`skip_taskbar(true)`、`resizable(false)` 和 `350 x 280` | Windows Tauri 捕获实测无边框透明 poster 窗口为 `350 x 280` | 始终置顶、任务栏隐藏和禁止缩放尚未逐项人工操作确认。 |
+| MC-V1-005 | 支持左键拖动、16px 边缘吸附、位置记忆和位置锁定。 | Spec 5.2-5.3、15.8 | partial | poster 根节点左键调用精确 drag IPC；后端锁定校验、拖动结束持久化、16px 吸附和 `prefs:changed` 同步已实现 | 单屏边缘吸附、位置锁定和持久化 Rust 测试通过；首次位置实测持久化为工作区右下 16px | Windows 自动化拖动过快，未可靠触发异步原生拖动；真实手动拖动、吸附和锁定仍待用户复测。 |
+| MC-V1-006 | 位置恢复覆盖负坐标、DPI 变化、显示器移除和分辨率变化。 | Spec 5.3、15.9 | partial | 保存物理坐标与显示器标识；恢复按当前 work area、scale factor 重新计算并 clamp，显示器缺失回退鼠标/主显示器 | Rust 测试覆盖副屏负坐标、越界 clamp、125%/150% DPI、分辨率变化和显示器移除；单屏 100% Tauri 实测位置恢复为 `(1554,736)` | 当前机器只有单屏 100% DPI，多屏和 125%/150% DPI 尚无真机证据。 |
 | MC-V1-007 | 精确导入六个 WebM、六张 poster 和精简 runtime manifest，不导入生成中间件。 | Spec 7、15.11 | done | `openless-all/app/src/assets/meeting-companion/` 仅含 12 个媒体文件和 `manifest.json`；12 个媒体文件与外部交接源 SHA-256 逐一一致 | `npm run check:meeting-companion-assets` 检查精确文件集；`Get-FileHash` 对比结果 12/12 一致 | 未导入 raw frames、GIF、atlas、生成目录或 QA 文件。 |
 | MC-V1-008 | 素材校验覆盖 VP9、Alpha、`350 x 280`、无音轨、循环方式和六个实际时长。 | Spec 7.2、15.11 | done | `scripts/check-meeting-companion-assets.mjs` 按 spec 固定值解码并校验六状态 | `npm run check:meeting-companion-assets`；实际时长 `2416/916/2000/2416/1166/2916ms`，误差均小于 1 帧（84ms） | `idle` / `completed` 不循环，其余四状态循环。 |
 | MC-V1-009 | 建立六状态桌宠 reducer，以后端 meeting snapshot 为权威状态。 | Spec 6、9、15.3-4 | done | `meetingCompanionState.ts` 覆盖 hidden、六视觉状态和错误叠加层 | `npm run check:meeting-companion-state`；覆盖新会议、过期 meeting id、后端 snapshot 覆盖本地状态及总结成功/失败 | quiet 只接收布尔视觉信号；RMS 滞回计算仍属 Phase 4。 |
@@ -38,7 +38,7 @@
 | MC-V1-012 | 悬停 / 单击控件可暂停、继续、停止，命令期间防重入并丢弃过期结果。 | Spec 5.4、15.4 | missing | - | 组件测试；双窗口人工操作 | 复用现有 meeting IPC。 |
 | MC-V1-013 | 停止操作有二次确认，暂停 / 继续不需确认。 | Spec 4、5.4、15.5 | missing | - | 组件测试；Windows 人工验证 | 键盘焦点必须可用。 |
 | MC-V1-014 | 右键菜单提供状态相关操作、隐藏和位置锁定。 | Spec 5.5、15.8 | missing | - | 菜单状态测试；Windows 人工验证 | 右键是辅助入口。 |
-| MC-V1-015 | 隐藏、桌宠窗口关闭和桌宠失败均不停止录音；主页面可重新显示。 | Spec 9-10、15.5、15.13-14 | missing | - | 集成测试；Windows 冒烟 | 主窗口退出仍复用现有 close guard。 |
+| MC-V1-015 | 隐藏、桌宠窗口关闭和桌宠失败均不停止录音；主页面可重新显示。 | Spec 9-10、15.5、15.13-14 | done | close request 转 `hide`；当前会议记录手动隐藏抑制；主会议页提供精确 show IPC；窗口失败只记录 warning，不回滚会议命令 | Windows Tauri 实测 Alt+F4 后录音继续、等待后不被会议事件重弹、主页面可恢复、重复恢复仍唯一；停止后销毁且下一场重新自动显示 | 主窗口退出仍复用现有 close guard。 |
 | MC-V1-016 | 停止后正确显示 `processing`；成功后播放 `completed` 并在 3 秒后隐藏。 | Spec 4、6、15.6 | missing | - | summary success 人工验证 | completed 不循环。 |
 | MC-V1-017 | 总结失败不播放 `completed`，显示错误徽标和打开会议页入口。 | Spec 4、11、15.7 | missing | - | summary failure 人工验证 | 不在桌宠内重试总结。 |
 | MC-V1-018 | 粉色计时器显示后端权威已录时长，暂停冻结，停止后保留最终时长。 | Spec 8、15.10 | missing | - | fake clock（伪时钟）测试；人工对时 | 不以桌宠本地计时为权威值。 |

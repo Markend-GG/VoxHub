@@ -26,9 +26,11 @@ import {
   prepareMeetingAudioPlayback,
   resumeMeetingRecording,
   retranscribeMeeting,
+  showMeetingCompanion,
   startMeetingRecording,
   stopMeetingRecording,
   updateMeetingRecord,
+  isDesktop,
 } from '../lib/ipc';
 import type {
   MeetingCloseRequestEvent,
@@ -47,6 +49,7 @@ import type {
 } from '../lib/types';
 import { normalizeMeetingCloseRequest } from '../lib/types';
 import { useMobileLayout } from '../lib/useMobileLayout';
+import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill, type PillTone } from './_atoms';
 
 type ActionLoading = 'start' | 'pause' | 'resume' | 'stop' | 'summary' | 'save' | 'delete' | 'export' | 'retranscribe' | null;
@@ -74,6 +77,7 @@ interface MeetingTodoDraft {
 
 export function Meetings() {
   const { t } = useTranslation();
+  const { prefs } = useHotkeySettings();
   const mobile = useMobileLayout();
   const [meetings, setMeetings] = useState<MeetingListItem[]>([]);
   const [meetingDetails, setMeetingDetails] = useState<Record<string, MeetingRecord>>({});
@@ -82,6 +86,7 @@ export function Meetings() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<ActionLoading>(null);
+  const [companionLoading, setCompanionLoading] = useState(false);
   const [activeControlMode, setActiveControlMode] = useState<{ meetingId: string; mode: ActiveControlMode } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -428,6 +433,19 @@ export function Meetings() {
     }
   };
 
+  const runShowCompanion = async () => {
+    setCompanionLoading(true);
+    setActionError(null);
+    try {
+      await showMeetingCompanion();
+    } catch (error) {
+      console.error('[meetings] show companion failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setCompanionLoading(false);
+    }
+  };
+
   const runSaveEdit = async (record: MeetingRecord) => {
     if (!editDraft || editDraft.id !== record.id || !canEditMeeting(record, selectedActiveSnapshot)) return;
     setActionLoading('save');
@@ -630,6 +648,11 @@ export function Meetings() {
         titleRight={activePill}
         right={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            {isDesktop() && activeSnapshot && prefs?.meetingCompanionEnabled && (
+              <Btn icon="sparkle" variant="ghost" size="sm" onClick={() => void runShowCompanion()} disabled={companionLoading}>
+                {t('meetings.actions.showCompanion')}
+              </Btn>
+            )}
             <Btn icon="refresh" variant="ghost" size="sm" onClick={() => void refresh()} disabled={loading}>
               {t('common.refresh')}
             </Btn>

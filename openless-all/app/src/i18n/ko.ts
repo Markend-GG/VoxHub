@@ -483,6 +483,7 @@ export const ko: typeof zhCN = {
       retranscribedAsr: '다시 전사',
     },
     actions: {
+      showCompanion: '회의 도우미 표시',
       start: '회의 시작',
       starting: '시작 중…',
       pause: '일시정지',

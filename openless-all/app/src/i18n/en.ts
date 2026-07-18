@@ -481,6 +481,7 @@ export const en: typeof zhCN = {
       retranscribedAsr: 'Retranscribed',
     },
     actions: {
+      showCompanion: 'Show meeting assistant',
       start: 'Start meeting',
       starting: 'Starting…',
       pause: 'Pause',
