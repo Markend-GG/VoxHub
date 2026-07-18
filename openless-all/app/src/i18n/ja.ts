@@ -767,6 +767,11 @@ export const ja: typeof zhCN = {
     kicker: 'SETTINGS',
     title: '設定',
     desc: '録音、プロバイダー、ショートカット、権限の設定。',
+    meetingCompanion: {
+      title: 'ミーティングコンパニオン',
+      enabledLabel: 'ミーティング中に表示',
+      positionLockedLabel: '表示位置を固定',
+    },
     dataStorage: {
       title: 'データ保存',
       desc: 'この端末に保存される会話履歴とコンテキスト。',

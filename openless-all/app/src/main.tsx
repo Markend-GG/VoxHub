@@ -15,6 +15,7 @@ const isCapsule = windowKind === "capsule";
 const isQa = windowKind === "qa";
 const isLessComputer = windowKind === "less-computer";
 const isLessComputerGlow = windowKind === "less-computer-glow";
+const isMeetingCompanion = windowKind === "meeting-companion";
 const osQuery = params.get("os") as OS | null;
 const os = osQuery ?? detectOS();
 document.documentElement.dataset.olPlatform = os;
@@ -30,6 +31,7 @@ const renderApp = () => {
         isQa={isQa}
         isLessComputer={isLessComputer}
         isLessComputerGlow={isLessComputerGlow}
+        isMeetingCompanion={isMeetingCompanion}
         forcedOs={os}
       />
     </React.StrictMode>,

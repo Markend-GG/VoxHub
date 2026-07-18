@@ -765,6 +765,11 @@ export const zhTW: typeof zhCN = {
     kicker: 'SETTINGS',
     title: '設置',
     desc: '錄音、提供商、快捷鍵與權限配置。',
+    meetingCompanion: {
+      title: '會議桌寵',
+      enabledLabel: '會議期間顯示桌寵',
+      positionLockedLabel: '鎖定桌寵位置',
+    },
     dataStorage: {
       title: '資料儲存',
       desc: '本機保留的歷史會話與對話上下文。',

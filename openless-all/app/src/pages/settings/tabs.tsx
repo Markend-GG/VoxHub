@@ -20,6 +20,7 @@ import { ClaudeConsoleSection } from './ClaudeConsoleSection';
 import { BetaChannelSection } from './BetaChannelSection';
 import { AutoUpdateSection } from './AutoUpdateSection';
 import { AboutSection } from './AboutSection';
+import { MeetingCompanionSection } from './MeetingCompanionSection';
 import { detectOS } from '../../components/WindowChrome';
 import { getPlatformCapabilities } from '../../lib/platform';
 import type { PlatformCapabilities } from '../../lib/types';
@@ -43,6 +44,7 @@ export function GeneralTab() {
   return (
     <>
       <RecordingInputSection />
+      {platformCaps?.platform === 'desktop' && <MeetingCompanionSection />}
       {showDesktopShortcuts && <ShortcutsSection />}
       <ThemeSection />
       <LanguageSection />

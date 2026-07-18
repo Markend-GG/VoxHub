@@ -1,22 +1,26 @@
 // SwitchLite — small toggle used in the Settings modal sub-sections.
 
-import { useState } from 'react';
-
 interface SwitchLiteProps {
-  on?: boolean;
+  on: boolean;
+  onToggle: (next: boolean) => void;
+  disabled?: boolean;
+  ariaLabel: string;
 }
 
-export function SwitchLite({ on: initial = false }: SwitchLiteProps) {
-  const [on, setOn] = useState(initial);
+export function SwitchLite({ on, onToggle, disabled = false, ariaLabel }: SwitchLiteProps) {
   return (
     <button
       type="button"
       className="ol-focus-ring"
-      onClick={() => setOn(!on)}
+      role="switch"
+      aria-checked={on}
+      aria-label={ariaLabel}
+      disabled={disabled}
+      onClick={() => onToggle(!on)}
       style={{
         position: 'relative', width: 32, height: 18, borderRadius: 999, border: 0,
         background: on ? 'var(--ol-blue)' : 'rgba(0,0,0,0.18)',
-        cursor: 'default',
+        cursor: 'default', opacity: disabled ? 0.55 : 1,
         outline: 'none',
       }}
     >

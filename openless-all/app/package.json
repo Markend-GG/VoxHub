@@ -20,7 +20,9 @@
     "check:hotkey-injection": "node scripts/check-hotkey-injection.mjs",
     "check:hotkey-side-modifiers": "npx tsx src/lib/hotkeySideModifiers.test.ts",
     "check:windows-startup-lifecycle": "node scripts/windows-startup-lifecycle-contract.test.mjs",
-    "check:android-updater-pubkey": "node scripts/check-android-updater-pubkey.mjs"
+    "check:android-updater-pubkey": "node scripts/check-android-updater-pubkey.mjs",
+    "check:meeting-companion-assets": "node scripts/check-meeting-companion-assets.mjs",
+    "check:meeting-companion-state": "npx tsx src/lib/meetingCompanionState.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

@@ -413,6 +413,12 @@ export interface MeetingRecordingSnapshot {
   asrInterrupted: boolean;
 }
 
+export interface MeetingCompanionPosition {
+  x: number;
+  y: number;
+  monitorId: string | null;
+}
+
 export interface MeetingTranscriptSegmentEvent {
   meetingId: string;
   segment: TranscriptSegment;
@@ -800,6 +806,12 @@ export interface UserPreferences {
   historyRetentionDays: number;
   /** Meeting raw audio retention count. 0 disables long-term audio retention; default 20; max 100. */
   meetingAudioRetentionCount: number;
+  /** 会议桌宠可选开关，默认关闭。 */
+  meetingCompanionEnabled: boolean;
+  /** 是否锁定桌宠位置，默认关闭。 */
+  meetingCompanionPositionLocked: boolean;
+  /** 最近一次合法窗口位置；null 表示尚未摆放。 */
+  meetingCompanionPosition: MeetingCompanionPosition | null;
   /** 对话感知 polish 上下文窗口（分钟）。0 = 关闭。默认 5。详见 PR-A。 */
   polishContextWindowMinutes: number;
   /** 启动时静默运行（不弹主窗口）。Windows 开机自启场景常用——只想要后台 + 托盘，

@@ -767,6 +767,11 @@ export const ko: typeof zhCN = {
     kicker: 'SETTINGS',
     title: '설정',
     desc: '녹음, 공급자, 단축키, 권한 설정.',
+    meetingCompanion: {
+      title: '회의 컴패니언',
+      enabledLabel: '회의 중 표시',
+      positionLockedLabel: '컴패니언 위치 잠금',
+    },
     dataStorage: {
       title: '데이터 저장',
       desc: '이 기기에 보관되는 대화 기록과 컨텍스트.',

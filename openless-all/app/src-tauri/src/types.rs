@@ -1492,6 +1492,14 @@ fn resolve_windows_sendinput_insertion_only_legacy(
     resolve_windows_insertion_mode(mode, legacy_sendinput_only) == WindowsInsertionMode::SendInput
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingCompanionPosition {
+    pub x: i32,
+    pub y: i32,
+    pub monitor_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UserPreferences {
@@ -1735,6 +1743,13 @@ pub struct UserPreferences {
     pub meeting_audio_retention_count: u32,
     #[serde(default)]
     pub meeting_asr: MeetingAsrSettings,
+    /// 会议桌宠为可选功能，默认关闭。
+    #[serde(default)]
+    pub meeting_companion_enabled: bool,
+    #[serde(default)]
+    pub meeting_companion_position_locked: bool,
+    #[serde(default)]
+    pub meeting_companion_position: Option<MeetingCompanionPosition>,
     /// 对话感知 polish 的上下文窗口（分钟）：把最近 N 分钟的转写 + 已润色文本
     /// 作为多轮上下文喂给 LLM，让代词 / 不完整句子能被正确解析。
     /// 0 = 关闭（每次润色独立单轮，跟历史行为一致）。默认 5 分钟。
@@ -2095,6 +2110,12 @@ struct UserPreferencesWire {
     meeting_audio_retention_count: u32,
     #[serde(default)]
     meeting_asr: MeetingAsrSettings,
+    #[serde(default)]
+    meeting_companion_enabled: bool,
+    #[serde(default)]
+    meeting_companion_position_locked: bool,
+    #[serde(default)]
+    meeting_companion_position: Option<MeetingCompanionPosition>,
     #[serde(default = "default_polish_context_window_minutes")]
     polish_context_window_minutes: u32,
     #[serde(default)]
@@ -2229,6 +2250,9 @@ impl Default for UserPreferencesWire {
             history_retention_days: prefs.history_retention_days,
             meeting_audio_retention_count: prefs.meeting_audio_retention_count,
             meeting_asr: prefs.meeting_asr,
+            meeting_companion_enabled: prefs.meeting_companion_enabled,
+            meeting_companion_position_locked: prefs.meeting_companion_position_locked,
+            meeting_companion_position: prefs.meeting_companion_position,
             polish_context_window_minutes: prefs.polish_context_window_minutes,
             start_minimized: prefs.start_minimized,
             theme_mode: prefs.theme_mode,
@@ -2396,6 +2420,9 @@ impl<'de> Deserialize<'de> for UserPreferences {
                 wire.meeting_audio_retention_count,
             ),
             meeting_asr: wire.meeting_asr,
+            meeting_companion_enabled: wire.meeting_companion_enabled,
+            meeting_companion_position_locked: wire.meeting_companion_position_locked,
+            meeting_companion_position: wire.meeting_companion_position,
             polish_context_window_minutes: wire.polish_context_window_minutes,
             start_minimized: wire.start_minimized,
             theme_mode: wire.theme_mode,
@@ -3226,6 +3253,9 @@ impl Default for UserPreferences {
             history_retention_days: default_history_retention_days(),
             meeting_audio_retention_count: default_meeting_audio_retention_count(),
             meeting_asr: MeetingAsrSettings::default(),
+            meeting_companion_enabled: false,
+            meeting_companion_position_locked: false,
+            meeting_companion_position: None,
             polish_context_window_minutes: default_polish_context_window_minutes(),
             start_minimized: false,
             theme_mode: ThemeMode::default(),
@@ -4142,6 +4172,46 @@ mod tests {
         let too_large: UserPreferences =
             serde_json::from_str(r#"{"meetingAudioRetentionCount":150}"#).unwrap();
         assert_eq!(too_large.meeting_audio_retention_count, 100);
+    }
+
+    #[test]
+    fn meeting_companion_preferences_default_to_disabled() {
+        let defaults = UserPreferences::default();
+        assert!(!defaults.meeting_companion_enabled);
+        assert!(!defaults.meeting_companion_position_locked);
+        assert_eq!(defaults.meeting_companion_position, None);
+
+        let migrated: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert!(!migrated.meeting_companion_enabled);
+        assert!(!migrated.meeting_companion_position_locked);
+        assert_eq!(migrated.meeting_companion_position, None);
+    }
+
+    #[test]
+    fn meeting_companion_preferences_round_trip() {
+        let prefs = UserPreferences {
+            meeting_companion_enabled: true,
+            meeting_companion_position_locked: true,
+            meeting_companion_position: Some(MeetingCompanionPosition {
+                x: -420,
+                y: 160,
+                monitor_id: Some("monitor-secondary".into()),
+            }),
+            ..UserPreferences::default()
+        };
+
+        let json = serde_json::to_string(&prefs).unwrap();
+        let restored: UserPreferences = serde_json::from_str(&json).unwrap();
+
+        assert!(restored.meeting_companion_enabled);
+        assert!(restored.meeting_companion_position_locked);
+        assert_eq!(
+            restored.meeting_companion_position,
+            prefs.meeting_companion_position
+        );
+        assert!(json.contains(r#""meetingCompanionEnabled":true"#));
+        assert!(json.contains(r#""meetingCompanionPositionLocked":true"#));
+        assert!(json.contains(r#""monitorId":"monitor-secondary""#));
     }
 
     #[test]

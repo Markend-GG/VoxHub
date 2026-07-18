@@ -763,6 +763,11 @@ export const zhCN = {
     kicker: 'SETTINGS',
     title: '设置',
     desc: '录音、提供商、快捷键与权限配置。',
+    meetingCompanion: {
+      title: '会议桌宠',
+      enabledLabel: '会议期间显示桌宠',
+      positionLockedLabel: '锁定桌宠位置',
+    },
     dataStorage: {
       title: '数据存储',
       desc: '本机保留的历史会话与对话上下文。',

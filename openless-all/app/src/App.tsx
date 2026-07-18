@@ -33,6 +33,9 @@ const Onboarding = lazy(() =>
   import('./components/Onboarding').then(m => ({ default: m.Onboarding })),
 );
 const QaPanel = lazy(() => import('./pages/QaPanel').then(m => ({ default: m.QaPanel })));
+const MeetingCompanion = lazy(() =>
+  import('./components/MeetingCompanion').then(m => ({ default: m.MeetingCompanion })),
+);
 // Less Computer 仅 macOS 开放（后端只在 macOS 注册热键/创建窗口）。Tauri 构建时
 // TAURI_ENV_PLATFORM 是编译期字面量：非 macOS 平台下面两个三元的 import() 分支
 // 被常量折叠 + DCE 整个裁掉，面板 chunk 不进打包产物（门控 = 不打包）。
@@ -51,13 +54,28 @@ interface AppProps {
   isQa: boolean;
   isLessComputer: boolean;
   isLessComputerGlow: boolean;
+  isMeetingCompanion: boolean;
   forcedOs?: OS | null;
 }
 
 type Gate = 'onboarding' | 'ready';
 const ANDROID_SETUP_WIZARD_COMPLETE_KEY = 'openless.androidSetupWizardComplete';
 
-export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, forcedOs }: AppProps) {
+export function App({
+  isCapsule,
+  isQa,
+  isLessComputer,
+  isLessComputerGlow,
+  isMeetingCompanion,
+  forcedOs,
+}: AppProps) {
+  if (isMeetingCompanion) {
+    return (
+      <Suspense fallback={null}>
+        <MeetingCompanion />
+      </Suspense>
+    );
+  }
   if (isCapsule) {
     return <Capsule os={forcedOs} />;
   }

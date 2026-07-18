@@ -24,15 +24,15 @@
 
 | ID | Requirement（需求） | Source（来源） | Status（状态） | Evidence（证据） | Verification（验证） | Notes（备注） |
 | --- | --- | --- | --- | --- | --- | --- |
-| MC-V1-001 | 新增可持久化的“会议桌宠”开关，默认关闭。 | Spec 4、5.2、15.1 | missing | - | 设置序列化测试；人工重启 | 复用现有 settings（设置）架构。 |
+| MC-V1-001 | 新增可持久化的“会议桌宠”开关，默认关闭。 | Spec 4、5.2、15.1 | done | `UserPreferences` 新增启用、位置锁定和位置字段；`MeetingCompanionSection` 复用现有设置持久化 | Rust 默认值、空配置迁移和序列化往返测试通过；`npm run build` 通过 | 默认关闭；真实窗口重启体验留待 Windows 最终冒烟。 |
 | MC-V1-002 | 会议开始后懒创建并显示唯一 `meeting-companion` 透明窗口。 | Spec 5.1、15.1-2 | missing | - | Rust 窗口测试；Windows Tauri 冒烟 | 不复用 `capsule`。 |
-| MC-V1-003 | 桌宠使用 `?window=meeting-companion` 最小前端路由，不加载完整主窗口 UI。 | Spec 5.1 | missing | - | build；运行时组件树检查 | - |
+| MC-V1-003 | 桌宠使用 `?window=meeting-companion` 最小前端路由，不加载完整主窗口 UI。 | Spec 5.1 | done | `main.tsx` / `App.tsx` 路由懒加载 `MeetingCompanion`；生产构建生成独立约 0.75 kB chunk | `npm run build`；Playwright 实测 1 个桌宠根节点、1 张 poster、0 个设置主界面节点，舞台 `350 x 280` | Phase 1 仅显示 `idle` poster，不创建 Tauri 窗口。 |
 | MC-V1-004 | 桌宠窗口无边框、透明、置顶、跳过任务栏、不可自由缩放。 | Spec 5.1、15.2 | missing | - | Windows 人工检查 | 角色舞台 `350 x 280`。 |
 | MC-V1-005 | 支持左键拖动、16px 边缘吸附、位置记忆和位置锁定。 | Spec 5.2-5.3、15.8 | missing | - | 位置纯函数测试；多屏人工验证 | 锁定不影响按钮和右键菜单。 |
 | MC-V1-006 | 位置恢复覆盖负坐标、DPI 变化、显示器移除和分辨率变化。 | Spec 5.3、15.9 | missing | - | Rust 位置测试；125% / 150% DPI 冒烟 | - |
-| MC-V1-007 | 精确导入六个 WebM、六张 poster 和精简 runtime manifest，不导入生成中间件。 | Spec 7、15.11 | done | `openless-all/app/src/assets/meeting-companion/` 仅含 12 个媒体文件和 `manifest.json` | `npm run check:meeting-companion-assets` 检查精确文件集并输出 SHA-256 | 未导入 raw frames、GIF、atlas、生成目录或 QA 文件。 |
-| MC-V1-008 | 素材校验覆盖 VP9、Alpha、`350 x 280`、无音轨、循环方式和六个实际时长。 | Spec 7.2、15.11 | done | `scripts/check-meeting-companion-assets.mjs` 解码并校验六状态 | `npm run check:meeting-companion-assets`；时长误差均小于 1 帧（84ms） | `idle` / `completed` 不循环，其余四状态循环。 |
-| MC-V1-009 | 建立六状态桌宠 reducer，以后端 meeting snapshot 为权威状态。 | Spec 6、9、15.3-4 | missing | - | TypeScript 状态表测试 | 覆盖过期 meeting id。 |
+| MC-V1-007 | 精确导入六个 WebM、六张 poster 和精简 runtime manifest，不导入生成中间件。 | Spec 7、15.11 | done | `openless-all/app/src/assets/meeting-companion/` 仅含 12 个媒体文件和 `manifest.json`；12 个媒体文件与外部交接源 SHA-256 逐一一致 | `npm run check:meeting-companion-assets` 检查精确文件集；`Get-FileHash` 对比结果 12/12 一致 | 未导入 raw frames、GIF、atlas、生成目录或 QA 文件。 |
+| MC-V1-008 | 素材校验覆盖 VP9、Alpha、`350 x 280`、无音轨、循环方式和六个实际时长。 | Spec 7.2、15.11 | done | `scripts/check-meeting-companion-assets.mjs` 按 spec 固定值解码并校验六状态 | `npm run check:meeting-companion-assets`；实际时长 `2416/916/2000/2416/1166/2916ms`，误差均小于 1 帧（84ms） | `idle` / `completed` 不循环，其余四状态循环。 |
+| MC-V1-009 | 建立六状态桌宠 reducer，以后端 meeting snapshot 为权威状态。 | Spec 6、9、15.3-4 | done | `meetingCompanionState.ts` 覆盖 hidden、六视觉状态和错误叠加层 | `npm run check:meeting-companion-state`；覆盖新会议、过期 meeting id、后端 snapshot 覆盖本地状态及总结成功/失败 | quiet 只接收布尔视觉信号；RMS 滞回计算仍属 Phase 4。 |
 | MC-V1-010 | recorder RMS 以最多 10Hz 发送 `meeting:audio-level`，不阻塞音频回调。 | Spec 6.3 | missing | - | Rust 事件节流测试；`cargo check` | 只服务视觉状态。 |
 | MC-V1-011 | `recording` / `quiet` 使用 RMS 滞回阈值稳定切换，不使用 ASR 原文停顿。 | Spec 6.3、15.3 | missing | - | 阈值、时间窗和抖动测试 | 进入 0.035/2000ms；退出 0.06/150ms。 |
 | MC-V1-012 | 悬停 / 单击控件可暂停、继续、停止，命令期间防重入并丢弃过期结果。 | Spec 5.4、15.4 | missing | - | 组件测试；双窗口人工操作 | 复用现有 meeting IPC。 |

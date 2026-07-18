@@ -1,0 +1,10 @@
+{
+  "states": [
+    { "state": "idle", "webm": "idle.webm", "poster": "idle-poster.png", "loop": false, "durationMs": 2400 },
+    { "state": "recording", "webm": "recording.webm", "poster": "recording-poster.png", "loop": true, "durationMs": 900 },
+    { "state": "quiet", "webm": "quiet.webm", "poster": "quiet-poster.png", "loop": true, "durationMs": 2004 },
+    { "state": "paused", "webm": "paused.webm", "poster": "paused-poster.png", "loop": true, "durationMs": 2400 },
+    { "state": "processing", "webm": "processing.webm", "poster": "processing-poster.png", "loop": true, "durationMs": 1200 },
+    { "state": "completed", "webm": "completed.webm", "poster": "completed-poster.png", "loop": false, "durationMs": 2880 }
+  ]
+}

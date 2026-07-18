@@ -765,6 +765,11 @@ export const en: typeof zhCN = {
     kicker: 'SETTINGS',
     title: 'Settings',
     desc: 'Recording, providers, shortcuts, and permissions.',
+    meetingCompanion: {
+      title: 'Meeting companion',
+      enabledLabel: 'Show during meetings',
+      positionLockedLabel: 'Lock companion position',
+    },
     dataStorage: {
       title: 'Data storage',
       desc: 'Conversation history and context kept on this device.',
