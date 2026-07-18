@@ -424,6 +424,10 @@ export interface MeetingCompanionPosition {
   monitorId: string | null;
 }
 
+export interface MeetingCompanionOpenMeetingEvent {
+  meetingId: string;
+}
+
 export interface MeetingTranscriptSegmentEvent {
   meetingId: string;
   segment: TranscriptSegment;

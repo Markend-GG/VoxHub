@@ -217,6 +217,8 @@ macro_rules! app_invoke_handler_desktop {
             meeting_companion::start_meeting_companion_drag,
             meeting_companion::save_meeting_companion_position,
             meeting_companion::dismiss_completed_meeting_companion,
+            meeting_companion::set_meeting_companion_position_locked,
+            meeting_companion::open_meeting_from_companion,
             commands::generate_meeting_summary,
             commands::retry_meeting_summary,
             commands::export_meeting_markdown,

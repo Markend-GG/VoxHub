@@ -24,7 +24,8 @@
     "check:meeting-companion-assets": "node scripts/check-meeting-companion-assets.mjs",
     "check:meeting-companion-state": "npx tsx src/lib/meetingCompanionState.test.ts",
     "check:meeting-companion-runtime": "npx tsx src/lib/meetingCompanionRuntime.test.ts",
-    "check:meeting-companion-sync": "npx tsx src/lib/meetingCompanionSync.test.ts"
+    "check:meeting-companion-sync": "npx tsx src/lib/meetingCompanionSync.test.ts",
+    "check:meeting-companion-controls": "npx tsx src/lib/meetingCompanionControls.test.ts && node scripts/meeting-companion-controls-contract.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

@@ -15,7 +15,7 @@ use crate::types::MeetingCompanionPosition;
 
 const WINDOW_LABEL: &str = "meeting-companion";
 const WINDOW_WIDTH: f64 = 350.0;
-const WINDOW_HEIGHT: f64 = 280.0;
+const WINDOW_HEIGHT: f64 = 324.0;
 const EDGE_MARGIN: f64 = 16.0;
 const DRAG_SETTLE_DELAY: Duration = Duration::from_millis(350);
 const COMPLETED_DISMISS_FALLBACK_DELAY: Duration = Duration::from_secs(9);
@@ -262,12 +262,65 @@ pub fn dismiss_completed_meeting_companion(
     Ok(should_destroy)
 }
 
+#[tauri::command]
+pub fn set_meeting_companion_position_locked(
+    app: AppHandle,
+    window: WebviewWindow,
+    coord: State<'_, Arc<Coordinator>>,
+    locked: bool,
+) -> Result<bool, String> {
+    ensure_companion_invoker(window.label())?;
+    let prefs = coord
+        .prefs()
+        .update(|prefs| prefs.meeting_companion_position_locked = locked)
+        .map_err(|error| error.to_string())?;
+    let _ = app.emit("prefs:changed", &prefs);
+    Ok(prefs.meeting_companion_position_locked)
+}
+
+#[tauri::command]
+pub fn open_meeting_from_companion(
+    app: AppHandle,
+    window: WebviewWindow,
+    meeting_id: String,
+) -> Result<(), String> {
+    ensure_companion_invoker(window.label())?;
+    let meeting_id = meeting_id.trim();
+    if meeting_id.is_empty() {
+        return Err("meeting id is required".to_string());
+    }
+    if lifecycle().lock().active_meeting_id.as_deref() != Some(meeting_id) {
+        return Err("meeting is no longer current".to_string());
+    }
+    crate::show_main_window(&app);
+    app.emit_to(
+        "main",
+        "meeting-companion:open-meeting",
+        serde_json::json!({ "meetingId": meeting_id }),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn ensure_companion_invoker(window_label: &str) -> Result<(), String> {
+    if window_label == WINDOW_LABEL {
+        Ok(())
+    } else {
+        Err("command is only allowed from the meeting companion window".to_string())
+    }
+}
+
 fn show_window(app: &AppHandle) -> Result<(), String> {
     let window = ensure_window(app)?;
     if let Err(error) = restore_window_position(app, &window) {
         log::warn!("[meeting-companion] position restore failed: {error}");
     }
     window.show().map_err(|error| error.to_string())?;
+    if let Some(meeting_id) = lifecycle().lock().active_meeting_id.clone() {
+        let _ = window.emit(
+            "meeting-companion:show",
+            serde_json::json!({ "meetingId": meeting_id }),
+        );
+    }
     AUDIO_LEVEL_REPORTING_ENABLED.store(true, Ordering::Relaxed);
     Ok(())
 }
@@ -436,19 +489,23 @@ fn settle_and_persist_position(app: &AppHandle) -> Result<(), String> {
 
 fn persist_position(app: &AppHandle, placement: Placement) -> Result<(), String> {
     let coordinator = app.state::<Arc<Coordinator>>();
-    let mut prefs = coordinator.prefs().get();
     let next = MeetingCompanionPosition {
         x: placement.position.x,
         y: placement.position.y,
         monitor_id: Some(placement.monitor_id),
     };
-    if prefs.meeting_companion_position.as_ref() == Some(&next) {
+    if coordinator
+        .prefs()
+        .get()
+        .meeting_companion_position
+        .as_ref()
+        == Some(&next)
+    {
         return Ok(());
     }
-    prefs.meeting_companion_position = Some(next);
-    coordinator
+    let prefs = coordinator
         .prefs()
-        .set(prefs.clone())
+        .update(|prefs| prefs.meeting_companion_position = Some(next))
         .map_err(|error| error.to_string())?;
     let _ = app.emit("prefs:changed", &prefs);
     Ok(())
@@ -729,7 +786,7 @@ mod tests {
         let size = window_size_for_monitor(&display);
         assert_eq!(
             snap_and_clamp_position(PhysicalPosition::new(1558, 747), size, &display),
-            PhysicalPosition::new(1570, 760)
+            PhysicalPosition::new(1570, 716)
         );
     }
 
@@ -759,7 +816,7 @@ mod tests {
             window_size_for_monitor(&display),
             display.work_area,
         );
-        assert_eq!(position, PhysicalPosition::new(1016, 448));
+        assert_eq!(position, PhysicalPosition::new(1016, 404));
     }
 
     #[test]
@@ -767,7 +824,7 @@ mod tests {
         let display_125 = monitor("display", 0, 0, 1920, 1040, 1.25);
         assert_eq!(
             window_size_for_monitor(&display_125),
-            PhysicalSize::new(438, 350)
+            PhysicalSize::new(438, 405)
         );
         let display_150 = monitor("display", 0, 0, 1600, 860, 1.5);
         let saved = MeetingCompanionPosition {
@@ -777,7 +834,7 @@ mod tests {
         };
         let placement =
             restore_placement(Some(&saved), &[display_150], None, None).expect("placement");
-        assert_eq!(placement.position, PhysicalPosition::new(1075, 440));
+        assert_eq!(placement.position, PhysicalPosition::new(1075, 374));
     }
 
     #[test]
@@ -793,7 +850,7 @@ mod tests {
         };
         let placement = restore_placement(Some(&saved), &displays, Some("right"), Some("primary"))
             .expect("placement");
-        assert_eq!(placement.position, PhysicalPosition::new(4022, 1030));
+        assert_eq!(placement.position, PhysicalPosition::new(4022, 975));
         assert_eq!(placement.monitor_id, "right");
     }
 
@@ -801,6 +858,13 @@ mod tests {
     fn position_lock_prevents_drag_start() {
         assert!(!drag_allowed(true));
         assert!(drag_allowed(false));
+    }
+
+    #[test]
+    fn companion_only_commands_reject_other_windows() {
+        assert!(ensure_companion_invoker("meeting-companion").is_ok());
+        assert!(ensure_companion_invoker("main").is_err());
+        assert!(ensure_companion_invoker("capsule").is_err());
     }
 
     #[test]

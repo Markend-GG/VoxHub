@@ -75,7 +75,15 @@ interface MeetingTodoDraft {
   sourceSegmentIds: string[];
 }
 
-export function Meetings() {
+interface MeetingsProps {
+  requestedMeetingId?: string | null;
+  onRequestedMeetingHandled?: (meetingId: string) => void;
+}
+
+export function Meetings({
+  requestedMeetingId = null,
+  onRequestedMeetingHandled,
+}: MeetingsProps = {}) {
   const { t } = useTranslation();
   const { prefs } = useHotkeySettings();
   const mobile = useMobileLayout();
@@ -105,6 +113,7 @@ export function Meetings() {
   const meetingDetailsRef = useRef<Record<string, MeetingRecord>>({});
   const detailRequestRef = useRef(0);
   const activeSnapshotRef = useRef<MeetingRecordingSnapshot | null>(null);
+  const requestedMeetingIdRef = useRef<string | null>(requestedMeetingId);
 
   useEffect(() => {
     meetingsRef.current = meetings;
@@ -117,6 +126,22 @@ export function Meetings() {
   useEffect(() => {
     activeSnapshotRef.current = activeSnapshot;
   }, [activeSnapshot]);
+
+  useEffect(() => {
+    requestedMeetingIdRef.current = requestedMeetingId;
+    if (!requestedMeetingId) return;
+    setQuery('');
+    setSelectedId(requestedMeetingId);
+    setActionError(null);
+    setDetailError(null);
+    setEditDraft(null);
+    setDeleteConfirmId(null);
+    setRewriteConfirmId(null);
+    if (mobile) setMobileDetailOpen(true);
+    if (meetings.some(meeting => meeting.id === requestedMeetingId)) {
+      onRequestedMeetingHandled?.(requestedMeetingId);
+    }
+  }, [meetings, mobile, onRequestedMeetingHandled, requestedMeetingId]);
 
   const cacheMeetingRecord = useCallback((record: MeetingRecord) => {
     setMeetings(prev => upsertMeetingListItem(prev, meetingListItemFromRecord(record)));
@@ -163,6 +188,8 @@ export function Meetings() {
         setMeetingDetails(prev => ({ ...prev, [active.meeting.id]: active.meeting }));
       }
       setSelectedId(prev => {
+        const requested = requestedMeetingIdRef.current;
+        if (requested && nextRecords.some(record => record.id === requested)) return requested;
         if (active) return active.meeting.id;
         if (prev && nextRecords.some(record => record.id === prev)) return prev;
         return nextRecords[0]?.id ?? null;

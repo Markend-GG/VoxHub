@@ -108,6 +108,14 @@ export function dismissCompletedMeetingCompanion(meetingId: string): Promise<boo
     return invokeOrMock("dismiss_completed_meeting_companion", { meetingId }, () => true)
 }
 
+export function setMeetingCompanionPositionLocked(locked: boolean): Promise<boolean> {
+    return invokeOrMock("set_meeting_companion_position_locked", { locked }, () => locked)
+}
+
+export function openMeetingFromCompanion(meetingId: string): Promise<void> {
+    return invokeOrMock("open_meeting_from_companion", { meetingId }, () => undefined)
+}
+
 export function generateMeetingSummary(id: string): Promise<MeetingRecord> {
     return invokeOrMock("generate_meeting_summary", { id }, () => ({
         ...mockMeetings[0],

@@ -41,6 +41,7 @@ import {
   normalizeMeetingCloseRequest,
   type MeetingCloseRequestEvent,
   type MeetingCloseRequestIntent,
+  type MeetingCompanionOpenMeetingEvent,
   type MeetingRecordingSnapshot,
 } from '../lib/types';
 import { Btn } from '../pages/_atoms';
@@ -120,6 +121,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
   const [closeMeetingBusy, setCloseMeetingBusy] = useState(false);
   const [closeMeetingWaitingForSummary, setCloseMeetingWaitingForSummary] = useState(false);
   const [closeMeetingError, setCloseMeetingError] = useState<string | null>(null);
+  const [requestedMeetingId, setRequestedMeetingId] = useState<string | null>(null);
 
   // tab 切换的 cross-fade：旧页 blur+fade out（180ms），结束后挂载新页（走 ol-page-slide enter）。
   // displayTab 是实际渲染的 tab，currentTab 是用户点中的目标 tab。
@@ -139,6 +141,34 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
   useEffect(() => {
     applyFontScale(readFontScale());
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const handle = await listen<MeetingCompanionOpenMeetingEvent>(
+          'meeting-companion:open-meeting',
+          event => {
+            if (cancelled || !event.payload.meetingId) return;
+            setRequestedMeetingId(event.payload.meetingId);
+            setSettingsOpen(false);
+            setMoreOpen(false);
+            setCurrentTab('meetings');
+          },
+        );
+        if (cancelled) handle();
+        else unlisten = handle;
+      } catch (error) {
+        console.warn('[meeting-companion] open meeting listener setup failed', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [setCurrentTab, setSettingsOpen]);
 
   const Page = PAGE_CMP[displayTab as Exclude<AppTab, 'localAsr'>] ?? Overview;
 
@@ -541,6 +571,13 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
             >
               {displayTab === 'overview' ? (
                 <Overview onOpenHistory={() => setCurrentTab('history')} />
+              ) : displayTab === 'meetings' ? (
+                <Meetings
+                  requestedMeetingId={requestedMeetingId}
+                  onRequestedMeetingHandled={meetingId => {
+                    setRequestedMeetingId(current => current === meetingId ? null : current);
+                  }}
+                />
               ) : (
                 <Page />
               )}

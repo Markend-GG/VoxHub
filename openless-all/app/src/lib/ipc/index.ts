@@ -65,6 +65,8 @@ export {
     startMeetingCompanionDrag,
     saveMeetingCompanionPosition,
     dismissCompletedMeetingCompanion,
+    setMeetingCompanionPositionLocked,
+    openMeetingFromCompanion,
     generateMeetingSummary,
     retryMeetingSummary,
     exportMeetingMarkdown,

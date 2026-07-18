@@ -112,5 +112,16 @@ state = reduce(
   'new backend meeting replaces previous outcome',
 );
 assert(state.meetingId === 'meeting-c', 'new backend snapshot must become authoritative');
+state = meetingCompanionReducer(state, {
+  type: 'command-failed',
+  meetingId: 'meeting-c',
+  message: 'failed',
+});
+assert(state.error?.kind === 'command_failed', 'command failure must be visible');
+state = meetingCompanionReducer(state, {
+  type: 'snapshot',
+  snapshot: snapshot('meeting-c', 'recording'),
+});
+assert(state.error === null, 'a newer authoritative snapshot must clear a stale command error');
 
 console.log('meetingCompanionState tests: OK');

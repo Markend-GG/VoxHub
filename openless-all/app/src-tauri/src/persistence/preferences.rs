@@ -97,13 +97,27 @@ impl PreferencesStore {
         *guard = prefs;
         Ok(())
     }
+
+    pub fn update(&self, mutate: impl FnOnce(&mut UserPreferences)) -> Result<UserPreferences> {
+        let mut guard = self.state.lock();
+        let mut next = guard.clone();
+        mutate(&mut next);
+        let json = serde_json::to_vec_pretty(&next).context("encode prefs failed")?;
+        atomic_write(&self.path, &json)?;
+        *guard = next.clone();
+        Ok(next)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::read_preferences;
+    use super::{read_preferences, PreferencesStore};
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use crate::types::UserPreferences;
+    use parking_lot::Mutex;
 
     #[test]
     fn legacy_streaming_insert_false_is_migrated_and_marker_is_persisted() {
@@ -140,6 +154,37 @@ mod tests {
             Some(true)
         );
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn meeting_companion_position_lock_update_preserves_concurrent_preferences() {
+        let tmp: PathBuf = std::env::temp_dir().join(format!(
+            "openless-meeting-companion-prefs-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&tmp).expect("create temp dir");
+        let store = Arc::new(PreferencesStore {
+            path: tmp.join("preferences.json"),
+            state: Mutex::new(UserPreferences::default()),
+        });
+        let lock_store = Arc::clone(&store);
+        let minimized_store = Arc::clone(&store);
+        let lock_thread = std::thread::spawn(move || {
+            lock_store
+                .update(|prefs| prefs.meeting_companion_position_locked = true)
+                .expect("update position lock");
+        });
+        let minimized_thread = std::thread::spawn(move || {
+            minimized_store
+                .update(|prefs| prefs.start_minimized = true)
+                .expect("update start minimized");
+        });
+        lock_thread.join().expect("lock update thread");
+        minimized_thread.join().expect("minimized update thread");
+        let saved = store.get();
+        assert!(saved.meeting_companion_position_locked);
+        assert!(saved.start_minimized);
         let _ = fs::remove_dir_all(&tmp);
     }
 }

@@ -88,7 +88,6 @@ function withDerivedVisualState(state: MeetingCompanionState): MeetingCompanionS
 
 function snapshotError(
   snapshot: MeetingRecordingSnapshot,
-  previous: MeetingCompanionErrorOverlay | null,
 ): MeetingCompanionErrorOverlay | null {
   if (snapshot.meeting.status === 'summary_failed') {
     return { kind: 'summary_failed', message: null };
@@ -96,7 +95,6 @@ function snapshotError(
   if (snapshot.phase === 'transcribing_interrupted' || snapshot.asrInterrupted) {
     return { kind: 'transcribing_interrupted', message: null };
   }
-  if (previous?.kind === 'command_failed') return previous;
   return null;
 }
 
@@ -119,7 +117,6 @@ export function meetingCompanionReducer(
     const snapshot = action.snapshot;
     const meetingId = snapshot.meeting.id;
     const isNewMeeting = meetingId !== state.meetingId;
-    const previousError = isNewMeeting ? null : state.error;
     const summaryOutcome = snapshot.meeting.status === 'completed'
       ? 'completed'
       : snapshot.meeting.status === 'summary_failed'
@@ -138,7 +135,7 @@ export function meetingCompanionReducer(
         : isNewMeeting
           ? false
           : state.hiddenByUser,
-      error: snapshotError(snapshot, previousError),
+      error: snapshotError(snapshot),
     };
     return withDerivedVisualState(next);
   }
