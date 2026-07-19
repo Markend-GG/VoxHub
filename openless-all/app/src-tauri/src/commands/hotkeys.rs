@@ -594,21 +594,33 @@ fn reject_rewrite_screenshot_record_hotkey_overlap(
     rewrite: &ShortcutBinding,
     screenshot_record: &ShortcutBinding,
 ) -> Result<(), String> {
-    reject_hotkey_overlap(rewrite, screenshot_record, "重写快捷键不能和截图记录快捷键相同")
+    reject_hotkey_overlap(
+        rewrite,
+        screenshot_record,
+        "重写快捷键不能和截图记录快捷键相同",
+    )
 }
 
 fn reject_screenshot_record_dictation_hotkey_overlap(
     screenshot_record: &ShortcutBinding,
     dictation: &ShortcutBinding,
 ) -> Result<(), String> {
-    reject_hotkey_overlap(screenshot_record, dictation, "截图记录快捷键不能和听写快捷键相同")
+    reject_hotkey_overlap(
+        screenshot_record,
+        dictation,
+        "截图记录快捷键不能和听写快捷键相同",
+    )
 }
 
 fn reject_screenshot_record_translation_hotkey_overlap(
     screenshot_record: &ShortcutBinding,
     translation: &ShortcutBinding,
 ) -> Result<(), String> {
-    reject_hotkey_overlap(screenshot_record, translation, "截图记录快捷键不能和翻译快捷键相同")
+    reject_hotkey_overlap(
+        screenshot_record,
+        translation,
+        "截图记录快捷键不能和翻译快捷键相同",
+    )
 }
 
 fn reject_screenshot_record_qa_hotkey_overlap(
@@ -633,7 +645,11 @@ fn reject_screenshot_record_open_app_hotkey_overlap(
     screenshot_record: &ShortcutBinding,
     open_app: &ShortcutBinding,
 ) -> Result<(), String> {
-    reject_hotkey_overlap(screenshot_record, open_app, "截图记录快捷键不能和打开应用快捷键相同")
+    reject_hotkey_overlap(
+        screenshot_record,
+        open_app,
+        "截图记录快捷键不能和打开应用快捷键相同",
+    )
 }
 
 fn reject_screenshot_record_less_computer_hotkey_overlap(

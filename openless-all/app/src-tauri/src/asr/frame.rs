@@ -32,7 +32,6 @@ impl MessageType {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flags {
-    None = 0b0000,
     PositiveSequence = 0b0001,
     LastPacket = 0b0010,
     NegativeSequence = 0b0011,
@@ -238,7 +237,7 @@ mod tests {
         let body = b"boom";
         let mut frame = Vec::new();
         frame.push(HEADER_BYTE_0);
-        frame.push(((MessageType::ErrorMessage as u8) << 4) | (Flags::None as u8));
+        frame.push((MessageType::ErrorMessage as u8) << 4);
         frame.push(((Serialization::None as u8) << 4) | COMPRESSION_NONE);
         frame.push(0x00);
         frame.extend_from_slice(&123u32.to_be_bytes());

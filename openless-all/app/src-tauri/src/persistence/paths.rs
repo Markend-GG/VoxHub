@@ -269,6 +269,7 @@ pub fn meeting_recording_part_path_for_id(meeting_id: &str, part_index: u64) -> 
     Ok(meeting_recording_dir_for_id(meeting_id)?.join(format!("part-{part_index:04}.wav")))
 }
 
+#[cfg(test)]
 pub fn meeting_recording_dir_for_id_with_root(
     root: &std::path::Path,
     meeting_id: &str,
@@ -278,6 +279,7 @@ pub fn meeting_recording_dir_for_id_with_root(
     Ok(dir)
 }
 
+#[cfg(test)]
 pub fn meeting_recording_part_path_for_id_with_root(
     root: &std::path::Path,
     meeting_id: &str,

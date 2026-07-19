@@ -20,7 +20,8 @@ struct ActiveScreenshotWindow {
 const VOICE_REWRITE_DUPLICATE_SUPPRESSION_WINDOW: Duration = Duration::from_secs(30);
 
 static ACTIVE_WINDOW: OnceLock<Mutex<Option<ActiveScreenshotWindow>>> = OnceLock::new();
-static SUPPRESSED_CONTEXT_IDS: OnceLock<Mutex<std::collections::VecDeque<String>>> = OnceLock::new();
+static SUPPRESSED_CONTEXT_IDS: OnceLock<Mutex<std::collections::VecDeque<String>>> =
+    OnceLock::new();
 
 fn active_window() -> &'static Mutex<Option<ActiveScreenshotWindow>> {
     ACTIVE_WINDOW.get_or_init(|| Mutex::new(None))
@@ -128,9 +129,10 @@ fn should_suppress_recent_voice_or_rewrite_duplicate(inner: &Arc<Inner>, window:
     let Some(current) = crate::context_capture::current_window_identity() else {
         return false;
     };
-    if let Some(entry) = crate::context_capture::take_recent_primary_capture_matching(window, |entry| {
-        recent_primary_capture_matches_current(entry, &current)
-    })
+    if let Some(entry) =
+        crate::context_capture::take_recent_primary_capture_matching(window, |entry| {
+            recent_primary_capture_matches_current(entry, &current)
+        })
     {
         mark_context_suppressed_once(&entry.id);
         return true;
@@ -195,7 +197,10 @@ fn context_identity_matches(
     if same_optional_text(conversation_window, current.conversation_window.as_deref()) {
         return true;
     }
-    if window_title.map(str::trim).filter(|value| !value.is_empty()).is_none()
+    if window_title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
         && conversation_window
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -236,7 +241,8 @@ fn context_created_within(entry: &ContextCaptureEntry, window: Duration) -> bool
     };
     let elapsed = chrono::Utc::now().signed_duration_since(created_at.with_timezone(&chrono::Utc));
     elapsed >= chrono::Duration::zero()
-        && elapsed <= chrono::Duration::from_std(window).unwrap_or_else(|_| chrono::Duration::seconds(10))
+        && elapsed
+            <= chrono::Duration::from_std(window).unwrap_or_else(|_| chrono::Duration::seconds(10))
 }
 
 fn same_optional_text(left: Option<&str>, right: Option<&str>) -> bool {
@@ -364,7 +370,10 @@ fn handle_aggregation_hotkey(inner: &Arc<Inner>) {
             log::debug!("[agg] window identity unknown, skip");
             return;
         };
-        let name = identity.context_app.unwrap_or_else(|| "unknown".to_string()).to_lowercase();
+        let name = identity
+            .context_app
+            .unwrap_or_else(|| "unknown".to_string())
+            .to_lowercase();
         (name, identity.conversation_window)
     };
 
@@ -383,7 +392,11 @@ fn handle_aggregation_hotkey(inner: &Arc<Inner>) {
 }
 
 /// 聚合模式下单次截图：捕获后追加到聚合桶，检查 finalize。
-fn capture_and_aggregate(inner: Arc<Inner>, process_name: String, app_display_name: Option<String>) {
+fn capture_and_aggregate(
+    inner: Arc<Inner>,
+    process_name: String,
+    app_display_name: Option<String>,
+) {
     let prefs = inner.prefs.get();
     let context_id = Uuid::new_v4().to_string();
 

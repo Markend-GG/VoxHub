@@ -33,7 +33,10 @@ export function AutoUpdateGate() {
       if (cancelled) return;
       const current = uRef.current;
       if (current.checking || current.busy || isDialogStatus(current.status)) return;
-      void current.checkForUpdates(undefined, { autoInstallAndroid: isAndroid() }).catch(error => {
+      void current.checkForUpdates(undefined, {
+        autoInstallAndroid: isAndroid(),
+        background: true,
+      }).catch(error => {
         console.warn('[auto-update] background check failed', error);
       });
     };

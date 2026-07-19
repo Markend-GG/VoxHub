@@ -8,6 +8,7 @@ pub const UPDATER_PUBKEY_B64: &str =
     "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFERUFBODAzNTY0QzMyM0YKUldRL01reFdBNmpxSGE1K0JadlpONXNWTzhJcGZCRGxjUVdIWExNNFJpeUNsSGZwazdlQThhemkK";
 
 /// Returned when Kotlin `installApk` cannot open the system installer (e.g. missing install permission).
+#[cfg(target_os = "android")]
 pub const INSTALLER_NOT_OPENED_MSG: &str =
     "无法打开系统安装器：请先在系统设置中允许 OpenLess 安装未知应用，然后重新点击更新";
 
@@ -58,6 +59,7 @@ pub fn beta_manifest_urls(arch: &str, tag: &str) -> Vec<String> {
 }
 
 /// Human-readable manifest fetch failure for UI tooltips.
+#[cfg(target_os = "android")]
 pub fn format_manifest_error(status: u16, url: &str) -> String {
     if status == 404 {
         format!("更新清单不存在 (404): {url}")

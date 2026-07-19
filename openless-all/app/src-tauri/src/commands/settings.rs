@@ -161,9 +161,9 @@ pub(crate) fn persist_settings_with_keyboard_apply<T: SettingsWriter>(
     let switch_style_changed = previous.switch_style_hotkey != prefs.switch_style_hotkey;
     let open_app_changed = previous.open_app_hotkey != prefs.open_app_hotkey;
     let rewrite_changed = previous.rewrite_hotkey != prefs.rewrite_hotkey;
-    let screenshot_record_changed =
-        previous.screenshot_record_hotkey != prefs.screenshot_record_hotkey
-            || previous.screenshot_record_enabled != prefs.screenshot_record_enabled;
+    let screenshot_record_changed = previous.screenshot_record_hotkey
+        != prefs.screenshot_record_hotkey
+        || previous.screenshot_record_enabled != prefs.screenshot_record_enabled;
     let screenshot_record_disabled =
         previous.screenshot_record_enabled && !prefs.screenshot_record_enabled;
     let coding_agent_changed = previous.coding_agent_enabled != prefs.coding_agent_enabled
@@ -502,6 +502,14 @@ pub async fn app_check_update_with_channel<R: tauri::Runtime>(
         builder = builder
             .endpoints(urls)
             .map_err(|e| format!("set beta endpoints: {e}"))?;
+    } else {
+        let urls = resolve_stable_manifest_endpoints().await?;
+        if urls.is_empty() {
+            return Ok(None);
+        }
+        builder = builder
+            .endpoints(urls)
+            .map_err(|e| format!("set stable endpoints: {e}"))?;
     }
     let updater = builder.build().map_err(|e| format!("build updater: {e}"))?;
     let update = updater
@@ -523,6 +531,161 @@ pub async fn app_check_update_with_channel<R: tauri::Runtime>(
         rid: webview.resources_table().add(update),
     };
     Ok(Some(metadata))
+}
+
+#[cfg(not(mobile))]
+enum ManifestProbe {
+    Available(url::Url),
+    Missing,
+    Failed(String),
+}
+
+/// updater plugin 会把每个不可达 endpoint 直接记为 error。先做轻量探测，只把已返回
+/// 合法 manifest 的 URL 交给 plugin；尚未发布 stable manifest 时按“无更新”处理。
+#[cfg(not(mobile))]
+async fn resolve_stable_manifest_endpoints() -> Result<Vec<url::Url>, String> {
+    let target =
+        tauri_plugin_updater::target().ok_or_else(|| "unsupported updater target".to_string())?;
+    let urls = [
+        format!(
+            "https://github.com/appergb/openless/releases/latest/download/latest-{target}.json"
+        ),
+        format!(
+            "https://fastgit.cc/https://github.com/appergb/openless/releases/latest/download/latest-{target}-mirror.json"
+        ),
+    ];
+    let mut probes = Vec::new();
+    for raw_url in urls {
+        let url = url::Url::parse(&raw_url)
+            .map_err(|error| format!("parse stable updater url: {error}"))?;
+        probes.push(probe_update_manifest(url).await);
+    }
+
+    select_stable_manifest_probes(probes)
+}
+
+#[cfg(not(mobile))]
+fn select_stable_manifest_probes(probes: Vec<ManifestProbe>) -> Result<Vec<url::Url>, String> {
+    let mut available = Vec::new();
+    let mut source_manifest_missing = false;
+    let mut failures = Vec::new();
+
+    for (index, probe) in probes.into_iter().enumerate() {
+        match probe {
+            ManifestProbe::Available(url) => available.push(url),
+            ManifestProbe::Missing if index == 0 => source_manifest_missing = true,
+            ManifestProbe::Missing => {}
+            ManifestProbe::Failed(error) => failures.push(error),
+        }
+    }
+
+    if !available.is_empty() {
+        return Ok(available);
+    }
+    if source_manifest_missing {
+        return Ok(Vec::new());
+    }
+    Err(format!(
+        "stable update service unavailable: {}",
+        failures.join("; ")
+    ))
+}
+
+#[cfg(not(mobile))]
+async fn probe_update_manifest(url: url::Url) -> ManifestProbe {
+    let response = match net::http()
+        .get(url.clone())
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return ManifestProbe::Failed(format!(
+                "{}: {error}",
+                url.host_str().unwrap_or("update endpoint")
+            ))
+        }
+    };
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+    ) {
+        return ManifestProbe::Missing;
+    }
+    if !response.status().is_success() {
+        return ManifestProbe::Failed(format!(
+            "{} returned {}",
+            url.host_str().unwrap_or("update endpoint"),
+            response.status()
+        ));
+    }
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return ManifestProbe::Failed(format!(
+                "read update manifest from {}: {error}",
+                url.host_str().unwrap_or("update endpoint")
+            ))
+        }
+    };
+    match validate_update_manifest(&bytes) {
+        Ok(()) => ManifestProbe::Available(url),
+        Err(error) => ManifestProbe::Failed(format!(
+            "invalid update manifest from {}: {error}",
+            url.host_str().unwrap_or("update endpoint")
+        )),
+    }
+}
+
+#[cfg(not(mobile))]
+fn validate_update_manifest(bytes: &[u8]) -> Result<(), String> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        .ok_or_else(|| "missing version".to_string())?;
+    Ok(())
+}
+
+#[cfg(all(test, not(mobile)))]
+mod update_manifest_tests {
+    use super::{select_stable_manifest_probes, validate_update_manifest, ManifestProbe};
+
+    #[test]
+    fn accepts_manifest_with_non_empty_version() {
+        assert!(validate_update_manifest(br#"{"version":"1.3.14"}"#).is_ok());
+    }
+
+    #[test]
+    fn rejects_html_or_manifest_without_version() {
+        assert!(validate_update_manifest(b"<html>not found</html>").is_err());
+        assert!(validate_update_manifest(br#"{"notes":"missing version"}"#).is_err());
+    }
+
+    #[test]
+    fn missing_source_manifest_is_not_a_network_failure() {
+        let result = select_stable_manifest_probes(vec![
+            ManifestProbe::Missing,
+            ManifestProbe::Failed("mirror returned 502".into()),
+        ]);
+
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn available_mirror_survives_source_network_failure() {
+        let mirror = url::Url::parse("https://example.com/latest.json").unwrap();
+        let result = select_stable_manifest_probes(vec![
+            ManifestProbe::Failed("source timeout".into()),
+            ManifestProbe::Available(mirror.clone()),
+        ]);
+
+        assert_eq!(result.unwrap(), vec![mirror]);
+    }
 }
 
 /// 把 fetch_latest_beta_release 找到的最新 prerelease tag 拼成 -beta manifest URL 对。
@@ -641,14 +804,17 @@ mod persist_settings_tests {
         next.windows_show_openless_in_keyboard_list = false;
         next.active_asr_provider = "other-asr".into();
 
-        let result = persist_settings_with_keyboard_apply(&writer, next, |_| {
-            Err("apply failed".into())
-        });
+        let result =
+            persist_settings_with_keyboard_apply(&writer, next, |_| Err("apply failed".into()));
 
         assert!(result.is_err());
         assert_eq!(*writer.write_calls.borrow(), 0);
         assert!(writer.asr_sync_calls.borrow().is_empty());
-        assert!(writer.read_settings().windows_show_openless_in_keyboard_list);
+        assert!(
+            writer
+                .read_settings()
+                .windows_show_openless_in_keyboard_list
+        );
     }
 
     #[test]
@@ -662,7 +828,11 @@ mod persist_settings_tests {
 
         assert!(result.is_ok());
         assert_eq!(*writer.write_calls.borrow(), 1);
-        assert!(!writer.read_settings().windows_show_openless_in_keyboard_list);
+        assert!(
+            !writer
+                .read_settings()
+                .windows_show_openless_in_keyboard_list
+        );
     }
 
     #[test]
@@ -689,7 +859,11 @@ mod persist_settings_tests {
         assert!(result.is_err());
         assert_eq!(*writer.write_calls.borrow(), 0);
         assert_eq!(*apply_calls.borrow(), 2);
-        assert!(writer.read_settings().windows_show_openless_in_keyboard_list);
+        assert!(
+            writer
+                .read_settings()
+                .windows_show_openless_in_keyboard_list
+        );
     }
 
     #[test]
@@ -772,7 +946,11 @@ mod persist_settings_tests {
         assert!(result.is_ok());
         assert_eq!(*writer.write_calls.borrow(), 2);
         assert_eq!(*apply_calls.borrow(), 1);
-        assert!(!writer.read_settings().windows_show_openless_in_keyboard_list);
+        assert!(
+            !writer
+                .read_settings()
+                .windows_show_openless_in_keyboard_list
+        );
     }
 }
 

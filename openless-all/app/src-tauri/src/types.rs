@@ -13,9 +13,8 @@ use android_types::{
     normalize_android_insert_strategy, normalize_android_overlay_size_dp,
 };
 pub use android_types::{
-    AndroidAccessibilityState, AndroidAccessibilityStatus, AndroidInsertStrategy,
-    AndroidOverlayActivationMode, AndroidOverlayCancelSwipeDirection,
-    AndroidOverlayLeftSwipeAction, AndroidOverlayPermissionState, AndroidOverlayStatus,
+    AndroidAccessibilityStatus, AndroidInsertStrategy, AndroidOverlayActivationMode,
+    AndroidOverlayCancelSwipeDirection, AndroidOverlayLeftSwipeAction, AndroidOverlayStatus,
     AndroidOverlayTrigger,
 };
 
@@ -505,8 +504,6 @@ pub enum RewriteStateKind {
 pub mod rewrite_error_code {
     pub const DICTATION_BUSY: &str = "dictationBusy";
     pub const SELECTION_EMPTY: &str = "selectionEmpty";
-    pub const SELECTION_CAPTURE_FAILED: &str = "selectionCaptureFailed";
-    pub const LLM_NOT_CONFIGURED: &str = "llmNotConfigured";
     pub const LLM_FAILED: &str = "llmFailed";
     pub const FOCUS_RESTORE_FAILED: &str = "focusRestoreFailed";
     pub const INSERT_FAILED: &str = "insertFailed";
@@ -908,6 +905,7 @@ impl CustomStylePrompts {
         }
     }
 
+    #[cfg(test)]
     pub fn has_for_mode(&self, mode: PolishMode) -> bool {
         !self.for_mode(mode).trim().is_empty()
     }
@@ -1409,10 +1407,7 @@ pub struct OpenWindowApp {
 #[cfg(target_os = "windows")]
 pub(crate) struct ForegroundAppIdentity {
     pub process_name: String,
-    pub process_id: u32,
-    pub exe_path: Option<String>,
     pub display_name: Option<String>,
-    pub window_title: Option<String>,
 }
 
 /// 截图白名单默认应用列表常量
@@ -3340,11 +3335,13 @@ impl ShortcutBinding {
 /// 默认 `Cmd+Shift+;` (macOS) / `Ctrl+Shift+;` (Windows)。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg(target_os = "macos")]
 pub struct QaHotkeyBinding {
     pub primary: String,
     pub modifiers: Vec<String>,
 }
 
+#[cfg(target_os = "macos")]
 impl Default for QaHotkeyBinding {
     fn default() -> Self {
         #[cfg(target_os = "macos")]
@@ -3364,6 +3361,7 @@ impl Default for QaHotkeyBinding {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl QaHotkeyBinding {
     /// 渲染成给前端展示的可读标签。
     /// 顺序与人类阅读习惯一致：`Cmd+Shift+;`、`Ctrl+Alt+Shift+.`。
@@ -3397,6 +3395,7 @@ pub struct ComboBinding {
 
 impl ComboBinding {
     /// 渲染成给前端展示的可读标签。复用 QaHotkeyBinding 的格式化逻辑。
+    #[cfg(target_os = "macos")]
     pub fn display_label(&self) -> String {
         let qa = QaHotkeyBinding {
             primary: self.primary.clone(),
@@ -3471,25 +3470,6 @@ pub enum HotkeyTrigger {
     Custom,
 }
 
-impl HotkeyTrigger {
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            HotkeyTrigger::RightOption => "右 Option",
-            HotkeyTrigger::LeftOption => "左 Option",
-            HotkeyTrigger::RightControl => "右 Control",
-            HotkeyTrigger::LeftControl => "左 Control",
-            HotkeyTrigger::RightCommand => "右 Command",
-            HotkeyTrigger::LeftCommand => "左 Command",
-            HotkeyTrigger::LeftShift => "左 Shift",
-            HotkeyTrigger::RightShift => "右 Shift",
-            HotkeyTrigger::Fn => "Fn (地球键)",
-            HotkeyTrigger::RightAlt => "右 Alt",
-            HotkeyTrigger::MediaPlayPause => "⏯ Media 播放/暂停",
-            HotkeyTrigger::Custom => "自定义组合键",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum HotkeyMode {
@@ -3526,6 +3506,7 @@ pub struct HotkeyKey {
 }
 
 impl HotkeyKey {
+    #[cfg(test)]
     pub fn new(code: impl Into<String>) -> Self {
         Self { code: code.into() }
     }
@@ -3540,6 +3521,7 @@ pub struct HotkeyBinding {
 }
 
 impl HotkeyBinding {
+    #[cfg(test)]
     pub fn effective_codes(&self) -> Vec<String> {
         let Some(keys) = &self.keys else {
             let code = legacy_trigger_code(self.trigger);
@@ -3555,6 +3537,7 @@ impl HotkeyBinding {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn display_label(&self) -> String {
         let codes = self.effective_codes();
         if codes.is_empty() {
@@ -3568,6 +3551,7 @@ impl HotkeyBinding {
     }
 }
 
+#[cfg(test)]
 fn legacy_trigger_code(trigger: HotkeyTrigger) -> &'static str {
     match trigger {
         HotkeyTrigger::RightOption | HotkeyTrigger::RightAlt => "AltRight",
@@ -3587,6 +3571,7 @@ fn legacy_trigger_code(trigger: HotkeyTrigger) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn display_hotkey_code(code: &str) -> String {
     let label = match code {
         "ControlLeft" => "左Ctrl",
@@ -3967,16 +3952,6 @@ pub struct CredentialsStatus {
     // 兼容旧前端字段（逐步迁移中）
     pub volcengine_configured: bool,
     pub ark_configured: bool,
-}
-
-/// Today's metrics shown on the Overview tab.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct TodayMetrics {
-    pub chars_today: u64,
-    pub segments_today: u64,
-    pub avg_latency_ms: u64,
-    pub total_duration_ms: u64,
 }
 
 /// 划词追问浮窗里一条对话消息。多轮提问会累积成 Vec<QaChatMessage>，

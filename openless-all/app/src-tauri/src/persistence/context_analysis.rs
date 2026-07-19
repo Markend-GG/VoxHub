@@ -88,8 +88,7 @@ impl ContextAnalysisStore {
                 && entry.linked_history_id == result.linked_history_id
                 && entry.context_capture_id == result.context_capture_id
         });
-        let current_generation = existing
-            .and_then(|entry| entry.analysis_generation.as_deref());
+        let current_generation = existing.and_then(|entry| entry.analysis_generation.as_deref());
         if current_generation != expected_generation {
             return Ok(false);
         }
@@ -114,8 +113,7 @@ impl ContextAnalysisStore {
                 && entry.linked_history_id == result.linked_history_id
                 && entry.context_capture_id == result.context_capture_id
         });
-        let current_generation = existing
-            .and_then(|entry| entry.analysis_generation.as_deref());
+        let current_generation = existing.and_then(|entry| entry.analysis_generation.as_deref());
         let next_generation = result.analysis_generation.as_deref();
         if generation_is_newer_or_equal(current_generation, next_generation) {
             return Ok(false);
@@ -167,11 +165,7 @@ impl ContextAnalysisStore {
         self.write_locked(&entries)
     }
 
-    pub fn apply_retention(
-        &self,
-        retention_days: u32,
-        max_entries: Option<u32>,
-    ) -> Result<()> {
+    pub fn apply_retention(&self, retention_days: u32, max_entries: Option<u32>) -> Result<()> {
         let _guard = self.lock.lock();
         let mut entries = self.read_locked()?;
         if retention_days > 0 {
@@ -340,7 +334,11 @@ mod tests {
         assert!(!store.upsert_if_generation_newer(older).unwrap());
 
         let current = store
-            .latest_for_context(ContextCaptureHistoryType::Voice, "hist-generation", "ctx-generation")
+            .latest_for_context(
+                ContextCaptureHistoryType::Voice,
+                "hist-generation",
+                "ctx-generation",
+            )
             .unwrap()
             .unwrap();
         assert_eq!(current.analysis_generation.as_deref(), Some("002"));
@@ -358,12 +356,16 @@ mod tests {
         let mut stale = pending_analysis_result(&ctx);
         stale.status = ContextAnalysisStatus::Success;
         stale.analysis_generation = Some("001".into());
-        assert!(!store.upsert_if_generation_current(stale, Some("001")).unwrap());
+        assert!(!store
+            .upsert_if_generation_current(stale, Some("001"))
+            .unwrap());
 
         let mut current = pending_analysis_result(&ctx);
         current.status = ContextAnalysisStatus::Success;
         current.analysis_generation = Some("002".into());
-        assert!(store.upsert_if_generation_current(current, Some("002")).unwrap());
+        assert!(store
+            .upsert_if_generation_current(current, Some("002"))
+            .unwrap());
 
         let stored = store
             .latest_for_context(

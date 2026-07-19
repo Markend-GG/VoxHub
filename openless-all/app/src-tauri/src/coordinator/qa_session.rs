@@ -6,10 +6,13 @@
 //! References parent items via `use super::*;`; `pub(super)` so the parent and
 //! sibling submodules (e.g. `qa`) reach them through `use qa_session::*;`.
 
+#[cfg(target_os = "android")]
+use super::resources::{take_asr_for_session, take_recorder_for_session};
 use super::*;
 
 // ─────────────────────────── QA session lifecycle ───────────────────────────
 
+#[cfg(target_os = "android")]
 pub(super) async fn finalize_dictation_as_qa_question(inner: &Arc<Inner>) -> Result<(), String> {
     log::info!("[coord] QA finalize from overlay: capturing selection before opening panel");
     let selection = capture_selection();
@@ -60,7 +63,10 @@ pub(super) async fn finalize_dictation_as_qa_question(inner: &Arc<Inner>) -> Res
     answer_qa_question_text(inner, raw.text.trim().to_string(), raw.duration_ms).await
 }
 
-pub(super) async fn submit_qa_text_question(inner: &Arc<Inner>, text: String) -> Result<(), String> {
+pub(super) async fn submit_qa_text_question(
+    inner: &Arc<Inner>,
+    text: String,
+) -> Result<(), String> {
     let question = text.trim().to_string();
     if question.is_empty() {
         return Ok(());
@@ -108,6 +114,7 @@ pub(super) async fn submit_qa_text_question(inner: &Arc<Inner>, text: String) ->
     answer_qa_question_text(inner, question, 0).await
 }
 
+#[cfg(target_os = "android")]
 pub(super) async fn take_current_dictation_transcript_for_qa(
     inner: &Arc<Inner>,
 ) -> Result<Option<RawTranscript>, String> {
@@ -186,6 +193,7 @@ pub(super) async fn take_current_dictation_transcript_for_qa(
     Ok(Some(raw))
 }
 
+#[cfg(target_os = "android")]
 pub(super) async fn wait_for_dictation_listening(inner: &Arc<Inner>) -> Result<(), String> {
     const MAX_WAIT_MS: u64 = 3_000;
     const STEP_MS: u64 = 20;
@@ -205,6 +213,7 @@ pub(super) async fn wait_for_dictation_listening(inner: &Arc<Inner>) -> Result<(
     }
 }
 
+#[cfg(target_os = "android")]
 pub(super) async fn transcribe_overlay_dictation_asr(
     _inner: &Arc<Inner>,
     _current_session_id: SessionId,

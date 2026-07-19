@@ -6,7 +6,10 @@ pub fn list_rewrite_history(
     coord: CoordinatorState<'_>,
 ) -> Result<Vec<RewriteHistoryEntry>, String> {
     let mut entries = coord.rewrite_history().list().map_err(|e| e.to_string())?;
-    match (coord.context_capture().list(), coord.context_analysis().list()) {
+    match (
+        coord.context_capture().list(),
+        coord.context_analysis().list(),
+    ) {
         (Ok(mut context_entries), Ok(analysis_entries)) => {
             crate::persistence::enrich_context_entries_with_analysis(
                 &mut context_entries,

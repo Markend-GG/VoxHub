@@ -1,10 +1,16 @@
 use super::*;
 use crate::types::ContextCaptureHistoryType;
+use tokio::io::AsyncReadExt;
+
+const RETRANSCRIBE_PCM_CHUNK_BYTES: usize = 16_000 * 2 * 60 * 5;
 
 #[tauri::command]
 pub fn list_history(coord: CoordinatorState<'_>) -> Result<Vec<DictationSession>, String> {
     let mut sessions = coord.history().list().map_err(|e| e.to_string())?;
-    match (coord.context_capture().list(), coord.context_analysis().list()) {
+    match (
+        coord.context_capture().list(),
+        coord.context_analysis().list(),
+    ) {
         (Ok(mut context_entries), Ok(analysis_entries)) => {
             crate::persistence::enrich_context_entries_with_analysis(
                 &mut context_entries,
@@ -203,20 +209,7 @@ pub async fn retranscribe_recording(
     }
     let path =
         crate::persistence::recording_path_for_session(&session_id).map_err(|e| e.to_string())?;
-    let wav = tokio::fs::read(&path).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            "recording not found".into()
-        } else {
-            format!("read wav failed: {e}")
-        }
-    })?;
-    // 归档 wav 是 16k/mono/16-bit、固定 44 字节标准头（见 asr::wav::encode_wav_16k_mono）。
-    if wav.len() <= 44 {
-        return Err("recording is empty or corrupt".into());
-    }
-    let pcm = wav[44..].to_vec();
-
-    let text = coord.retranscribe_pcm(pcm).await?;
+    let text = retranscribe_archived_wav_in_chunks(&path, coord.inner().as_ref()).await?;
     if text.trim().is_empty() {
         return Err("重新转录仍未识别到语音".into());
     }
@@ -243,4 +236,99 @@ pub async fn retranscribe_recording(
         return Err("history entry not found".into());
     }
     Ok(entry)
+}
+
+async fn retranscribe_archived_wav_in_chunks(
+    path: &std::path::Path,
+    coord: &crate::coordinator::Coordinator,
+) -> Result<String, String> {
+    let mut wav = tokio::fs::File::open(path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "recording not found".into()
+        } else {
+            format!("open wav failed: {error}")
+        }
+    })?;
+    let mut header = [0u8; 44];
+    wav.read_exact(&mut header)
+        .await
+        .map_err(|_| "recording is empty or corrupt".to_string())?;
+    let mut remaining = validate_archived_wav_header(&header)?;
+    let mut transcript = String::new();
+
+    while remaining > 0 {
+        let chunk_len = remaining.min(RETRANSCRIBE_PCM_CHUNK_BYTES as u64) as usize;
+        let mut pcm = vec![0u8; chunk_len];
+        wav.read_exact(&mut pcm)
+            .await
+            .map_err(|error| format!("read wav PCM failed: {error}"))?;
+        remaining -= chunk_len as u64;
+        let text = coord.retranscribe_pcm(pcm).await?;
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !transcript.is_empty() {
+            transcript.push(' ');
+        }
+        transcript.push_str(text);
+    }
+
+    Ok(transcript)
+}
+
+fn validate_archived_wav_header(header: &[u8; 44]) -> Result<u64, String> {
+    if &header[0..4] != b"RIFF"
+        || &header[8..12] != b"WAVE"
+        || &header[12..16] != b"fmt "
+        || &header[36..40] != b"data"
+    {
+        return Err("recording WAV header is invalid".into());
+    }
+    let audio_format = u16::from_le_bytes([header[20], header[21]]);
+    let channels = u16::from_le_bytes([header[22], header[23]]);
+    let sample_rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
+    let bits_per_sample = u16::from_le_bytes([header[34], header[35]]);
+    if audio_format != 1 || channels != 1 || sample_rate != 16_000 || bits_per_sample != 16 {
+        return Err("recording WAV format must be 16kHz mono PCM16".into());
+    }
+    let data_bytes = u32::from_le_bytes([header[40], header[41], header[42], header[43]]) as u64;
+    if data_bytes == 0 || data_bytes % 2 != 0 {
+        return Err("recording is empty or corrupt".into());
+    }
+    Ok(data_bytes)
+}
+
+#[cfg(test)]
+mod retranscribe_wav_tests {
+    use super::validate_archived_wav_header;
+
+    fn header(data_bytes: u32) -> [u8; 44] {
+        let mut header = [0u8; 44];
+        header[0..4].copy_from_slice(b"RIFF");
+        header[4..8].copy_from_slice(&data_bytes.saturating_add(36).to_le_bytes());
+        header[8..12].copy_from_slice(b"WAVE");
+        header[12..16].copy_from_slice(b"fmt ");
+        header[16..20].copy_from_slice(&16u32.to_le_bytes());
+        header[20..22].copy_from_slice(&1u16.to_le_bytes());
+        header[22..24].copy_from_slice(&1u16.to_le_bytes());
+        header[24..28].copy_from_slice(&16_000u32.to_le_bytes());
+        header[28..32].copy_from_slice(&32_000u32.to_le_bytes());
+        header[32..34].copy_from_slice(&2u16.to_le_bytes());
+        header[34..36].copy_from_slice(&16u16.to_le_bytes());
+        header[36..40].copy_from_slice(b"data");
+        header[40..44].copy_from_slice(&data_bytes.to_le_bytes());
+        header
+    }
+
+    #[test]
+    fn validates_archived_pcm_length_without_loading_audio() {
+        assert_eq!(validate_archived_wav_header(&header(64_000)), Ok(64_000));
+    }
+
+    #[test]
+    fn rejects_empty_or_misaligned_archived_pcm() {
+        assert!(validate_archived_wav_header(&header(0)).is_err());
+        assert!(validate_archived_wav_header(&header(3)).is_err());
+    }
 }

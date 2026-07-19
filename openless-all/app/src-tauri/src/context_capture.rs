@@ -7,13 +7,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
-use uuid::Uuid;
 
 use crate::persistence::ContextCaptureStore;
 use crate::types::{
     ContextCaptureEntry, ContextCaptureHistoryType, ContextCaptureSource, ContextCaptureStatus,
 };
 
+#[cfg(not(target_os = "windows"))]
 const ERROR_UNSUPPORTED: &str = "unsupportedPlatform";
 const ERROR_TITLE_FAILED: &str = "windowTitleFailed";
 const ERROR_ACTIVE_WINDOW_SCREENSHOT_FAILED: &str = "activeWindowScreenshotFailed";
@@ -67,10 +67,7 @@ pub(crate) fn current_window_identity() -> Option<WindowIdentity> {
     }
 }
 
-pub(crate) fn remember_recent_primary_capture(
-    history_type: ContextCaptureHistoryType,
-    id: String,
-) {
+pub(crate) fn remember_recent_primary_capture(history_type: ContextCaptureHistoryType, id: String) {
     if !matches!(
         history_type,
         ContextCaptureHistoryType::Voice | ContextCaptureHistoryType::Rewrite
@@ -82,8 +79,12 @@ pub(crate) fn remember_recent_primary_capture(
         id,
         captured_at: Instant::now(),
         history_type,
-        window_title: identity.as_ref().and_then(|value| value.window_title.clone()),
-        context_app: identity.as_ref().and_then(|value| value.context_app.clone()),
+        window_title: identity
+            .as_ref()
+            .and_then(|value| value.window_title.clone()),
+        context_app: identity
+            .as_ref()
+            .and_then(|value| value.context_app.clone()),
         conversation_window: identity.and_then(|value| value.conversation_window),
     };
     let mut captures = recent_primary_captures().lock();
@@ -106,17 +107,6 @@ where
         .iter()
         .position(|capture| matches_identity(capture))?;
     captures.remove(index)
-}
-
-pub fn capture_and_store(
-    store: &ContextCaptureStore,
-    history_type: ContextCaptureHistoryType,
-    history_id: String,
-    retention_days: u32,
-    max_entries: Option<u32>,
-) -> Result<()> {
-    let id = Uuid::new_v4().to_string();
-    capture_and_store_with_id(store, id, history_type, history_id, retention_days, max_entries)
 }
 
 pub fn capture_and_store_with_id(

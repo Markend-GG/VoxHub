@@ -275,8 +275,7 @@ async fn run_streaming_polish(
     // from what the user actually sees\"。
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     #[cfg(target_os = "windows")]
-    let sendinput_options =
-        windows_sendinput_options_from_prefs(&inner.prefs.get());
+    let sendinput_options = windows_sendinput_options_from_prefs(&inner.prefs.get());
     let typer_handle = tokio::task::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
@@ -463,6 +462,7 @@ fn windows_insertion_allows_streaming(_mode: crate::types::WindowsInsertionMode)
     true
 }
 
+#[cfg(not(target_os = "windows"))]
 fn drain_streaming_insert_deltas(
     rx: std::sync::mpsc::Receiver<String>,
     flush_interval: std::time::Duration,
@@ -523,6 +523,7 @@ where
     (typed_text, first_failure)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn flush_streaming_insert_buffer(pending: &mut String, typed_text: &mut String) -> Option<String> {
     flush_streaming_insert_buffer_with(
         pending,
@@ -1098,8 +1099,7 @@ async fn run_less_computer_once(
             // OpenCode 无 `--settings`，护栏走 `permission` 配置经 OPENCODE_CONFIG_CONTENT 注入。
             // build_opencode_guard_config 默认 bash deny 高风险前缀、webfetch deny，审批放行的
             // 前缀显式 allow。fail-closed：序列化失败立即中止，绝不无护栏裸跑。
-            let guard =
-                crate::coding_agent::guard::build_opencode_guard_config(&approved_patterns);
+            let guard = crate::coding_agent::guard::build_opencode_guard_config(&approved_patterns);
             let guard_str = match serde_json::to_string(&guard) {
                 Ok(s) => s,
                 Err(e) => {
@@ -1771,7 +1771,9 @@ pub(super) async fn start_recorder_for_starting(
         // 第一帧 PCM 真的流到 consumer 了（recorder.rs::process_callback 的顺序保证
         // consume_pcm_chunk 先于 level_handler）——关掉预备态，让这一帧起 payload.warming
         // 翻 false，前端把「待命」光条点亮成正式录音态。之后每帧都是 false（幂等）。
-        inner_for_level.capsule_warming.store(false, Ordering::SeqCst);
+        inner_for_level
+            .capsule_warming
+            .store(false, Ordering::SeqCst);
         emit_capsule(
             &inner_for_level,
             CapsuleState::Recording,
@@ -2817,11 +2819,11 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                                 .insert_via_unicode_keystrokes(&polished, sendinput_options)
                         }
                     }
-                    crate::types::WindowsInsertionMode::Paste => inner.inserter.insert(
-                        &polished,
-                        restore_clipboard,
-                        paste_shortcut,
-                    ),
+                    crate::types::WindowsInsertionMode::Paste => {
+                        inner
+                            .inserter
+                            .insert(&polished, restore_clipboard, paste_shortcut)
+                    }
                     crate::types::WindowsInsertionMode::Tsf => {
                         let ime_target = capture_ime_submit_target();
                         insert_with_windows_ime_first(

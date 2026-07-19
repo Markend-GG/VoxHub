@@ -45,6 +45,8 @@ export type UpdateStatus =
 export type CheckUpdateOptions = {
   /** Android only: skip confirmation dialog and download + open system installer. */
   autoInstallAndroid?: boolean;
+  /** Background checks keep network outages non-fatal and out of the persisted error log. */
+  background?: boolean;
 };
 
 export interface UseAutoUpdate {
@@ -193,8 +195,13 @@ export function useAutoUpdate(): UseAutoUpdate {
       setVersion(next.version);
       setStatus('available');
     } catch (error) {
-      console.error('[updater] failed to check update', error);
       const msg = error instanceof Error ? error.message : String(error);
+      if (options?.background) {
+        console.warn('[updater] background check unavailable', error);
+        setStatus('idle');
+        return;
+      }
+      console.error('[updater] failed to check update', error);
       void logClientError(`[updater] check failed: ${msg}`);
       setErrorMessage(msg);
       setStatus('error');

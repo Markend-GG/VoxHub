@@ -18,7 +18,6 @@ use crate::types::{
     builtin_style_pack_for_mode, builtin_style_pack_id, builtin_style_packs,
     default_active_style_pack_id, CustomStylePrompts, PolishMode, StylePack, StylePackExample,
     StylePackKind, StylePackScope, UserPreferences, BUILTIN_STYLE_PACK_LIGHT_ID,
-    BUILTIN_STYLE_PACK_REWRITE_ID,
 };
 
 const STYLE_PACKS_FILE: &str = "style-packs.json";
@@ -134,13 +133,6 @@ impl StylePackStore {
             pack.active = pack.id == active_style_pack_id;
         }
         Ok(packs)
-    }
-
-    /// 列出指定 scope 的风格包。
-    /// Voice 返回 scope == Voice 的包，Rewrite 返回 scope == Rewrite 的包。
-    pub fn list_by_scope(&self, scope: StylePackScope) -> Result<Vec<StylePack>> {
-        let all = self.list()?;
-        Ok(all.into_iter().filter(|p| p.scope == scope).collect())
     }
 
     /// 设置指定包的 scope。

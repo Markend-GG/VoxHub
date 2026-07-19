@@ -138,8 +138,7 @@ pub fn set_screenshot_app_aggregation_enabled(
 pub fn get_screenshot_aggregation_status(
     coord: CoordinatorState<'_>,
 ) -> Result<ScreenshotAggregationStatus, String> {
-    let status = crate::screenshot_aggregation::get_aggregation_status(
-        &coord.inner.screenshot_aggregation,
-    );
+    let status =
+        crate::screenshot_aggregation::get_aggregation_status(&coord.inner.screenshot_aggregation);
     Ok(status)
 }

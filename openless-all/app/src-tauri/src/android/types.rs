@@ -103,6 +103,7 @@ pub fn normalize_android_overlay_size_dp(size_dp: u32) -> u32 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(target_os = "android", test))]
 pub enum AndroidOverlaySettingsAction {
     None,
     RefreshLayout,
@@ -112,6 +113,7 @@ pub enum AndroidOverlaySettingsAction {
     },
 }
 
+#[cfg(any(target_os = "android", test))]
 pub fn classify_android_overlay_settings_change(
     previous: &super::UserPreferences,
     next: &super::UserPreferences,

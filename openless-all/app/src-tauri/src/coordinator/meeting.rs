@@ -108,6 +108,7 @@ pub(super) struct MeetingSession {
 }
 
 impl MeetingSession {
+    #[cfg(test)]
     pub(super) fn new(
         meeting_id: String,
         started_at: DateTime<Utc>,

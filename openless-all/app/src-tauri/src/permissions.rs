@@ -17,6 +17,7 @@ pub enum PermissionStatus {
     Granted,
     Denied,
     NotDetermined,
+    #[cfg(target_os = "macos")]
     Restricted,
     /// 当前平台不需要这个权限（如 Windows 上的 Accessibility）。
     NotApplicable,

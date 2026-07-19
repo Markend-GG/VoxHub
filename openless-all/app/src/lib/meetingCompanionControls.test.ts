@@ -13,6 +13,7 @@ import {
   meetingCompanionControlActions,
   meetingCompanionMenuActions,
   nextMeetingCompanionDialogFocusIndex,
+  shouldStartMeetingCompanionDrag,
   type MeetingCompanionCommandCallbacks,
   type MeetingCompanionCommandDependencies,
   type MeetingCompanionScheduler,
@@ -148,6 +149,26 @@ assert.deepEqual(visibilityChanges, [true, false]);
 assert.deepEqual(
   clampMeetingCompanionMenuPosition(330, 310, 160, 140, 350, 324),
   { x: 190, y: 184 },
+);
+assert.equal(
+  shouldStartMeetingCompanionDrag(10, 10, 20, 20, false),
+  false,
+  'drag requires the primary button to remain pressed',
+);
+assert.equal(
+  shouldStartMeetingCompanionDrag(10, 10, 12, 12, true),
+  false,
+  'movement below the threshold remains a click',
+);
+assert.equal(
+  shouldStartMeetingCompanionDrag(10, 10, 13, 10, true),
+  true,
+  'movement at the threshold starts dragging',
+);
+assert.equal(
+  shouldStartMeetingCompanionDrag(10, 10, 10, 10, true),
+  false,
+  'a stationary click must not start dragging',
 );
 assert.equal(nextMeetingCompanionDialogFocusIndex(1, 2, false), 0);
 assert.equal(nextMeetingCompanionDialogFocusIndex(0, 2, true), 1);

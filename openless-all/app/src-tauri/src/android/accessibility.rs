@@ -42,6 +42,7 @@ pub fn request_android_accessibility_permission() -> AndroidAccessibilityPermiss
     }
 }
 
+#[cfg(target_os = "android")]
 pub fn paste_via_accessibility() -> bool {
     #[cfg(target_os = "android")]
     {

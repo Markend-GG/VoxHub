@@ -64,6 +64,13 @@ mod recorder;
 #[cfg(not(mobile))]
 mod remote_server;
 #[cfg(not(mobile))]
+mod report_scheduler;
+#[cfg(not(mobile))]
+mod screenshot_aggregation;
+#[cfg(not(mobile))]
+mod screenshot_record;
+mod screenshot_whitelist;
+#[cfg(not(mobile))]
 #[path = "selection.rs"]
 mod selection;
 #[cfg(mobile)]
@@ -71,21 +78,14 @@ mod selection;
 mod selection;
 #[cfg(not(mobile))]
 mod shortcut_binding;
+#[cfg(mobile)]
+#[path = "mobile_stubs/shortcut_binding.rs"]
+mod shortcut_binding;
 #[cfg(not(mobile))]
 mod side_aware_combo;
 #[cfg(mobile)]
 #[path = "mobile_stubs/side_aware_combo.rs"]
 mod side_aware_combo;
-#[cfg(mobile)]
-#[path = "mobile_stubs/shortcut_binding.rs"]
-mod shortcut_binding;
-#[cfg(not(mobile))]
-mod screenshot_aggregation;
-#[cfg(not(mobile))]
-mod screenshot_record;
-mod screenshot_whitelist;
-#[cfg(not(mobile))]
-mod report_scheduler;
 mod types;
 #[cfg(not(mobile))]
 mod unicode_keystroke;
@@ -116,6 +116,7 @@ static QA_WINDOW_POSITIONED: AtomicBool = AtomicBool::new(false);
 /// 聊天面板退场动画的世代计数：hide 先发 `chat-panel:closing` 让前端播 220ms
 /// 退场动画、240ms 后才真正 hide；期间再次 show 会推进世代，作废挂起的 hide。
 static QA_PANEL_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(target_os = "macos")]
 static LESS_COMPUTER_PANEL_EPOCH: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(not(mobile))]
@@ -1236,8 +1237,7 @@ fn apply_windows_caption_theme<R: Runtime>(window: &tauri::WebviewWindow<R>, dar
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
-        DWMWA_USE_IMMERSIVE_DARK_MODE,
+        DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
     };
 
     let handle = match window.window_handle().map(|h| h.as_raw()) {
@@ -2279,7 +2279,10 @@ fn make_chat_window_panel_macos<R: tauri::Runtime>(window: &tauri::WebviewWindow
 /// 解法是把 NSWindow 的 `movableByWindowBackground` 打开——这条路径不依赖窗口是否成为
 /// key window，跟 Spotlight / Raycast 的浮窗是同一手法。设一次就够，整个生命周期保持。
 #[cfg(target_os = "macos")]
-fn make_chat_window_draggable_macos<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, tag: &str) {
+fn make_chat_window_draggable_macos<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    tag: &str,
+) {
     use objc2::msg_send;
     use objc2::runtime::{AnyObject, Bool};
     let Ok(handle) = window.ns_window() else {
@@ -2320,19 +2323,20 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
     if let Some(w) = app.get_webview_window("qa") {
         return Some(w);
     }
-    let built = WebviewWindowBuilder::new(app, "qa", WebviewUrl::App("index.html?window=qa".into()))
-        .title("OpenLess QA")
-        .inner_size(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT)
-        .decorations(false)
-        .transparent(true)
-        .shadow(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .focused(false)
-        .visible(false)
-        .accept_first_mouse(true)
-        .build();
+    let built =
+        WebviewWindowBuilder::new(app, "qa", WebviewUrl::App("index.html?window=qa".into()))
+            .title("OpenLess QA")
+            .inner_size(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT)
+            .decorations(false)
+            .transparent(true)
+            .shadow(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .focused(false)
+            .visible(false)
+            .accept_first_mouse(true)
+            .build();
     match built {
         Ok(w) => {
             // ⚠️ NSWindow 操作必须在主线程（macOS 26 硬约束）。ensure_qa_window 常从
@@ -2627,7 +2631,7 @@ pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
     });
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), test))]
 pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(_app: &AppHandle<R>) {}
 
 /// 隐藏全屏彩虹描边浮层。

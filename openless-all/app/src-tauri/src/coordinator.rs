@@ -39,6 +39,7 @@ use crate::coordinator_state::{
     publish_abort_idle_after_restore, start_processing_if_listening, startup_race_status,
     BeginOutcome, SessionId, SessionPhase, SessionState, StartupRaceStatus,
 };
+#[cfg(target_os = "android")]
 use crate::correction::apply_correction_rules;
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::insertion::TextInserter;
@@ -104,44 +105,34 @@ pub(super) fn qa_event_target() -> &'static str {
     }
 }
 
+#[cfg(any(target_os = "android", target_os = "macos", test))]
+use dictation::begin_session_as;
 #[cfg(test)]
 use dictation::dictation_error_code;
 use dictation::{
-    begin_session, begin_session_as, cancel_session, end_session, handle_pressed_edge,
-    handle_released_edge, request_stop_during_starting,
+    begin_session, cancel_session, end_session, handle_pressed_edge, handle_released_edge,
+    request_stop_during_starting,
 };
 #[cfg(any(debug_assertions, test))]
 use dictation::{handle_pressed, handle_released};
+#[cfg(target_os = "android")]
+use qa::open_qa_panel;
 use qa::{
-    close_qa_panel, handle_qa_hotkey_pressed, handle_qa_option_edge, open_qa_panel, QaPhase,
-    QaSessionState,
+    close_qa_panel, handle_qa_hotkey_pressed, handle_qa_option_edge, QaPhase, QaSessionState,
 };
 #[cfg(test)]
 use resources::discard_startup_resources_for_session;
 use resources::{
     acquire_recording_mute, cancel_active_asr, release_recording_mute,
     selected_microphone_device_name, stop_microphone_preview_monitor, stop_qa_recorder,
-    take_asr_for_session, take_recorder_for_session, SessionResource, SharedRecordingMuteState,
+    SessionResource, SharedRecordingMuteState,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CapsuleShowStrategy {
-    NoActivate,
-    FallbackShow,
-}
-
-fn capsule_show_strategy_for_platform() -> CapsuleShowStrategy {
+fn capsule_show_without_activation() -> bool {
     // ⚠️ 如果改下面的 cfg 列表，**必须**同步更新单元测试
     // `capsule_show_strategy_matches_platform_activation_contract` 的两组 cfg —
     // 否则 Linux CI 直接红（PR #451 即是这种漏改）。
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        CapsuleShowStrategy::NoActivate
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        CapsuleShowStrategy::FallbackShow
-    }
+    cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
 static CAPSULE_NO_ACTIVATE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
@@ -170,7 +161,7 @@ fn show_capsule_window_for_recording<R: tauri::Runtime>(
     window: &tauri::WebviewWindow<R>,
 ) {
     let mut needs_fallback = true;
-    if capsule_show_strategy_for_platform() == CapsuleShowStrategy::NoActivate {
+    if capsule_show_without_activation() {
         needs_fallback = !show_capsule_window_no_activate(app, window);
         if needs_fallback && !CAPSULE_NO_ACTIVATE_FALLBACK_WARNED.swap(true, Ordering::SeqCst) {
             // 产品取舍：no-activate 是 macOS/AeroSpace 的主路径；但如果 ns_window
@@ -410,6 +401,7 @@ struct PreparedWindowsImeSessionSlot {
 }
 
 impl Coordinator {
+    #[cfg(any(not(target_os = "windows"), test))]
     pub fn new() -> Self {
         #[cfg(target_os = "windows")]
         {
@@ -568,6 +560,7 @@ impl Coordinator {
     /// sherpa-onnx runtime 这里创建默认 offline batch 实例；入产后（lib.rs）请走
     /// `new_with_local_runtimes`，确保 Tauri State 共享同一个 Arc。
     #[cfg(target_os = "windows")]
+    #[cfg(test)]
     pub fn new_with_foundry_runtime(foundry_local_runtime: Arc<FoundryLocalRuntime>) -> Self {
         Self::new_with_local_runtimes(foundry_local_runtime, Arc::new(SherpaOnnxRuntime::new()))
     }
@@ -786,99 +779,91 @@ impl Coordinator {
         }
     }
 
+    #[cfg(target_os = "android")]
     pub fn android_insert_strategy(&self) -> crate::types::AndroidInsertStrategy {
         self.inner.prefs.get().android_insert_strategy
     }
 
+    #[cfg(target_os = "android")]
     pub fn android_overlay_trigger(&self) -> crate::types::AndroidOverlayTrigger {
         self.inner.prefs.get().android_overlay_trigger.normalized()
     }
 
+    #[cfg(target_os = "android")]
     pub fn apply_android_overlay_settings_change(
         &self,
         previous: &crate::types::UserPreferences,
         next: &crate::types::UserPreferences,
     ) {
-        #[cfg(target_os = "android")]
-        {
-            use crate::types::android_types::{
-                classify_android_overlay_settings_change, AndroidOverlaySettingsAction,
-            };
-            match classify_android_overlay_settings_change(previous, next) {
-                AndroidOverlaySettingsAction::None => {}
-                AndroidOverlaySettingsAction::RefreshLayout => {
-                    self.refresh_android_overlay_layout();
-                }
-                AndroidOverlaySettingsAction::Transition { from, to } => {
-                    self.transition_android_overlay_trigger(from, to);
-                }
+        use crate::types::android_types::{
+            classify_android_overlay_settings_change, AndroidOverlaySettingsAction,
+        };
+        match classify_android_overlay_settings_change(previous, next) {
+            AndroidOverlaySettingsAction::None => {}
+            AndroidOverlaySettingsAction::RefreshLayout => {
+                self.refresh_android_overlay_layout();
+            }
+            AndroidOverlaySettingsAction::Transition { from, to } => {
+                self.transition_android_overlay_trigger(from, to);
             }
         }
-        let _ = (previous, next);
     }
 
+    #[cfg(target_os = "android")]
     pub fn transition_android_overlay_trigger(
         &self,
         from: crate::types::AndroidOverlayTrigger,
         to: crate::types::AndroidOverlayTrigger,
     ) {
-        #[cfg(target_os = "android")]
-        {
-            use crate::types::AndroidOverlayTrigger;
-            fn overlay_trigger_log_name(trigger: AndroidOverlayTrigger) -> &'static str {
-                match trigger.normalized() {
-                    AndroidOverlayTrigger::Background => "background",
-                    AndroidOverlayTrigger::Keyboard => "keyboard",
-                    AndroidOverlayTrigger::Always => "always",
-                }
-            }
-            if from == to {
-                return;
-            }
-            log::info!(
-                "[coord] overlay transition from={} to={}",
-                overlay_trigger_log_name(from),
-                overlay_trigger_log_name(to),
-            );
-            match (from, to) {
-                (
-                    AndroidOverlayTrigger::Background | AndroidOverlayTrigger::Keyboard,
-                    AndroidOverlayTrigger::Always,
-                ) => {
-                    let _ = crate::android::replace_android_overlay();
-                }
-                (
-                    AndroidOverlayTrigger::Always,
-                    AndroidOverlayTrigger::Background | AndroidOverlayTrigger::Keyboard,
-                ) => {
-                    let _ = crate::android::hide_android_overlay();
-                }
-                _ => {}
+        use crate::types::AndroidOverlayTrigger;
+        fn overlay_trigger_log_name(trigger: AndroidOverlayTrigger) -> &'static str {
+            match trigger.normalized() {
+                AndroidOverlayTrigger::Background => "background",
+                AndroidOverlayTrigger::Keyboard => "keyboard",
+                AndroidOverlayTrigger::Always => "always",
             }
         }
-        let _ = (from, to);
+        if from == to {
+            return;
+        }
+        log::info!(
+            "[coord] overlay transition from={} to={}",
+            overlay_trigger_log_name(from),
+            overlay_trigger_log_name(to),
+        );
+        match (from, to) {
+            (
+                AndroidOverlayTrigger::Background | AndroidOverlayTrigger::Keyboard,
+                AndroidOverlayTrigger::Always,
+            ) => {
+                let _ = crate::android::replace_android_overlay();
+            }
+            (
+                AndroidOverlayTrigger::Always,
+                AndroidOverlayTrigger::Background | AndroidOverlayTrigger::Keyboard,
+            ) => {
+                let _ = crate::android::hide_android_overlay();
+            }
+            _ => {}
+        }
     }
 
+    #[cfg(target_os = "android")]
     pub fn apply_android_overlay_on_startup(&self) {
-        #[cfg(target_os = "android")]
-        {
-            use crate::types::AndroidOverlayTrigger;
-            match self.android_overlay_trigger() {
-                AndroidOverlayTrigger::Always => {
-                    let _ = crate::android::replace_android_overlay();
-                }
-                AndroidOverlayTrigger::Background | AndroidOverlayTrigger::Keyboard => {
-                    let _ = crate::android::hide_android_overlay();
-                }
+        use crate::types::AndroidOverlayTrigger;
+        match self.android_overlay_trigger() {
+            AndroidOverlayTrigger::Always => {
+                let _ = crate::android::replace_android_overlay();
+            }
+            AndroidOverlayTrigger::Background | AndroidOverlayTrigger::Keyboard => {
+                let _ = crate::android::hide_android_overlay();
             }
         }
     }
 
+    #[cfg(target_os = "android")]
     pub fn refresh_android_overlay_layout(&self) {
-        #[cfg(target_os = "android")]
-        {
-            let _ = crate::android::refresh_android_overlay_layout();
-        }
+        let _ = crate::android::refresh_android_overlay_layout();
     }
 
     /// 让所有 hotkey supervisor loop（dictation / qa / combo / translation /
@@ -1215,10 +1200,6 @@ impl Coordinator {
 
     pub fn stop_rewrite_hotkey_listener(&self) {
         take_action_hotkey_on_main_thread(&self.inner, ActionHotkeyKind::Rewrite);
-    }
-
-    pub fn stop_screenshot_record_hotkey_listener(&self) {
-        take_action_hotkey_on_main_thread(&self.inner, ActionHotkeyKind::ScreenshotRecord);
     }
 
     pub fn cancel_active_screenshot_record_without_analysis(&self, reason: &str) {
@@ -1564,6 +1545,7 @@ impl Coordinator {
         .await
     }
 
+    #[cfg(target_os = "android")]
     pub async fn start_dictation_with_translation(&self) -> Result<(), String> {
         begin_session(&self.inner).await?;
         self.inner
@@ -1581,6 +1563,7 @@ impl Coordinator {
         end_session(&self.inner).await
     }
 
+    #[cfg(target_os = "android")]
     pub async fn stop_dictation_with_translation(&self, translation: bool) -> Result<(), String> {
         if translation {
             mark_translation_modifier_seen(&self.inner);
@@ -1741,16 +1724,19 @@ impl Coordinator {
         });
     }
 
+    #[cfg(target_os = "android")]
     pub fn switch_to_previous_style_pack(&self) {
         switch_to_previous_style(&self.inner);
     }
 
+    #[cfg(target_os = "android")]
     pub async fn open_qa_from_overlay(&self) -> Result<(), String> {
         log::info!("[coord] overlay QA open requested");
         open_qa_panel(&self.inner);
         begin_qa_session(&self.inner).await
     }
 
+    #[cfg(target_os = "android")]
     pub async fn finalize_qa_from_overlay(&self) -> Result<(), String> {
         log::info!("[coord] overlay QA finalize requested");
         finalize_dictation_as_qa_question(&self.inner).await
@@ -2501,7 +2487,7 @@ fn resolve_ark_endpoint_with_policy(
 #[cfg(test)]
 mod tests {
     use super::dictation::abort_recording_with_error;
-    use super::dictation::{handle_pressed_edge, handle_released_edge};
+    use super::dictation::handle_pressed_edge;
     use super::*;
     use crate::types::{HotkeyMode, HotkeyTrigger};
     use once_cell::sync::Lazy;
@@ -3148,20 +3134,14 @@ mod tests {
 
     #[test]
     fn capsule_show_strategy_matches_platform_activation_contract() {
-        // 平台列表必须与 capsule_show_strategy_for_platform 的 cfg 完全一致：
+        // 平台列表必须与 capsule_show_without_activation 的 cfg 完全一致：
         // 改实现里的 #[cfg] 时，一并改这两个 #[cfg]，否则 Linux CI 直接红
         // （fcitx5 PR #451 把 Linux 加进 NoActivate 但漏改本测试，CI 失败）。
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        assert_eq!(
-            capsule_show_strategy_for_platform(),
-            CapsuleShowStrategy::NoActivate
-        );
+        assert!(capsule_show_without_activation());
 
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        assert_eq!(
-            capsule_show_strategy_for_platform(),
-            CapsuleShowStrategy::FallbackShow
-        );
+        assert!(!capsule_show_without_activation());
     }
 
     #[test]
@@ -3461,6 +3441,7 @@ fn foundry_audio_transcribe_timeout_duration() -> std::time::Duration {
 /// （RTF ≈ 0.3–0.5）上必然超时把整段内容丢掉。改用 max(15, ceil(audio_s
 /// × 0.6) + 10)：基础保留 15s 兜住短录音；长录音按音频长度的 0.6 倍 +
 /// 10s 余量，覆盖 RTF ≤ 0.5 的机器。
+#[cfg(any(target_os = "macos", test))]
 fn local_qwen_transcribe_timeout(audio_secs: f64) -> std::time::Duration {
     let secs = ((audio_secs * 0.6).ceil() as u64)
         .saturating_add(10)

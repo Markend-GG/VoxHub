@@ -4,22 +4,13 @@
 //
 // Ported verbatim from design_handoff_openless/variants.jsx::FloatingShell.
 
-import { useEffect, useMemo, useState, type ComponentType, type CSSProperties } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState, type ComponentType, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from './Icon';
 import { Tooltip } from './Tooltip';
 import { WindowChrome, detectOS, type OS } from './WindowChrome';
 import { AudioCueListener } from "./AudioCue";
 import { SettingsModal } from './SettingsModal';
-import { Overview } from '../pages/Overview';
-import { History } from '../pages/History';
-import { Reports } from '../pages/Reports';
-import { Meetings } from '../pages/Meetings';
-import { Vocab } from '../pages/Vocab';
-import { Style } from '../pages/Style';
-import { Marketplace } from '../pages/Marketplace';
-import { Translation } from '../pages/Translation';
-import { SelectionAsk } from '../pages/SelectionAsk';
 // 风格市场（Marketplace）现在是侧栏「风格」展开组下的独立页面（不再是 Style 页面内 modal）。
 // LocalAsr 不再作为主 nav tab——本地 ASR 模型管理已合并到 Settings → Advanced 中
 // 通过 <LocalAsr embedded /> 渲染。这里之前的 import 与 NAV_BASE 条目都已移除。
@@ -53,6 +44,16 @@ import { type SettingsSectionId } from './SettingsModal';
 import { MobileMoreSheet } from './MobileMoreSheet';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import { useAppState, type AppTab } from '../state/useAppState';
+
+const Overview = lazy(() => import('../pages/Overview').then(module => ({ default: module.Overview })));
+const History = lazy(() => import('../pages/History').then(module => ({ default: module.History })));
+const Reports = lazy(() => import('../pages/Reports').then(module => ({ default: module.Reports })));
+const Meetings = lazy(() => import('../pages/Meetings').then(module => ({ default: module.Meetings })));
+const Vocab = lazy(() => import('../pages/Vocab').then(module => ({ default: module.Vocab })));
+const Style = lazy(() => import('../pages/Style').then(module => ({ default: module.Style })));
+const Marketplace = lazy(() => import('../pages/Marketplace').then(module => ({ default: module.Marketplace })));
+const Translation = lazy(() => import('../pages/Translation').then(module => ({ default: module.Translation })));
+const SelectionAsk = lazy(() => import('../pages/SelectionAsk').then(module => ({ default: module.SelectionAsk })));
 
 const MORE_TAB_IDS: AppTab[] = ['meetings', 'vocab', 'translation', 'selectionAsk'];
 
@@ -569,18 +570,20 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
                 flexDirection: 'column',
               }}
             >
-              {displayTab === 'overview' ? (
-                <Overview onOpenHistory={() => setCurrentTab('history')} />
-              ) : displayTab === 'meetings' ? (
-                <Meetings
-                  requestedMeetingId={requestedMeetingId}
-                  onRequestedMeetingHandled={meetingId => {
-                    setRequestedMeetingId(current => current === meetingId ? null : current);
-                  }}
-                />
-              ) : (
-                <Page />
-              )}
+              <Suspense fallback={<div style={{ flex: 1 }} />}>
+                {displayTab === 'overview' ? (
+                  <Overview onOpenHistory={() => setCurrentTab('history')} />
+                ) : displayTab === 'meetings' ? (
+                  <Meetings
+                    requestedMeetingId={requestedMeetingId}
+                    onRequestedMeetingHandled={meetingId => {
+                      setRequestedMeetingId(current => current === meetingId ? null : current);
+                    }}
+                  />
+                ) : (
+                  <Page />
+                )}
+              </Suspense>
             </div>
           </main>
         </div>

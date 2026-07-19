@@ -56,13 +56,12 @@ pub(crate) use crate::recorder::{AudioConsumer, Recorder};
 #[cfg(not(mobile))]
 pub(crate) use crate::types::WindowsImeStatus;
 pub(crate) use crate::types::{
-    builtin_style_pack_id, default_active_style_pack_id, ActivityDay,
-    AndroidAccessibilityStatus,
+    builtin_style_pack_id, default_active_style_pack_id, ActivityDay, AndroidAccessibilityStatus,
     AndroidOverlayStatus, ChineseScriptPreference, ComboBinding, CorrectionRule, CredentialsStatus,
-    DictationSession, DictionaryEntry, HotkeyCapability, HotkeyStatus, OutputLanguagePreference,
-    MeetingRecord, MeetingRecordingSnapshot, PolishMode, RewriteHistoryEntry, ShortcutBinding,
-    StylePack, StylePackKind, StylePackRuntimeDiagnostics, StyleSystemPrompts, UpdateChannel,
-    UserPreferences, VocabPresetStore,
+    DictationSession, DictionaryEntry, HotkeyCapability, HotkeyStatus, MeetingRecord,
+    MeetingRecordingSnapshot, OutputLanguagePreference, PolishMode, RewriteHistoryEntry,
+    ShortcutBinding, StylePack, StylePackKind, StylePackRuntimeDiagnostics, StyleSystemPrompts,
+    UpdateChannel, UserPreferences, VocabPresetStore,
 };
 
 mod credentials;
@@ -81,9 +80,9 @@ mod misc;
 mod permissions_cmds;
 mod providers;
 mod qa;
-mod report;
 #[cfg(not(mobile))]
 mod remote_input;
+mod report;
 mod rewrite;
 mod settings;
 #[cfg(not(mobile))]
@@ -107,9 +106,9 @@ pub use misc::*;
 pub use permissions_cmds::*;
 pub use providers::*;
 pub use qa::*;
-pub use report::*;
 #[cfg(not(mobile))]
 pub use remote_input::*;
+pub use report::*;
 pub use rewrite::*;
 pub use settings::*;
 // sherpa_onnx_asr_* 命令整组 `#[cfg(target_os = "windows")]`（见 lib.rs 的

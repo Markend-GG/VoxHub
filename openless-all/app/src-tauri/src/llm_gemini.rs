@@ -156,11 +156,7 @@ impl GeminiProvider {
 
     /// 文本重写：接收用户选中的文本，按风格 prompt 生成重写结果。
     /// 复用 build_generate_body + send_unary 通路，与 polish/translate 共享。
-    pub async fn rewrite(
-        &self,
-        source_text: &str,
-        style_prompt: &str,
-    ) -> Result<String, LLMError> {
+    pub async fn rewrite(&self, source_text: &str, style_prompt: &str) -> Result<String, LLMError> {
         let system_prompt = crate::polish::compose_rewrite_system_prompt(style_prompt);
         let user_prompt = crate::polish::compose_rewrite_user_prompt(source_text);
         let contents = vec![user_content(&user_prompt)];

@@ -40,12 +40,14 @@ impl ScreenshotAggregationStore {
     }
 
     /// Read all pending buckets.
+    #[cfg(test)]
     pub fn list(&self) -> Result<Vec<ScreenshotAggregationBucket>> {
         let _guard = self.lock.lock();
         self.read_locked()
     }
 
     /// Replace the entire bucket list (used after mutations).
+    #[cfg(test)]
     pub fn save_all(&self, buckets: &[ScreenshotAggregationBucket]) -> Result<()> {
         let _guard = self.lock.lock();
         self.write_locked(buckets)
@@ -73,13 +75,16 @@ impl ScreenshotAggregationStore {
 
     /// Find a collecting bucket for the given process name that can still accept screenshots.
     /// Returns None if no such bucket exists.
-    pub fn find_collecting_bucket(&self, process_name: &str) -> Result<Option<ScreenshotAggregationBucket>> {
+    #[cfg(test)]
+    pub fn find_collecting_bucket(
+        &self,
+        process_name: &str,
+    ) -> Result<Option<ScreenshotAggregationBucket>> {
         let _guard = self.lock.lock();
         let buckets = self.read_locked()?;
         let lower = process_name.to_lowercase();
         Ok(buckets.into_iter().find(|b| {
-            b.status == ScreenshotAggregationBucketStatus::Collecting
-                && b.process_name == lower
+            b.status == ScreenshotAggregationBucketStatus::Collecting && b.process_name == lower
         }))
     }
 
@@ -124,8 +129,8 @@ impl ScreenshotAggregationStore {
     }
 
     fn write_locked(&self, buckets: &[ScreenshotAggregationBucket]) -> Result<()> {
-        let json =
-            serde_json::to_vec_pretty(buckets).context("encode screenshot aggregation buffer failed")?;
+        let json = serde_json::to_vec_pretty(buckets)
+            .context("encode screenshot aggregation buffer failed")?;
         atomic_write(&self.path, &json)
     }
 

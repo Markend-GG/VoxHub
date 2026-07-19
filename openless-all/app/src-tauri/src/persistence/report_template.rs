@@ -85,7 +85,8 @@ impl ReportTemplateStore {
     }
 
     fn write_locked(&self, templates: &[ReportTemplate]) -> Result<()> {
-        let json = serde_json::to_vec_pretty(templates).context("encode report templates failed")?;
+        let json =
+            serde_json::to_vec_pretty(templates).context("encode report templates failed")?;
         atomic_write(&self.path, &json)
     }
 }

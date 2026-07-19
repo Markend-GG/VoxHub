@@ -8,7 +8,6 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::context_capture::WindowIdentity;
 use crate::coordinator::Inner;
 use crate::persistence::ScreenshotAggregationStore;
 use crate::types::{
@@ -29,10 +28,7 @@ pub const MAX_LIFETIME_SECS: i64 = 600;
 ///
 /// 条件：桶状态为 collecting，且当前截图距 lastCapturedAt < 5 分钟，
 /// 且距 firstCapturedAt < 10 分钟，且桶内截图数 < 5。
-pub fn can_continue_bucket(
-    bucket: &ScreenshotAggregationBucket,
-    now: DateTime<Utc>,
-) -> bool {
+pub fn can_continue_bucket(bucket: &ScreenshotAggregationBucket, now: DateTime<Utc>) -> bool {
     if bucket.status != ScreenshotAggregationBucketStatus::Collecting {
         return false;
     }
@@ -58,10 +54,7 @@ pub fn can_continue_bucket(
 /// - 桶内截图数 >= 5
 /// - 当前时间距 lastCapturedAt >= 5 分钟
 /// - 当前时间距 firstCapturedAt >= 10 分钟
-pub fn should_finalize_bucket(
-    bucket: &ScreenshotAggregationBucket,
-    now: DateTime<Utc>,
-) -> bool {
+pub fn should_finalize_bucket(bucket: &ScreenshotAggregationBucket, now: DateTime<Utc>) -> bool {
     if bucket.status != ScreenshotAggregationBucketStatus::Collecting {
         return false;
     }
@@ -110,8 +103,7 @@ pub fn append_screenshot(
 
     // 查找同应用的可续桶
     let existing_pos = buckets.iter().position(|b| {
-        b.status == ScreenshotAggregationBucketStatus::Collecting
-            && b.process_name == lower
+        b.status == ScreenshotAggregationBucketStatus::Collecting && b.process_name == lower
     });
 
     let bucket_idx = if let Some(pos) = existing_pos {
@@ -172,10 +164,7 @@ pub fn append_screenshot(
 /// Finalize 一个聚合桶：将其转换为正式 ScreenshotRecord 并提交分析。
 ///
 /// 返回创建的 ScreenshotRecord ID，如果 finalize 失败则返回 None。
-pub fn finalize_bucket(
-    inner: &Arc<Inner>,
-    bucket: &ScreenshotAggregationBucket,
-) -> Option<String> {
+pub fn finalize_bucket(inner: &Arc<Inner>, bucket: &ScreenshotAggregationBucket) -> Option<String> {
     let store = &inner.screenshot_aggregation;
 
     // 标记为 Finalizing（幂等：如果已是 finalizing/failed 则跳过）
@@ -193,10 +182,8 @@ pub fn finalize_bucket(
     // 从桶内截图中选择提交图片
     let prefs = inner.prefs.get();
     let max_images = prefs.screenshot_record_max_images_per_analysis.clamp(1, 5) as usize;
-    let submitted_ids = crate::screenshot_record::select_screenshot_ids(
-        &bucket.screenshot_ids,
-        max_images,
-    );
+    let submitted_ids =
+        crate::screenshot_record::select_screenshot_ids(&bucket.screenshot_ids, max_images);
 
     let now = chrono::Utc::now().to_rfc3339();
     let record = ScreenshotRecord {
@@ -340,7 +327,12 @@ pub fn get_aggregation_status(store: &ScreenshotAggregationStore) -> ScreenshotA
 mod tests {
     use super::*;
 
-    fn make_bucket(process: &str, count: usize, first_offset: i64, last_offset: i64) -> ScreenshotAggregationBucket {
+    fn make_bucket(
+        process: &str,
+        count: usize,
+        first_offset: i64,
+        last_offset: i64,
+    ) -> ScreenshotAggregationBucket {
         let now = Utc::now();
         ScreenshotAggregationBucket {
             id: Uuid::new_v4().to_string(),

@@ -33,6 +33,7 @@ use anyhow::anyhow;
 use std::fs;
 
 /// 旧版 plaintext JSON 凭据路径。仅作为迁移来源；成功写入系统凭据库后会删除。
+#[cfg(not(target_os = "windows"))]
 const LEGACY_CREDS_DIR: &str = ".openless";
 const LEGACY_CREDS_FILE: &str = "credentials.json";
 
@@ -85,11 +86,6 @@ fn credentials_cache() -> &'static Mutex<Option<CredsRoot>> {
 
 fn store_credentials_cache(root: &CredsRoot) {
     *credentials_cache().lock() = Some(root.clone());
-}
-
-#[cfg(test)]
-fn reset_credentials_cache_for_tests() {
-    *credentials_cache().lock() = None;
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -896,7 +892,11 @@ fn write_asr_account_for_provider(
     value: Option<String>,
 ) {
     let normalized = value.and_then(|v| if v.is_empty() { None } else { Some(v) });
-    let entry = root.providers.asr.entry(provider_id.to_string()).or_default();
+    let entry = root
+        .providers
+        .asr
+        .entry(provider_id.to_string())
+        .or_default();
     match account {
         CredentialAccount::VolcengineAppKey => {
             entry.appKey = normalized;

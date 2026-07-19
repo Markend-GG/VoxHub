@@ -76,6 +76,7 @@ impl TypeError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[cfg(target_os = "macos")]
 pub enum TisError {
     #[error("dispatch to main thread failed: {0}")]
     MainThreadDispatch(String),
@@ -84,6 +85,11 @@ pub enum TisError {
     #[error("TISSelectInputSource failed: OSStatus={0}")]
     SelectFailed(i32),
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("input source switching is unavailable on this platform")]
+#[cfg(not(target_os = "macos"))]
+pub struct TisError;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // macOS 实现
@@ -338,10 +344,6 @@ mod windows_impl {
                 newline_mode: WindowsSendInputNewlineMode::Enter,
             }
         }
-    }
-
-    pub fn type_unicode_chunk(text: &str) -> Result<usize, TypeError> {
-        type_unicode_chunk_with_options(text, WindowsSendInputOptions::default())
     }
 
     pub fn type_unicode_chunk_with_options(
@@ -635,7 +637,10 @@ mod tests {
                 classify_sendinput_char('\n'),
                 SendInputCharKind::Newline
             ));
-            assert!(matches!(classify_sendinput_char('\t'), SendInputCharKind::Tab));
+            assert!(matches!(
+                classify_sendinput_char('\t'),
+                SendInputCharKind::Tab
+            ));
         }
 
         #[test]
@@ -697,8 +702,8 @@ pub use macos_impl::{
 #[cfg(target_os = "windows")]
 #[allow(unused_imports)]
 pub use windows_impl::{
-    restore_input_source, switch_to_ascii, type_unicode_chunk, type_unicode_chunk_with_options,
-    PreviousInputSource, WindowsSendInputOptions,
+    restore_input_source, switch_to_ascii, type_unicode_chunk_with_options, PreviousInputSource,
+    WindowsSendInputOptions,
 };
 
 #[cfg(target_os = "linux")]

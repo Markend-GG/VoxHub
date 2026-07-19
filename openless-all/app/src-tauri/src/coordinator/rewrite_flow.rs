@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::selection::capture_selection;
 use crate::types::{
     rewrite_error_code, ContextCaptureHistoryType, InsertStatus, RewriteHistoryEntry,
-    RewriteStatePayload, RewriteStateKind, BUILTIN_STYLE_PACK_REWRITE_ID,
+    RewriteStateKind, RewriteStatePayload, BUILTIN_STYLE_PACK_REWRITE_ID,
 };
 
 use super::*;
@@ -60,7 +60,7 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
         schedule_capsule_idle(inner, 2000);
         return;
     }
-    
+
     let qa_phase = inner.qa_state.lock().phase;
     if !matches!(qa_phase, QaPhase::Idle) {
         emit_rewrite_capsule(inner, CapsuleState::Error, Some("当前问答进行中，稍后再试"));
@@ -102,34 +102,38 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
             match capture_selection() {
                 Some(s) => s,
                 None => {
-            append_rewrite_history(
-                inner,
-                RewriteHistoryEntry {
-                    id: history_id.clone(),
-                    created_at: now_rfc3339(),
-                    source_text: String::new(),
-                    rewritten_text: String::new(),
-                    style_pack_id: None,
-                    style_pack_name: None,
-                    app_name: None,
-                    insert_status: InsertStatus::Failed,
-                    error_code: Some(rewrite_error_code::SELECTION_EMPTY.to_string()),
-                    duration_ms: None,
-                    context_capture: None,
-                },
-            );
-            emit_rewrite_capsule(inner, CapsuleState::Error, Some("先选中一段文字再按重写快捷键"));
-            emit_rewrite_state(
-                inner,
-                RewriteStateKind::Error,
-                Some("先选中一段文字，再按重写快捷键".into()),
-                None,
-                None,
-                None,
-                Some(rewrite_error_code::SELECTION_EMPTY.to_string()),
-            );
+                    append_rewrite_history(
+                        inner,
+                        RewriteHistoryEntry {
+                            id: history_id.clone(),
+                            created_at: now_rfc3339(),
+                            source_text: String::new(),
+                            rewritten_text: String::new(),
+                            style_pack_id: None,
+                            style_pack_name: None,
+                            app_name: None,
+                            insert_status: InsertStatus::Failed,
+                            error_code: Some(rewrite_error_code::SELECTION_EMPTY.to_string()),
+                            duration_ms: None,
+                            context_capture: None,
+                        },
+                    );
+                    emit_rewrite_capsule(
+                        inner,
+                        CapsuleState::Error,
+                        Some("先选中一段文字再按重写快捷键"),
+                    );
+                    emit_rewrite_state(
+                        inner,
+                        RewriteStateKind::Error,
+                        Some("先选中一段文字，再按重写快捷键".into()),
+                        None,
+                        None,
+                        None,
+                        Some(rewrite_error_code::SELECTION_EMPTY.to_string()),
+                    );
                     schedule_capsule_idle(inner, 2000);
-            return;
+                    return;
                 }
             }
         }
@@ -156,24 +160,22 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
     let style_prompt = match &prefs.active_rewrite_style_pack_id {
         Some(id) => match inner.style_packs.get(id) {
             Ok(pack) if pack.enabled => pack.prompt.clone(),
-            _ => inner.style_packs
+            _ => inner
+                .style_packs
                 .get(BUILTIN_STYLE_PACK_REWRITE_ID)
                 .map(|p| p.prompt.clone())
                 .unwrap_or_else(|_| DEFAULT_REWRITE_STYLE_PROMPT.to_string()),
         },
-        None => inner.style_packs
+        None => inner
+            .style_packs
             .get(BUILTIN_STYLE_PACK_REWRITE_ID)
             .map(|p| p.prompt.clone())
             .unwrap_or_else(|_| DEFAULT_REWRITE_STYLE_PROMPT.to_string()),
     };
 
     // 7. LLM 调用
-    let rewrite_result = rewrite_text(
-        &selection.text,
-        &style_prompt,
-        prefs.llm_thinking_enabled,
-    )
-    .await;
+    let rewrite_result =
+        rewrite_text(&selection.text, &style_prompt, prefs.llm_thinking_enabled).await;
 
     let rewritten_text = match rewrite_result {
         Ok(text) => text,
@@ -236,9 +238,7 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
         );
         let code = match status {
             InsertStatus::Failed => Some(rewrite_error_code::INSERT_FAILED.to_string()),
-            InsertStatus::CopiedFallback => {
-                Some(rewrite_error_code::INSERT_FAILED.to_string())
-            }
+            InsertStatus::CopiedFallback => Some(rewrite_error_code::INSERT_FAILED.to_string()),
             _ => None,
         };
         (status, code)
@@ -246,7 +246,10 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
         // 焦点恢复失败：只复制到剪贴板，不模拟粘贴
         log::warn!("[rewrite] focus restore failed, copying to clipboard only");
         let status = inner.inserter.copy_fallback(&rewritten_text);
-        (status, Some(rewrite_error_code::FOCUS_RESTORE_FAILED.to_string()))
+        (
+            status,
+            Some(rewrite_error_code::FOCUS_RESTORE_FAILED.to_string()),
+        )
     };
 
     // 11. 写历史
@@ -318,8 +321,7 @@ async fn rewrite_text(
     if active_llm == "gemini" {
         let (api_key, model, base_url) = read_gemini_credentials()?;
         let provider = GeminiProvider::new(
-            GeminiConfig::new(api_key, model, base_url)
-                .with_thinking_enabled(llm_thinking_enabled),
+            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled),
         );
         return Ok(provider.rewrite(source_text, style_prompt).await?);
     }
@@ -357,14 +359,7 @@ fn append_rewrite_history(inner: &Arc<Inner>, entry: RewriteHistoryEntry) {
 
 /// 通过 capsule 窗口展示重写状态（与录音共享同一个胶囊窗口）。
 fn emit_rewrite_capsule(inner: &Arc<Inner>, state: CapsuleState, message: Option<&str>) {
-    emit_capsule(
-        inner,
-        state,
-        0.0,
-        0,
-        message.map(|s| s.to_string()),
-        None,
-    );
+    emit_capsule(inner, state, 0.0, 0, message.map(|s| s.to_string()), None);
 }
 
 /// 通过 rewrite:state 事件通知前端（用于历史页面刷新等）。
@@ -414,7 +409,7 @@ fn now_rfc3339() -> String {
 #[cfg(target_os = "windows")]
 fn wait_for_modifiers_released(timeout_ms: u64) {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-    
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     while std::time::Instant::now() < deadline {
         let shift = unsafe { GetAsyncKeyState(0x10) };

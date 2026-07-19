@@ -24,35 +24,40 @@ pub(super) fn debug_transcript_override_text() -> Option<String> {
 }
 
 pub(super) fn ensure_microphone_permission(_inner: &Arc<Inner>) -> Result<(), String> {
-    use crate::permissions::{self, PermissionStatus};
+    use crate::permissions;
+    #[cfg(not(target_os = "windows"))]
+    use crate::permissions::PermissionStatus;
 
     #[cfg(target_os = "windows")]
     {
         if permissions::windows_microphone_access_explicitly_denied() {
             return Err("需要麦克风权限，当前状态: Denied".to_string());
         }
-        return Ok(());
-    }
-
-    let status = permissions::check_microphone();
-    if matches!(
-        status,
-        PermissionStatus::Granted | PermissionStatus::NotApplicable
-    ) {
-        return Ok(());
-    }
-
-    // 听写路径不抢前台焦点：缺 mic 权限时直接请求系统授权，不再先 show_main_window。
-    // 用户在设置页手动点“请求权限”仍走 request_microphone_from_foreground，那是显式操作。
-    // 这里若系统不弹框，后续会通过 capsule error 引导用户主动去权限页处理。详见 #166。
-    let requested = permissions::request_microphone();
-    if matches!(
-        requested,
-        PermissionStatus::Granted | PermissionStatus::NotApplicable
-    ) {
         Ok(())
-    } else {
-        Err(format!("需要麦克风权限，当前状态: {requested:?}"))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let status = permissions::check_microphone();
+        if matches!(
+            status,
+            PermissionStatus::Granted | PermissionStatus::NotApplicable
+        ) {
+            return Ok(());
+        }
+
+        // 听写路径不抢前台焦点：缺 mic 权限时直接请求系统授权，不再先 show_main_window。
+        // 用户在设置页手动点“请求权限”仍走 request_microphone_from_foreground，那是显式操作。
+        // 这里若系统不弹框，后续会通过 capsule error 引导用户主动去权限页处理。详见 #166。
+        let requested = permissions::request_microphone();
+        if matches!(
+            requested,
+            PermissionStatus::Granted | PermissionStatus::NotApplicable
+        ) {
+            Ok(())
+        } else {
+            Err(format!("需要麦克风权限，当前状态: {requested:?}"))
+        }
     }
 }
 
@@ -206,6 +211,7 @@ pub(super) fn emit_local_asr_engine_status(_inner: &Arc<Inner>) {}
 /// 一次 dictation 结束后，按 prefs.local_asr_keep_loaded_secs 决定何时释放
 /// 内存里的 Qwen3-ASR 引擎。0 = 立即释放；其它值 = sleep N 秒后看 last_used。
 /// 多次会话叠加多个 sleep 任务，每个独立 check：只要中间又被使用过就跳过释放。
+#[cfg(target_os = "macos")]
 pub(super) fn schedule_local_asr_release(inner: &Arc<Inner>) {
     let keep_secs = inner.prefs.get().local_asr_keep_loaded_secs;
     let cache = Arc::clone(&inner.local_asr_cache);
@@ -645,16 +651,12 @@ pub(super) async fn build_meeting_asr_start_with_options(
     match active_asr_provider_kind(active_asr) {
         ActiveAsrProviderKind::Bailian => {
             let mut credentials = read_bailian_credentials_for_provider(active_asr);
-            credentials.model = model_with_override(
-                credentials.model,
-                options.model_override.as_deref(),
-            );
+            credentials.model =
+                model_with_override(credentials.model, options.model_override.as_deref());
             let mut asr = BailianRealtimeASR::new(credentials)
                 .with_session_metadata(options.session_metadata)
                 .with_interim_transcript_fallback(false)
-                .with_max_sentence_silence_ms(meeting_silence_preset_ms(
-                    options.silence_preset,
-                ));
+                .with_max_sentence_silence_ms(meeting_silence_preset_ms(options.silence_preset));
             if let Some(sink) = options.final_segment_sink {
                 asr = asr.with_final_segment_sink(sink);
             }

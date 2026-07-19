@@ -345,7 +345,11 @@ pub(super) fn less_computer_modifier_binding(
     })
 }
 
-pub(super) fn less_computer_modifier_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEvent>) {
+#[cfg(target_os = "macos")]
+pub(super) fn less_computer_modifier_bridge_loop(
+    inner: Arc<Inner>,
+    rx: mpsc::Receiver<HotkeyEvent>,
+) {
     while let Ok(evt) = rx.recv() {
         if inner.shortcut_recording_active.load(Ordering::SeqCst) {
             continue;
@@ -368,7 +372,11 @@ pub(super) fn less_computer_modifier_bridge_loop(inner: Arc<Inner>, rx: mpsc::Re
     }
 }
 
-pub(super) fn less_computer_combo_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHotkeyEvent>) {
+#[cfg(target_os = "macos")]
+pub(super) fn less_computer_combo_bridge_loop(
+    inner: Arc<Inner>,
+    rx: mpsc::Receiver<ComboHotkeyEvent>,
+) {
     while let Ok(evt) = rx.recv() {
         if inner.shortcut_recording_active.load(Ordering::SeqCst) {
             continue;
@@ -389,6 +397,7 @@ pub(super) fn less_computer_combo_bridge_loop(inner: Arc<Inner>, rx: mpsc::Recei
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(super) async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
     let prefs = inner.prefs.get();
     if !prefs.coding_agent_enabled {
@@ -432,6 +441,7 @@ pub(super) async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(super) async fn handle_less_computer_released(inner: &Arc<Inner>) {
     let (phase, voice_agent) = {
         let state = inner.state.lock();
@@ -519,7 +529,9 @@ pub(super) fn combo_hotkey_supervisor_loop(inner: Arc<Inner>) {
                 Err(e) => {
                     attempts += 1;
                     if attempts <= 3 || attempts % 10 == 0 {
-                        log::warn!("[coord] side-aware combo 第 {attempts} 次注册失败: {e}; 3s 后重试");
+                        log::warn!(
+                            "[coord] side-aware combo 第 {attempts} 次注册失败: {e}; 3s 后重试"
+                        );
                     }
                     std::thread::sleep(std::time::Duration::from_secs(3));
                     continue;
@@ -706,7 +718,10 @@ pub(super) fn update_translation_hotkey_on_main_thread(
     Ok(())
 }
 
-pub(super) fn translation_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHotkeyEvent>) {
+pub(super) fn translation_hotkey_bridge_loop(
+    inner: Arc<Inner>,
+    rx: mpsc::Receiver<ComboHotkeyEvent>,
+) {
     while let Ok(evt) = rx.recv() {
         if inner.shortcut_recording_active.load(Ordering::SeqCst) {
             continue;
@@ -977,9 +992,7 @@ pub(super) fn start_action_hotkey_monitor(
     tx: mpsc::Sender<ComboHotkeyEvent>,
 ) -> Result<ActionHotkeyMonitor, ComboHotkeyError> {
     match kind {
-        ActionHotkeyKind::ScreenshotRecord => {
-            ActionHotkeyMonitor::start_passthrough(binding, tx)
-        }
+        ActionHotkeyKind::ScreenshotRecord => ActionHotkeyMonitor::start_passthrough(binding, tx),
         ActionHotkeyKind::SwitchStyle | ActionHotkeyKind::OpenApp | ActionHotkeyKind::Rewrite => {
             ActionHotkeyMonitor::start_registered(binding, tx)
         }
@@ -1149,9 +1162,11 @@ pub(super) fn reset_shortcut_held_state(inner: &Arc<Inner>) {
     if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
         if !is_modifier_only_shortcut(open_app) {
             if let Some(monitor) = inner.open_app_hotkey.lock().as_mut() {
-                if let Err(e) =
-                    update_action_hotkey_monitor(ActionHotkeyKind::OpenApp, monitor, open_app.clone())
-                {
+                if let Err(e) = update_action_hotkey_monitor(
+                    ActionHotkeyKind::OpenApp,
+                    monitor,
+                    open_app.clone(),
+                ) {
                     log::warn!("[coord] reset open-app hotkey latch failed: {e}");
                 }
             }
@@ -1160,9 +1175,11 @@ pub(super) fn reset_shortcut_held_state(inner: &Arc<Inner>) {
     if let Some(rewrite) = prefs.rewrite_hotkey.as_ref() {
         if !is_modifier_only_shortcut(rewrite) {
             if let Some(monitor) = inner.rewrite_hotkey.lock().as_mut() {
-                if let Err(e) =
-                    update_action_hotkey_monitor(ActionHotkeyKind::Rewrite, monitor, rewrite.clone())
-                {
+                if let Err(e) = update_action_hotkey_monitor(
+                    ActionHotkeyKind::Rewrite,
+                    monitor,
+                    rewrite.clone(),
+                ) {
                     log::warn!("[coord] reset rewrite hotkey latch failed: {e}");
                 }
             }
@@ -1247,7 +1264,11 @@ pub(super) fn window_hotkey_fallback_enabled() -> bool {
 }
 
 #[cfg(any(target_os = "windows", test))]
-pub(super) fn window_key_matches_trigger(trigger: crate::types::HotkeyTrigger, key: &str, code: &str) -> bool {
+pub(super) fn window_key_matches_trigger(
+    trigger: crate::types::HotkeyTrigger,
+    key: &str,
+    code: &str,
+) -> bool {
     use crate::types::HotkeyTrigger;
 
     match trigger {

@@ -66,37 +66,19 @@ pub fn hide_android_overlay() -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "android")]
 pub fn refresh_android_overlay_if_visible() -> Result<(), String> {
-    #[cfg(target_os = "android")]
-    {
-        return crate::android::native_bridge::refresh_overlay_if_visible();
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        Err("Android overlay is only available on Android".to_string())
-    }
+    crate::android::native_bridge::refresh_overlay_if_visible()
 }
 
+#[cfg(target_os = "android")]
 pub fn refresh_android_overlay_layout() -> Result<(), String> {
-    #[cfg(target_os = "android")]
-    {
-        return crate::android::native_bridge::refresh_overlay_layout();
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        Err("Android overlay is only available on Android".to_string())
-    }
+    crate::android::native_bridge::refresh_overlay_layout()
 }
 
+#[cfg(target_os = "android")]
 pub fn replace_android_overlay() -> Result<(), String> {
-    #[cfg(target_os = "android")]
-    {
-        return crate::android::native_bridge::replace_overlay();
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        Err("Android overlay is only available on Android".to_string())
-    }
+    crate::android::native_bridge::replace_overlay()
 }
 
 #[cfg(target_os = "android")]

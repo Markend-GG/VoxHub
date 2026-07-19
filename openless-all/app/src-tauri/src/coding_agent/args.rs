@@ -24,7 +24,7 @@ impl CodingAgentProvider {
         }
     }
 
-    /// 该 provider 默认的可执行文件名。
+    #[cfg(test)]
     pub fn default_exe(self) -> &'static str {
         match self {
             Self::ClaudeCodeCli => "claude",

@@ -45,6 +45,7 @@ import {
   meetingCompanionControlActions,
   meetingCompanionMenuActions,
   nextMeetingCompanionDialogFocusIndex,
+  shouldStartMeetingCompanionDrag,
   type MeetingCompanionCommandAction,
   type MeetingCompanionControlAction,
   type MeetingCompanionMenuAction,
@@ -578,6 +579,12 @@ function VisibleMeetingCompanion({
   const menuRef = useRef<HTMLDivElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const cancelStopRef = useRef<HTMLButtonElement | null>(null);
+  const dragGestureRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    started: boolean;
+  } | null>(null);
   if (!controlsVisibilityRef.current) {
     controlsVisibilityRef.current = new MeetingCompanionControlsVisibility(setControlsVisible);
   }
@@ -695,17 +702,55 @@ function VisibleMeetingCompanion({
       || stopConfirmOpen
       || contextMenu
     ) return;
-    event.preventDefault();
+    dragGestureRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      started: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const continueDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const gesture = dragGestureRef.current;
+    if (
+      !gesture
+      || gesture.pointerId !== event.pointerId
+      || gesture.started
+      || !shouldStartMeetingCompanionDrag(
+        gesture.startX,
+        gesture.startY,
+        event.clientX,
+        event.clientY,
+        (event.buttons & 1) === 1,
+      )
+    ) return;
+    gesture.started = true;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
     void startMeetingCompanionDrag().catch(error => {
       console.warn('[meeting-companion] start drag failed', error);
     });
   };
 
   const finishDrag = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
+    const gesture = dragGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    dragGestureRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (!gesture.started) return;
     void saveMeetingCompanionPosition().catch(error => {
       console.warn('[meeting-companion] save position failed', error);
     });
+  };
+
+  const cancelDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (dragGestureRef.current?.pointerId === event.pointerId) {
+      dragGestureRef.current = null;
+    }
   };
 
   const mediaMode = reducedMotion
@@ -831,12 +876,9 @@ function VisibleMeetingCompanion({
       <div
         data-meeting-companion-stage
         onPointerDown={startDrag}
+        onPointerMove={continueDrag}
         onPointerUp={finishDrag}
-        onPointerCancel={() => {
-          void saveMeetingCompanionPosition().catch(error => {
-            console.warn('[meeting-companion] save cancelled drag position failed', error);
-          });
-        }}
+        onPointerCancel={cancelDrag}
         style={{
           width: 350,
           height: 280,

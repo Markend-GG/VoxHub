@@ -11,11 +11,16 @@
 //! 调度规则：每次会话结束后 spawn 一个 sleep+check 任务；任务在到点时检查
 //! `last_used`——如果中间又被使用过则不释放，否则 drop 引擎让 OS 回收 RAM。
 
+#[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
 use anyhow::Result;
+#[cfg(target_os = "macos")]
 use parking_lot::Mutex;
 
 #[cfg(target_os = "macos")]
@@ -88,40 +93,35 @@ impl LocalAsrCache {
 
     /// 标记最近使用时间——end_session 在调过 transcribe 之后调一下，
     /// 让 release 计时器从这一刻重新算。
+    #[cfg(target_os = "macos")]
     pub fn touch(&self) {
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(cached) = self.inner.lock().as_mut() {
-                cached.last_used = Instant::now();
-            }
+        if let Some(cached) = self.inner.lock().as_mut() {
+            cached.last_used = Instant::now();
         }
     }
 
     /// 如果空闲时长 ≥ threshold，释放引擎。返回是否真释放了。
+    #[cfg(target_os = "macos")]
     pub fn release_if_idle(&self, idle_threshold: Duration) -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            let taken = {
-                let mut slot = self.inner.lock();
-                match slot.as_ref() {
-                    Some(c) if c.last_used.elapsed() >= idle_threshold => {
-                        log::info!(
-                            "[local-asr cache] release engine {} after idle {:?}",
-                            c.model_id,
-                            c.last_used.elapsed()
-                        );
-                        slot.take()
-                    }
-                    _ => None,
+        let taken = {
+            let mut slot = self.inner.lock();
+            match slot.as_ref() {
+                Some(c) if c.last_used.elapsed() >= idle_threshold => {
+                    log::info!(
+                        "[local-asr cache] release engine {} after idle {:?}",
+                        c.model_id,
+                        c.last_used.elapsed()
+                    );
+                    slot.take()
                 }
-            };
-            if let Some(cached) = taken {
-                drop(cached);
-                pressure_relief_macos();
-                return true;
+                _ => None,
             }
+        };
+        if let Some(cached) = taken {
+            drop(cached);
+            pressure_relief_macos();
+            return true;
         }
-        let _ = idle_threshold;
         false
     }
 

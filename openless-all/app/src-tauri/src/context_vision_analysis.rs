@@ -22,8 +22,7 @@ use crate::types::{
     ContextAnalysisActionItem, ContextAnalysisActivityType, ContextAnalysisContextType,
     ContextAnalysisEvidenceLevel, ContextAnalysisResult, ContextAnalysisStatus,
     ContextAnalysisWorkStatus, ContextCaptureEntry, ContextCaptureHistoryType, DictationSession,
-    RewriteHistoryEntry,
-    ScreenshotRecord, ScreenshotRecordStatus,
+    RewriteHistoryEntry, ScreenshotRecord, ScreenshotRecordStatus,
 };
 
 pub const PROMPT_VERSION: &str = "context-vision-analysis-v2";
@@ -264,7 +263,8 @@ struct ModelAnalysisJson {
 }
 
 pub fn prepare_image_for_vision(path: &Path) -> Result<PreparedVisionImage> {
-    let image = image::open(path).with_context(|| format!("decode image failed: {}", path.display()))?;
+    let image =
+        image::open(path).with_context(|| format!("decode image failed: {}", path.display()))?;
     let (width, height) = image.dimensions();
     let longest = width.max(height);
     let output = if longest > IMAGE_MAX_EDGE {
@@ -335,7 +335,13 @@ pub fn spawn_reanalysis(
     history_id: String,
     input: ContextAnalysisTextInput,
 ) {
-    spawn_analysis_task(context_store, analysis_store, history_type, history_id, input);
+    spawn_analysis_task(
+        context_store,
+        analysis_store,
+        history_type,
+        history_id,
+        input,
+    );
 }
 
 pub fn spawn_analysis_for_screenshot_record(
@@ -348,8 +354,13 @@ pub fn spawn_analysis_for_screenshot_record(
         .name("openless-screenshot-record-analysis".into())
         .spawn(move || {
             tauri::async_runtime::block_on(async move {
-                if let Err(error) =
-                    run_screenshot_record_analysis(context_store, analysis_store, screenshot_store, record).await
+                if let Err(error) = run_screenshot_record_analysis(
+                    context_store,
+                    analysis_store,
+                    screenshot_store,
+                    record,
+                )
+                .await
                 {
                     log::warn!("[screenshot-record] analysis task failed: {error:#}");
                 }
@@ -369,8 +380,14 @@ fn spawn_analysis_task(
         .name("openless-context-vision-analysis".into())
         .spawn(move || {
             tauri::async_runtime::block_on(async move {
-                if let Err(error) =
-                    run_analysis_task(context_store, analysis_store, history_type, history_id, input).await
+                if let Err(error) = run_analysis_task(
+                    context_store,
+                    analysis_store,
+                    history_type,
+                    history_id,
+                    input,
+                )
+                .await
                 {
                     log::warn!("[context-analysis] task failed: {error:#}");
                 }
@@ -569,8 +586,7 @@ async fn run_analysis_task(
             &prompt,
         )
         .await
-    }
-    {
+    } {
         Ok(text) => text,
         Err(AnalysisRequestError::ModelNotVisionCapable) => {
             upsert_if_context_current(
@@ -657,13 +673,7 @@ async fn run_analysis_task(
         }
     };
 
-    let result = success_result(
-        pending_result,
-        parsed,
-        &active_provider,
-        &model,
-        &prepared,
-    );
+    let result = success_result(pending_result, parsed, &active_provider, &model, &prepared);
     upsert_if_context_current(
         &context_store,
         &analysis_store,
@@ -710,7 +720,11 @@ async fn run_screenshot_record_analysis(
         return Ok(());
     };
     let contexts = context_store.list()?;
-    let Some(first_context) = contexts.iter().find(|entry| entry.id == first_context_id).cloned() else {
+    let Some(first_context) = contexts
+        .iter()
+        .find(|entry| entry.id == first_context_id)
+        .cloned()
+    else {
         update_screenshot_record_status_if_unchanged(
             &screenshot_store,
             &record,
@@ -737,7 +751,10 @@ async fn run_screenshot_record_analysis(
         pending_result.clone(),
     )?;
     if !pending_updated {
-        log::info!("[screenshot-record] skip stale pending analysis for record_id={}", record.id);
+        log::info!(
+            "[screenshot-record] skip stale pending analysis for record_id={}",
+            record.id
+        );
         return Ok(());
     }
     analysis_store.upsert_if_generation_newer(pending_result.clone())?;
@@ -788,7 +805,11 @@ async fn run_screenshot_record_analysis(
             ContextAnalysisStatus::Skipped,
             error_code,
             Some(active_provider),
-            if model.trim().is_empty() { None } else { Some(model) },
+            if model.trim().is_empty() {
+                None
+            } else {
+                Some(model)
+            },
         );
         let _ = update_screenshot_record_analysis_if_current(
             &analysis_store,
@@ -1089,7 +1110,9 @@ fn upsert_if_context_current(
     if let Some(context_id) = expected_context_id {
         let latest = analysis_store.latest_for_context(history_type, history_id, context_id)?;
         if let Some(prompt_hash) = expected_prompt_hash {
-            let latest_hash = latest.as_ref().and_then(|entry| entry.prompt_hash.as_deref());
+            let latest_hash = latest
+                .as_ref()
+                .and_then(|entry| entry.prompt_hash.as_deref());
             if latest_hash != Some(prompt_hash) {
                 log::info!(
                     "[context-analysis] skip stale prompt result for history_type={history_type:?} history_id={history_id}"
@@ -1115,10 +1138,8 @@ fn upsert_if_context_current(
             Ok(())
         } else {
             let expected_generation = result.analysis_generation.clone();
-            let updated = analysis_store.upsert_if_generation_current(
-                result,
-                expected_generation.as_deref(),
-            )?;
+            let updated = analysis_store
+                .upsert_if_generation_current(result, expected_generation.as_deref())?;
             if !updated {
                 log::info!(
                     "[context-analysis] skip stale final upsert for history_type={history_type:?} history_id={history_id} context_id={context_id}"
@@ -1294,16 +1315,9 @@ async fn request_context_analysis_multi(
     if !api_key.trim().is_empty() {
         request = request.header("Authorization", format!("Bearer {api_key}"));
     }
-    let response = request
-        .json(&body)
-        .send()
-        .await
-        .map_err(request_error)?;
+    let response = request.json(&body).send().await.map_err(request_error)?;
     let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(request_error)?;
+    let text = response.text().await.map_err(request_error)?;
     if !status.is_success() {
         if status == StatusCode::BAD_REQUEST || status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
             return Err(AnalysisRequestError::ModelNotVisionCapable);
@@ -1383,7 +1397,13 @@ fn success_result(
     model: &str,
     image: &PreparedVisionImage,
 ) -> ContextAnalysisResult {
-    success_result_multi(result, parsed, provider_id, model, std::slice::from_ref(image))
+    success_result_multi(
+        result,
+        parsed,
+        provider_id,
+        model,
+        std::slice::from_ref(image),
+    )
 }
 
 fn success_result_multi(
@@ -1555,7 +1575,14 @@ fn with_image_error(
     model: &str,
     image: &PreparedVisionImage,
 ) -> ContextAnalysisResult {
-    with_images_error(result, status, error_code, provider_id, model, std::slice::from_ref(image))
+    with_images_error(
+        result,
+        status,
+        error_code,
+        provider_id,
+        model,
+        std::slice::from_ref(image),
+    )
 }
 
 fn with_images_error(

@@ -223,19 +223,13 @@ impl ScreenshotRecordStore {
         self.write_locked(&[])
     }
 
-    pub fn apply_retention(&self, retention_days: u32, max_entries: Option<u32>) -> Result<()> {
-        let _guard = self.lock.lock();
-        let mut records = self.read_locked()?;
-        apply_record_retention(&mut records, retention_days, max_entries);
-        self.write_locked(&records)
-    }
-
     fn read_locked(&self) -> Result<Vec<ScreenshotRecord>> {
         read_or_default::<Vec<ScreenshotRecord>>(&self.path)
     }
 
     fn write_locked(&self, records: &[ScreenshotRecord]) -> Result<()> {
-        let json = serde_json::to_vec_pretty(records).context("encode screenshot records failed")?;
+        let json =
+            serde_json::to_vec_pretty(records).context("encode screenshot records failed")?;
         atomic_write(&self.path, &json)
     }
 }
@@ -272,9 +266,7 @@ fn generation_is_newer_or_equal(current: Option<&str>, next: Option<&str>) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        ContextCaptureHistoryType, ContextCaptureSource, ContextCaptureStatus,
-    };
+    use crate::types::{ContextCaptureHistoryType, ContextCaptureSource, ContextCaptureStatus};
 
     fn record(id: &str) -> ScreenshotRecord {
         ScreenshotRecord {
@@ -345,10 +337,20 @@ mod tests {
         store.upsert_with_retention(base, 0, None).unwrap();
 
         store
-            .append_capture_result("capture-append", &context("ctx-1", "capture-append"), 0, None)
+            .append_capture_result(
+                "capture-append",
+                &context("ctx-1", "capture-append"),
+                0,
+                None,
+            )
             .unwrap();
         store
-            .append_capture_result("capture-append", &context("ctx-2", "capture-append"), 0, None)
+            .append_capture_result(
+                "capture-append",
+                &context("ctx-2", "capture-append"),
+                0,
+                None,
+            )
             .unwrap();
 
         let records = store.list().unwrap();
@@ -383,7 +385,9 @@ mod tests {
     #[test]
     fn analysis_pending_only_moves_forward_by_generation() {
         let store = ScreenshotRecordStore::new_test("generation");
-        store.upsert_with_retention(record("record-analysis"), 0, None).unwrap();
+        store
+            .upsert_with_retention(record("record-analysis"), 0, None)
+            .unwrap();
 
         assert!(store
             .update_analysis_if_generation_newer(
@@ -420,7 +424,9 @@ mod tests {
     #[test]
     fn final_analysis_requires_matching_generation() {
         let store = ScreenshotRecordStore::new_test("final");
-        store.upsert_with_retention(record("record-final"), 0, None).unwrap();
+        store
+            .upsert_with_retention(record("record-final"), 0, None)
+            .unwrap();
         store
             .update_analysis_if_generation_newer(
                 "record-final",
@@ -456,7 +462,9 @@ mod tests {
     #[test]
     fn analysis_is_current_requires_matching_status_hash_and_generation() {
         let store = ScreenshotRecordStore::new_test("current");
-        store.upsert_with_retention(record("record-current"), 0, None).unwrap();
+        store
+            .upsert_with_retention(record("record-current"), 0, None)
+            .unwrap();
         store
             .update_analysis_if_generation_newer(
                 "record-current",

@@ -25,9 +25,9 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 mod activity;
-mod correction;
 mod context_analysis;
 mod context_capture;
+mod correction;
 mod credentials;
 mod dictionary;
 mod generated_report;
@@ -42,9 +42,9 @@ mod screenshot_record;
 mod style_pack;
 
 pub use activity::*;
-pub use correction::*;
 pub use context_analysis::*;
 pub use context_capture::*;
+pub use correction::*;
 pub use credentials::*;
 pub use dictionary::*;
 pub use generated_report::*;

@@ -185,27 +185,27 @@ impl SideAwareComboMonitor {
 
         #[cfg(not(target_os = "linux"))]
         {
-        if binding.modifiers.is_empty()
-            || binding
-                .modifiers
-                .iter()
-                .any(|tag| !is_side_specific_modifier_tag(tag))
-        {
-            return Err(crate::combo_hotkey::ComboHotkeyError::UnsupportedModifier(
-                "binding is not side-specific".into(),
-            ));
-        }
-        crate::shortcut_binding::parse_primary(&binding.primary).map_err(|e| {
-            crate::combo_hotkey::ComboHotkeyError::UnsupportedKey(e.to_string())
-        })?;
+            if binding.modifiers.is_empty()
+                || binding
+                    .modifiers
+                    .iter()
+                    .any(|tag| !is_side_specific_modifier_tag(tag))
+            {
+                return Err(crate::combo_hotkey::ComboHotkeyError::UnsupportedModifier(
+                    "binding is not side-specific".into(),
+                ));
+            }
+            crate::shortcut_binding::parse_primary(&binding.primary).map_err(|e| {
+                crate::combo_hotkey::ComboHotkeyError::UnsupportedKey(e.to_string())
+            })?;
 
-        let slot = ACTIVE_MONITOR.get_or_init(|| RwLock::new(None));
-        let mut guard = slot.write().expect("side combo monitor lock poisoned");
-        *guard = Some(ActiveSideCombo {
-            tx,
-            state: Mutex::new(SideAwareComboState::new(binding)),
-        });
-        Ok(Self)
+            let slot = ACTIVE_MONITOR.get_or_init(|| RwLock::new(None));
+            let mut guard = slot.write().expect("side combo monitor lock poisoned");
+            *guard = Some(ActiveSideCombo {
+                tx,
+                state: Mutex::new(SideAwareComboState::new(binding)),
+            });
+            Ok(Self)
         }
     }
 }
@@ -270,10 +270,10 @@ pub mod platform {
 
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F10, VK_F11, VK_F12, VK_F2,
-        VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_INSERT, VK_LCONTROL,
-        VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5,
-        VK_OEM_6, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_RETURN,
-        VK_RIGHT, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SPACE, VK_TAB, VK_UP,
+        VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_INSERT, VK_LCONTROL, VK_LEFT,
+        VK_LMENU, VK_LSHIFT, VK_LWIN, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6,
+        VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_RCONTROL, VK_RETURN,
+        VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SPACE, VK_TAB, VK_UP,
     };
 
     pub fn dispatch_vk(vk_code: u32, pressed: bool) {
@@ -351,6 +351,7 @@ pub mod platform {
 }
 
 /// macOS virtual keycode → ShortcutBinding.primary (US ANSI layout).
+#[cfg(any(target_os = "macos", test))]
 fn macos_keycode_to_primary(keycode: i64) -> Option<&'static str> {
     match keycode {
         // A-Z (non-contiguous on macOS)
@@ -479,10 +480,10 @@ pub mod platform {
     /// is not a known side modifier.
     fn class_mask_for_keycode(keycode: i64) -> Option<u64> {
         match keycode {
-            55 | 54 => Some(FLAG_MASK_COMMAND),     // Cmd left / right
-            59 | 62 => Some(FLAG_MASK_CONTROL),     // Ctrl left / right
-            58 | 61 => Some(FLAG_MASK_ALTERNATE),   // Alt/Option left / right
-            56 | 60 => Some(FLAG_MASK_SHIFT),       // Shift left / right
+            55 | 54 => Some(FLAG_MASK_COMMAND),   // Cmd left / right
+            59 | 62 => Some(FLAG_MASK_CONTROL),   // Ctrl left / right
+            58 | 61 => Some(FLAG_MASK_ALTERNATE), // Alt/Option left / right
+            56 | 60 => Some(FLAG_MASK_SHIFT),     // Shift left / right
             _ => None,
         }
     }
@@ -581,10 +582,7 @@ mod tests {
         state.set_side(SideModifier::ShiftLeft, false);
         state.set_side(SideModifier::ShiftRight, true);
         assert!(state.modifiers_match());
-        assert_eq!(
-            state.on_primary("D", true),
-            Some(ComboHotkeyEvent::Pressed)
-        );
+        assert_eq!(state.on_primary("D", true), Some(ComboHotkeyEvent::Pressed));
     }
 
     #[test]
@@ -620,10 +618,7 @@ mod tests {
         });
         state.set_side(SideModifier::CmdLeft, true);
         assert!(state.modifiers_match());
-        assert_eq!(
-            state.on_primary("D", true),
-            Some(ComboHotkeyEvent::Pressed)
-        );
+        assert_eq!(state.on_primary("D", true), Some(ComboHotkeyEvent::Pressed));
     }
 
     #[test]

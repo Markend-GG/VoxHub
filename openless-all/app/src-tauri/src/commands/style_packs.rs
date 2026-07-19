@@ -277,17 +277,26 @@ pub fn set_active_rewrite_style_pack(
     let mut prefs = coord.prefs().get();
     // 如果指定了 id，验证包存在且 scope == Rewrite
     if let Some(ref pack_id) = id {
-        let pack = coord.style_packs().get(pack_id).map_err(|e| e.to_string())?;
+        let pack = coord
+            .style_packs()
+            .get(pack_id)
+            .map_err(|e| e.to_string())?;
         if pack.scope != crate::types::StylePackScope::Rewrite {
             return Err(format!("pack {} is not a rewrite style pack", pack_id));
         }
         // 自动启用
         if !pack.enabled {
-            coord.style_packs().set_enabled(pack_id, true).map_err(|e| e.to_string())?;
+            coord
+                .style_packs()
+                .set_enabled(pack_id, true)
+                .map_err(|e| e.to_string())?;
         }
     }
     prefs.active_rewrite_style_pack_id = id;
-    coord.prefs().set(prefs.clone()).map_err(|e| e.to_string())?;
+    coord
+        .prefs()
+        .set(prefs.clone())
+        .map_err(|e| e.to_string())?;
     emit_prefs_changed(&app, &prefs);
     Ok(())
 }

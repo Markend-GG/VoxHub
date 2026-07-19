@@ -36,7 +36,9 @@ pub async fn generate_report_for_scheduler(
 }
 
 #[tauri::command]
-pub fn list_screenshot_records(coord: CoordinatorState<'_>) -> Result<Vec<ScreenshotRecord>, String> {
+pub fn list_screenshot_records(
+    coord: CoordinatorState<'_>,
+) -> Result<Vec<ScreenshotRecord>, String> {
     coord.screenshot_records().list().map_err(|e| e.to_string())
 }
 
@@ -45,17 +47,20 @@ pub fn delete_screenshot_record(coord: CoordinatorState<'_>, id: String) -> Resu
     if !is_valid_session_id(&id) {
         return Err("invalid screenshot record id".into());
     }
-    coord.screenshot_records().delete(&id).map_err(|e| e.to_string())?;
-    if let Err(error) = coord
-        .context_capture()
-        .delete_for_history(crate::types::ContextCaptureHistoryType::ScreenshotRecord, &id)
-    {
+    coord
+        .screenshot_records()
+        .delete(&id)
+        .map_err(|e| e.to_string())?;
+    if let Err(error) = coord.context_capture().delete_for_history(
+        crate::types::ContextCaptureHistoryType::ScreenshotRecord,
+        &id,
+    ) {
         log::warn!("[screenshot-record] delete contexts failed: {error}");
     }
-    if let Err(error) = coord
-        .context_analysis()
-        .delete_for_history(crate::types::ContextCaptureHistoryType::ScreenshotRecord, &id)
-    {
+    if let Err(error) = coord.context_analysis().delete_for_history(
+        crate::types::ContextCaptureHistoryType::ScreenshotRecord,
+        &id,
+    ) {
         log::warn!("[screenshot-record] delete analysis failed: {error}");
     }
     Ok(())
@@ -63,7 +68,10 @@ pub fn delete_screenshot_record(coord: CoordinatorState<'_>, id: String) -> Resu
 
 #[tauri::command]
 pub fn clear_screenshot_records(coord: CoordinatorState<'_>) -> Result<(), String> {
-    coord.screenshot_records().clear().map_err(|e| e.to_string())?;
+    coord
+        .screenshot_records()
+        .clear()
+        .map_err(|e| e.to_string())?;
     if let Err(error) = coord
         .context_capture()
         .clear_for_history_type(crate::types::ContextCaptureHistoryType::ScreenshotRecord)
@@ -118,12 +126,18 @@ pub fn save_report_template(
     coord: CoordinatorState<'_>,
     template: ReportTemplate,
 ) -> Result<ReportTemplate, String> {
-    coord.report_templates().save(template).map_err(|e| e.to_string())
+    coord
+        .report_templates()
+        .save(template)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_report_template(coord: CoordinatorState<'_>, id: String) -> Result<(), String> {
-    coord.report_templates().delete(&id).map_err(|e| e.to_string())
+    coord
+        .report_templates()
+        .delete(&id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -136,11 +150,17 @@ pub fn list_generated_reports(coord: CoordinatorState<'_>) -> Result<Vec<Generat
 }
 
 #[tauri::command]
-pub fn get_generated_report(coord: CoordinatorState<'_>, id: String) -> Result<Option<GeneratedReport>, String> {
+pub fn get_generated_report(
+    coord: CoordinatorState<'_>,
+    id: String,
+) -> Result<Option<GeneratedReport>, String> {
     if !is_valid_session_id(&id) {
         return Err("invalid report id".into());
     }
-    coord.generated_reports().get(&id).map_err(|e| e.to_string())
+    coord
+        .generated_reports()
+        .get(&id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -148,7 +168,10 @@ pub fn delete_generated_report(coord: CoordinatorState<'_>, id: String) -> Resul
     if !is_valid_session_id(&id) {
         return Err("invalid report id".into());
     }
-    coord.generated_reports().delete(&id).map_err(|e| e.to_string())
+    coord
+        .generated_reports()
+        .delete(&id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -193,9 +216,7 @@ pub fn generate_report(
         std::sync::Arc::clone(&*coord);
     let report_id = report.id.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = complete_report_generation(
-            &coord_clone, report_id, request,
-        ).await {
+        if let Err(e) = complete_report_generation(&coord_clone, report_id, request).await {
             log::warn!("[report] background generation failed: {e}");
         }
     });
@@ -226,7 +247,11 @@ pub fn create_pending_report(
     let report = GeneratedReport {
         id: uuid::Uuid::new_v4().to_string(),
         report_type: request.report_type,
-        title: format!("{} {}", report_type_label(request.report_type), range_start.format("%Y-%m-%d")),
+        title: format!(
+            "{} {}",
+            report_type_label(request.report_type),
+            range_start.format("%Y-%m-%d")
+        ),
         range_start: range_start.to_rfc3339(),
         range_end: range_end.to_rfc3339(),
         template_id: template.id.clone(),
@@ -242,7 +267,10 @@ pub fn create_pending_report(
         created_at: now.clone(),
         updated_at: now,
     };
-    coord.generated_reports().append(report.clone()).map_err(|e| e.to_string())?;
+    coord
+        .generated_reports()
+        .append(report.clone())
+        .map_err(|e| e.to_string())?;
     Ok(report)
 }
 
@@ -263,7 +291,10 @@ pub async fn complete_report_generation(
     let range_start = parse_report_time(&report.range_start)?;
     let range_end = parse_report_time(&report.range_end)?;
     let material = match build_report_material(
-        coord, range_start, range_end, request.user_main_work.as_deref(),
+        coord,
+        range_start,
+        range_end,
+        request.user_main_work.as_deref(),
     ) {
         Ok(m) => m,
         Err(e) => {
@@ -272,9 +303,12 @@ pub async fn complete_report_generation(
             report.error_message = Some(e.clone());
             report.updated_at = chrono::Utc::now().to_rfc3339();
             let _ = coord.generated_reports().replace(report.clone());
-            coord.inner.emit_event("report:updated", serde_json::json!({
-                "id": report.id, "status": "failed",
-            }));
+            coord.inner.emit_event(
+                "report:updated",
+                serde_json::json!({
+                    "id": report.id, "status": "failed",
+                }),
+            );
             return Err(e);
         }
     };
@@ -283,16 +317,27 @@ pub async fn complete_report_generation(
     if material.source_stats.voice_count == 0
         && material.source_stats.rewrite_count == 0
         && material.source_stats.screenshot_record_count == 0
-        && request.user_main_work.as_deref().unwrap_or("").trim().is_empty()
+        && request
+            .user_main_work
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
     {
         report.status = ReportGenerationStatus::Skipped;
         report.source_stats = material.source_stats;
         report.error_code = Some("skipped:noContent".into());
         report.updated_at = chrono::Utc::now().to_rfc3339();
-        coord.generated_reports().replace(report.clone()).map_err(|e| e.to_string())?;
-        coord.inner.emit_event("report:updated", serde_json::json!({
-            "id": report.id, "status": "skipped",
-        }));
+        coord
+            .generated_reports()
+            .replace(report.clone())
+            .map_err(|e| e.to_string())?;
+        coord.inner.emit_event(
+            "report:updated",
+            serde_json::json!({
+                "id": report.id, "status": "skipped",
+            }),
+        );
         return Ok(());
     }
 
@@ -324,7 +369,10 @@ pub async fn complete_report_generation(
         }
     }
     report.updated_at = chrono::Utc::now().to_rfc3339();
-    coord.generated_reports().replace(report.clone()).map_err(|e| e.to_string())?;
+    coord
+        .generated_reports()
+        .replace(report.clone())
+        .map_err(|e| e.to_string())?;
 
     // 广播事件，前端收到后通过 listGeneratedReports() 拉取最新列表
     coord.inner.emit_event(
@@ -386,15 +434,16 @@ fn build_report_material(
             .as_ref()
             .and_then(|context| context.analysis.as_ref())
             .filter(|analysis| analysis.status == crate::types::ContextAnalysisStatus::Success);
-        let summary = analysis
-            .and_then(summary_from_analysis)
-            .unwrap_or_else(|| {
-                data_gaps.push(format!("[{}][语音] 缺少完整摘要，已降级使用文本字段。", entry.created_at));
-                ReportSummary {
-                    source_label: "降级文本字段",
-                    text: fallback_text(&entry.final_text, &entry.raw_transcript),
-                }
-            });
+        let summary = analysis.and_then(summary_from_analysis).unwrap_or_else(|| {
+            data_gaps.push(format!(
+                "[{}][语音] 缺少完整摘要，已降级使用文本字段。",
+                entry.created_at
+            ));
+            ReportSummary {
+                source_label: "降级文本字段",
+                text: fallback_text(&entry.final_text, &entry.raw_transcript),
+            }
+        });
         voice_lines.push(format_report_line(
             &entry.created_at,
             "语音",
@@ -424,15 +473,16 @@ fn build_report_material(
             .as_ref()
             .and_then(|context| context.analysis.as_ref())
             .filter(|analysis| analysis.status == crate::types::ContextAnalysisStatus::Success);
-        let summary = analysis
-            .and_then(summary_from_analysis)
-            .unwrap_or_else(|| {
-                data_gaps.push(format!("[{}][重写] 缺少完整摘要，已降级使用文本字段。", entry.created_at));
-                ReportSummary {
-                    source_label: "降级文本字段",
-                    text: fallback_text(&entry.rewritten_text, &entry.source_text),
-                }
-            });
+        let summary = analysis.and_then(summary_from_analysis).unwrap_or_else(|| {
+            data_gaps.push(format!(
+                "[{}][重写] 缺少完整摘要，已降级使用文本字段。",
+                entry.created_at
+            ));
+            ReportSummary {
+                source_label: "降级文本字段",
+                text: fallback_text(&entry.rewritten_text, &entry.source_text),
+            }
+        });
         rewrite_lines.push(format_report_line(
             &entry.created_at,
             "重写",
@@ -450,7 +500,11 @@ fn build_report_material(
         ));
     }
 
-    for entry in coord.screenshot_records().list().map_err(|e| e.to_string())? {
+    for entry in coord
+        .screenshot_records()
+        .list()
+        .map_err(|e| e.to_string())?
+    {
         if !time_in_range(&entry.created_at, range_start, range_end) {
             continue;
         }
@@ -462,23 +516,21 @@ fn build_report_material(
         if analysis.and_then(summary_from_analysis).is_some() {
             stats.analyzed_screenshot_record_count += 1;
         }
-        let summary = analysis
-            .and_then(summary_from_analysis)
-            .unwrap_or_else(|| {
-                data_gaps.push(format!(
-                    "[{}][截图记录] 缺少完整摘要，已降级使用截图记录元数据。",
-                    entry.created_at
-                ));
-                ReportSummary {
-                    source_label: "降级截图元数据",
-                    text: format!(
-                        "截图记录：{}，截图 {} 张，触发 {} 次",
-                        entry.window_title.as_deref().unwrap_or("未知窗口"),
-                        entry.screenshot_ids.len(),
-                        entry.trigger_count
-                    ),
-                }
-            });
+        let summary = analysis.and_then(summary_from_analysis).unwrap_or_else(|| {
+            data_gaps.push(format!(
+                "[{}][截图记录] 缺少完整摘要，已降级使用截图记录元数据。",
+                entry.created_at
+            ));
+            ReportSummary {
+                source_label: "降级截图元数据",
+                text: format!(
+                    "截图记录：{}，截图 {} 张，触发 {} 次",
+                    entry.window_title.as_deref().unwrap_or("未知窗口"),
+                    entry.screenshot_ids.len(),
+                    entry.trigger_count
+                ),
+            }
+        });
         screenshot_lines.push(format_report_line(
             &entry.created_at,
             "截图记录",
@@ -497,7 +549,10 @@ fn build_report_material(
         if screenshot_lines.is_empty() { "无".into() } else { screenshot_lines.join("\n") },
         if data_gaps.is_empty() { "无".into() } else { data_gaps.join("\n") },
     );
-    Ok(ReportMaterial { source_stats: stats, text })
+    Ok(ReportMaterial {
+        source_stats: stats,
+        text,
+    })
 }
 
 fn summary_from_analysis(analysis: &crate::types::ContextAnalysisResult) -> Option<ReportSummary> {
@@ -529,7 +584,9 @@ fn format_report_line(
     analysis: Option<&crate::types::ContextAnalysisResult>,
     summary: &ReportSummary,
 ) -> String {
-    let topic = analysis.and_then(|analysis| analysis.topic.as_deref()).unwrap_or("未知主题");
+    let topic = analysis
+        .and_then(|analysis| analysis.topic.as_deref())
+        .unwrap_or("未知主题");
     let decision = analysis
         .and_then(|analysis| analysis.decision.as_deref())
         .unwrap_or("无明确结论");
@@ -577,11 +634,19 @@ fn format_report_line(
 }
 
 fn fallback_text(primary: &str, secondary: &str) -> String {
-    let text = if primary.trim().is_empty() { secondary } else { primary };
+    let text = if primary.trim().is_empty() {
+        secondary
+    } else {
+        primary
+    };
     text.chars().take(240).collect()
 }
 
-fn time_in_range(value: &str, start: chrono::DateTime<chrono::Utc>, end: chrono::DateTime<chrono::Utc>) -> bool {
+fn time_in_range(
+    value: &str,
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+) -> bool {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|time| {
             let time = time.with_timezone(&chrono::Utc);
@@ -599,12 +664,18 @@ async fn request_report_generation(
     if active_provider == crate::polish::CODEX_OAUTH_PROVIDER_ID || active_provider == "gemini" {
         anyhow::bail!("当前 LLM 服务暂不支持报告生成");
     }
-    let api_key = crate::persistence::CredentialsVault::get(crate::persistence::CredentialAccount::ArkApiKey)?
-        .unwrap_or_default();
-    let endpoint = crate::persistence::CredentialsVault::get(crate::persistence::CredentialAccount::ArkEndpoint)?
-        .unwrap_or_default();
-    let model = crate::persistence::CredentialsVault::get(crate::persistence::CredentialAccount::ArkModelId)?
-        .unwrap_or_default();
+    let api_key = crate::persistence::CredentialsVault::get(
+        crate::persistence::CredentialAccount::ArkApiKey,
+    )?
+    .unwrap_or_default();
+    let endpoint = crate::persistence::CredentialsVault::get(
+        crate::persistence::CredentialAccount::ArkEndpoint,
+    )?
+    .unwrap_or_default();
+    let model = crate::persistence::CredentialsVault::get(
+        crate::persistence::CredentialAccount::ArkModelId,
+    )?
+    .unwrap_or_default();
     if endpoint.trim().is_empty() || api_key.trim().is_empty() || model.trim().is_empty() {
         anyhow::bail!("LLM 服务未配置");
     }

@@ -435,7 +435,10 @@ fn create_recognizer(locale: Option<&str>) -> Result<*mut AnyObject> {
     let cls = speech_recognizer_class()?;
     let recognizer: *mut AnyObject = match locale.and_then(ns_locale) {
         Some(ns_loc) => {
-            log::info!("[apple-speech] recognizer locale = {}", locale.unwrap_or(""));
+            log::info!(
+                "[apple-speech] recognizer locale = {}",
+                locale.unwrap_or("")
+            );
             // SAFETY: `cls` 是 SFSpeechRecognizer 类；`alloc` 得未初始化实例，
             // `initWithLocale:` 用有效 NSLocale 初始化，返回实例移交调用方（ARC 管理）。
             unsafe {

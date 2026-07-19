@@ -78,8 +78,6 @@ impl OpenAICompatibleConfig {
 
 #[derive(Debug, Error)]
 pub enum LLMError {
-    #[error("missing credentials")]
-    MissingCredentials,
     #[error("network error: {0}")]
     Network(String),
     #[error("timeout")]
@@ -232,11 +230,7 @@ impl ActiveLLMProvider {
 
     /// 文本重写：接收用户选中的文本，按风格 prompt 生成重写结果。
     /// 与 polish/translate 共享 LLM provider，但 prompt 独立、不涉及 ASR 语义。
-    pub async fn rewrite(
-        &self,
-        source_text: &str,
-        style_prompt: &str,
-    ) -> Result<String, LLMError> {
+    pub async fn rewrite(&self, source_text: &str, style_prompt: &str) -> Result<String, LLMError> {
         match self {
             Self::OpenAI(provider) => provider.rewrite(source_text, style_prompt).await,
             Self::Codex(provider) => provider.rewrite(source_text, style_prompt).await,
@@ -356,8 +350,9 @@ impl OpenAICompatibleLLMProvider {
             !prior_turns.is_empty(),
         );
         log::info!(
-            "[style-pack] llm polish assembled provider={} model={} mode={:?} base_prompt_chars={} effective_prompt_chars={} hotwords={} front_app={} prior_turns={}",
+            "[style-pack] llm polish assembled provider={} display_name={} model={} mode={:?} base_prompt_chars={} effective_prompt_chars={} hotwords={} front_app={} prior_turns={}",
             self.config.provider_id,
+            self.config.display_name,
             self.config.model,
             mode,
             style_system_prompt.chars().count(),
@@ -506,11 +501,7 @@ impl OpenAICompatibleLLMProvider {
 
     /// 文本重写：接收用户选中的文本，按风格 prompt 生成重写结果。
     /// 复用私有的 chat_completion 通路，仅 prompt 不同。
-    pub async fn rewrite(
-        &self,
-        source_text: &str,
-        style_prompt: &str,
-    ) -> Result<String, LLMError> {
+    pub async fn rewrite(&self, source_text: &str, style_prompt: &str) -> Result<String, LLMError> {
         let system_prompt = crate::polish::compose_rewrite_system_prompt(style_prompt);
         let user_prompt = crate::polish::compose_rewrite_user_prompt(source_text);
         self.chat_completion(&system_prompt, &user_prompt).await
@@ -873,11 +864,13 @@ impl CodexOAuthConfig {
         }
     }
 
+    #[cfg(test)]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
         self
     }
 
+    #[cfg(test)]
     pub fn with_auth_path(mut self, auth_path: PathBuf) -> Self {
         self.auth_path = Some(auth_path);
         self
@@ -1037,11 +1030,7 @@ impl CodexOAuthLLMProvider {
 
     /// 文本重写：接收用户选中的文本，按风格 prompt 生成重写结果。
     /// 走 Codex Responses API，与 polish/translate 共享通路。
-    pub async fn rewrite(
-        &self,
-        source_text: &str,
-        style_prompt: &str,
-    ) -> Result<String, LLMError> {
+    pub async fn rewrite(&self, source_text: &str, style_prompt: &str) -> Result<String, LLMError> {
         let system_prompt = crate::polish::compose_rewrite_system_prompt(style_prompt);
         let user_prompt = crate::polish::compose_rewrite_user_prompt(source_text);
         let messages = vec![
@@ -1759,11 +1748,13 @@ fn extract_assistant_content(body: &str) -> Result<String, LLMError> {
 }
 
 pub mod prompts {
+    #[cfg(test)]
     use crate::types::PolishMode;
 
     /// 内置风格 prompt 文本放在 `types.rs`，因为 Style Pack 默认值属于 value layer 数据。
     /// 保留这个 wrapper，让现有 polish 测试与调用点继续使用 `polish::prompts::system_prompt`，
     /// 同时不重新引入 `types -> polish` 反向依赖。
+    #[cfg(test)]
     pub fn system_prompt(mode: PolishMode) -> String {
         crate::types::default_style_system_prompt_for_mode(mode)
     }
@@ -3246,5 +3237,8 @@ pub(crate) fn compose_rewrite_system_prompt(style_prompt: &str) -> String {
 
 /// 组装重写的 user prompt。
 pub(crate) fn compose_rewrite_user_prompt(source_text: &str) -> String {
-    format!("请重写以下文本：\n<text>\n{text}\n</text>", text = source_text)
+    format!(
+        "请重写以下文本：\n<text>\n{text}\n</text>",
+        text = source_text
+    )
 }

@@ -465,9 +465,7 @@ mod platform {
         tx: Sender<HotkeyEvent>,
         status_tx: StartupTx<Arc<MacShutdownHandles>>,
     ) {
-        let mask: CgEventMask = (1u64 << FLAGS_CHANGED)
-            | (1u64 << KEY_DOWN)
-            | (1u64 << KEY_UP);
+        let mask: CgEventMask = (1u64 << FLAGS_CHANGED) | (1u64 << KEY_DOWN) | (1u64 << KEY_UP);
         let handles = Arc::new(MacShutdownHandles {
             tap: std::sync::Mutex::new(None),
             runloop: std::sync::Mutex::new(None),
@@ -1234,11 +1232,9 @@ mod platform {
             dispatch_keyboard_event(&ctx, 0x44, WM_KEYDOWN);
 
             assert_eq!(combo_rx.recv().unwrap(), ComboHotkeyEvent::Pressed);
-            assert!(
-                hotkey_rx
-                    .try_iter()
-                    .any(|evt| evt == HotkeyEvent::TranslationModifierPressed)
-            );
+            assert!(hotkey_rx
+                .try_iter()
+                .any(|evt| evt == HotkeyEvent::TranslationModifierPressed));
 
             drop(monitor);
         }

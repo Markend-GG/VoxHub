@@ -60,19 +60,6 @@ impl TextInserter {
         insert_with_clipboard_restore(text, restore_clipboard_after_paste, paste_shortcut)
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "android", target_os = "ios")))]
-    pub fn insert_via_clipboard_fallback(
-        &self,
-        text: &str,
-        restore_clipboard_after_paste: bool,
-        paste_shortcut: PasteShortcut,
-    ) -> InsertStatus {
-        if text.is_empty() {
-            return InsertStatus::CopiedFallback;
-        }
-        insert_with_clipboard_restore(text, restore_clipboard_after_paste, paste_shortcut)
-    }
-
     #[cfg(target_os = "windows")]
     pub fn insert_via_unicode_keystrokes(
         &self,
@@ -189,9 +176,7 @@ fn map_sendinput_type_result(
     match result {
         Ok(typed_chars) if typed_chars == expected => InsertStatus::Inserted,
         Ok(typed_chars) => {
-            log::warn!(
-                "[insertion] Unicode SendInput typed only {typed_chars}/{expected} chars"
-            );
+            log::warn!("[insertion] Unicode SendInput typed only {typed_chars}/{expected} chars");
             InsertStatus::CopiedFallback
         }
         Err(err) => {
@@ -633,13 +618,6 @@ mod tests {
             inserter.insert("", true, PasteShortcut::CtrlV),
             InsertStatus::CopiedFallback
         );
-        #[cfg(not(any(target_os = "macos", target_os = "android", target_os = "ios")))]
-        {
-            assert_eq!(
-                inserter.insert_via_clipboard_fallback("", true, PasteShortcut::CtrlV),
-                InsertStatus::CopiedFallback
-            );
-        }
         assert_eq!(inserter.copy_fallback(""), InsertStatus::CopiedFallback);
     }
 

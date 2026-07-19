@@ -131,6 +131,7 @@ fn load_engine(dir: &Path) -> Result<Arc<super::QwenAsrEngine>> {
 
 /// 严格按 RIFF 走 chunk 链找 "data" —— jfk.wav / test_speech.wav 都在
 /// fmt chunk 后面带了 LIST/INFO 元数据，硬编码 +44 会读到垃圾。
+#[cfg(target_os = "macos")]
 fn decode_wav_16k_mono(bytes: &[u8]) -> Result<Vec<f32>> {
     if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         anyhow::bail!("不是有效的 RIFF/WAVE 文件");

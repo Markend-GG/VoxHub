@@ -96,10 +96,7 @@ impl ActionHotkeyMonitor {
         }
     }
 
-    pub fn update_passthrough(
-        &mut self,
-        binding: ShortcutBinding,
-    ) -> Result<(), ComboHotkeyError> {
+    pub fn update_passthrough(&mut self, binding: ShortcutBinding) -> Result<(), ComboHotkeyError> {
         match self {
             Self::Registered(_) => {
                 *self = Self::start_passthrough(binding, self.sender())?;
@@ -348,7 +345,11 @@ mod passthrough_windows {
 
         let thread_id = status_rx
             .recv_timeout(std::time::Duration::from_secs(5))
-            .map_err(|_| ComboHotkeyError::RegisterFailed("Windows pass-through hotkey hook startup timeout".into()))??;
+            .map_err(|_| {
+                ComboHotkeyError::RegisterFailed(
+                    "Windows pass-through hotkey hook startup timeout".into(),
+                )
+            })??;
         *inner.thread_id.lock() = Some(thread_id);
         inner.installed.store(true, Ordering::SeqCst);
         Ok(inner)
@@ -418,9 +419,7 @@ mod passthrough_windows {
             if let Some(hook) = (*context).hook.lock().unwrap().take() {
                 let _ = UnhookWindowsHookEx(hook);
             }
-            (&(*context).inner)
-                .installed
-                .store(false, Ordering::SeqCst);
+            (&(*context).inner).installed.store(false, Ordering::SeqCst);
             HOOK_CONTEXT.store(std::ptr::null_mut(), Ordering::SeqCst);
             let _ = Box::from_raw(context);
             log::info!("[combo-hotkey] Windows pass-through hook exited");
@@ -493,7 +492,9 @@ mod passthrough_windows {
             return;
         };
         match vk_code {
-            VK_CONTROL | VK_LCONTROL | VK_RCONTROL => inner.ctrl_held.store(value, Ordering::SeqCst),
+            VK_CONTROL | VK_LCONTROL | VK_RCONTROL => {
+                inner.ctrl_held.store(value, Ordering::SeqCst)
+            }
             VK_MENU | VK_LMENU | VK_RMENU => inner.alt_held.store(value, Ordering::SeqCst),
             VK_SHIFT | VK_LSHIFT | VK_RSHIFT => inner.shift_held.store(value, Ordering::SeqCst),
             VK_LWIN | VK_RWIN => inner.super_held.store(value, Ordering::SeqCst),
@@ -615,7 +616,9 @@ mod passthrough_windows {
     mod tests {
         use super::*;
 
-        fn test_inner(binding: ShortcutBinding) -> (Arc<Inner>, std::sync::mpsc::Receiver<ComboHotkeyEvent>) {
+        fn test_inner(
+            binding: ShortcutBinding,
+        ) -> (Arc<Inner>, std::sync::mpsc::Receiver<ComboHotkeyEvent>) {
             let (tx, rx) = std::sync::mpsc::channel();
             let matcher = BindingMatcher::from_binding(&binding).unwrap();
             (

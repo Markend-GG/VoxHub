@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! sherpa-onnx 本地 ASR runtime（Windows offline batch + online streaming）。
 //!
 //! 设计与 `foundry_runtime.rs` 对齐：runtime 是模型/会话/生命周期的单一持有者，
@@ -16,6 +15,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::asr::local::sherpa::{
@@ -29,6 +29,13 @@ use sherpa_onnx::{
     OfflineRecognizerConfig, OfflineSenseVoiceModelConfig, OfflineWhisperModelConfig,
     OnlineRecognizer, OnlineRecognizerConfig,
 };
+
+const OFFLINE_PCM_CHUNK_SECONDS: u64 = 30;
+const OFFLINE_PCM_OVERLAP_MILLIS: u64 = 750;
+const PCM_BYTES_PER_SECOND: u64 = 16_000 * 2;
+const OFFLINE_PCM_CHUNK_BYTES: u64 = PCM_BYTES_PER_SECOND * OFFLINE_PCM_CHUNK_SECONDS;
+const OFFLINE_PCM_OVERLAP_BYTES: u64 = PCM_BYTES_PER_SECOND * OFFLINE_PCM_OVERLAP_MILLIS / 1_000;
+const MAX_TEXT_OVERLAP_CHARS: usize = 64;
 
 /// Offline 模型加载状态。Windows 持有 native `OfflineRecognizer`；其他平台仅保留 alias
 /// 以维持跨平台编译与状态查询形状。
@@ -284,6 +291,70 @@ impl SherpaOnnxRuntime {
         result
     }
 
+    /// 从临时文件按固定窗口读取离线 PCM。峰值输入内存由
+    /// `OFFLINE_PCM_CHUNK_BYTES` 决定，不随录音总时长增长。
+    pub async fn transcribe_pcm_file(
+        &self,
+        alias: &str,
+        file: std::fs::File,
+        audio_bytes: u64,
+        language_hint: Option<&str>,
+        audio_timeout: std::time::Duration,
+    ) -> Result<String> {
+        if audio_bytes == 0 {
+            return Ok(String::new());
+        }
+        if audio_bytes % 2 != 0 {
+            anyhow::bail!("PCM file length is not aligned to i16 samples");
+        }
+        if sherpa::mode_for_alias(alias)? != SherpaMode::Offline {
+            anyhow::bail!("sherpa-onnx model {alias} is online-only; use streaming API");
+        }
+        let audio_ms = pcm_duration_ms_from_bytes(audio_bytes);
+        let loaded_alias = self.ensure_loaded(alias).await?;
+        let loaded = self
+            .state
+            .lock()
+            .offline_loaded
+            .clone()
+            .filter(|loaded| loaded.alias == loaded_alias)
+            .context("sherpa-onnx offline model not loaded")?;
+        let started = Instant::now();
+        let result = transcribe_loaded_file_chunks(
+            loaded,
+            file,
+            audio_bytes,
+            language_hint.map(str::to_string),
+            audio_timeout,
+        )
+        .await;
+        let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        match &result {
+            Ok(text) => {
+                log::info!(
+                    "[sherpa-asr] chunked transcribe finished model={} audio_ms={} elapsed_ms={} text_chars={}",
+                    alias,
+                    audio_ms,
+                    elapsed_ms,
+                    text.chars().count()
+                );
+                self.record_transcribe_result(audio_ms, elapsed_ms, None);
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                log::warn!(
+                    "[sherpa-asr] chunked transcribe failed model={} audio_ms={} elapsed_ms={} error={}",
+                    alias,
+                    audio_ms,
+                    elapsed_ms,
+                    message
+                );
+                self.record_transcribe_result(audio_ms, elapsed_ms, Some(message));
+            }
+        }
+        result
+    }
+
     /// 创建独立 online 解码 session。调用者负责按 Recorder PCM chunk 喂入，
     /// 并在停止录音时调用 `finish()` 刷出 final text。
     pub async fn create_online_session(&self, alias: &str) -> Result<SherpaOnlineSession> {
@@ -488,6 +559,10 @@ fn pcm_duration_ms(pcm: &[u8]) -> u64 {
     crate::asr::pcm::pcm_duration_ms(pcm)
 }
 
+fn pcm_duration_ms_from_bytes(bytes: u64) -> u64 {
+    crate::asr::pcm::pcm_duration_ms_from_bytes(bytes)
+}
+
 enum LoadedModel {
     Offline(LoadedOfflineModel),
     Online(LoadedOnlineModel),
@@ -663,6 +738,73 @@ async fn transcribe_loaded_model(
     _audio_timeout: std::time::Duration,
 ) -> Result<String> {
     Ok(String::new())
+}
+
+async fn transcribe_loaded_file_chunks(
+    loaded: LoadedOfflineModel,
+    file: std::fs::File,
+    audio_bytes: u64,
+    language_hint: Option<String>,
+    audio_timeout: std::time::Duration,
+) -> Result<String> {
+    let mut file = tokio::fs::File::from_std(file);
+    let mut offset = 0u64;
+    let mut transcript = String::new();
+
+    while offset < audio_bytes {
+        let chunk_bytes = (audio_bytes - offset).min(OFFLINE_PCM_CHUNK_BYTES);
+        let chunk_len =
+            usize::try_from(chunk_bytes).context("sherpa-onnx PCM chunk does not fit in memory")?;
+        let mut pcm = vec![0u8; chunk_len];
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .context("seek sherpa-onnx PCM spool")?;
+        file.read_exact(&mut pcm)
+            .await
+            .context("read sherpa-onnx PCM spool chunk")?;
+
+        let text =
+            transcribe_loaded_model(loaded.clone(), pcm, language_hint.clone(), audio_timeout)
+                .await?;
+        append_chunk_transcript(&mut transcript, &text);
+
+        if offset.saturating_add(chunk_bytes) >= audio_bytes {
+            break;
+        }
+        let advance = chunk_bytes.saturating_sub(OFFLINE_PCM_OVERLAP_BYTES);
+        if advance == 0 {
+            anyhow::bail!("sherpa-onnx PCM chunk overlap must be smaller than the chunk");
+        }
+        offset = offset
+            .checked_add(advance)
+            .context("sherpa-onnx PCM chunk offset overflow")?;
+    }
+
+    Ok(transcript.trim().to_string())
+}
+
+fn append_chunk_transcript(transcript: &mut String, chunk: &str) {
+    let chunk = chunk.trim();
+    if chunk.is_empty() {
+        return;
+    }
+    if transcript.is_empty() {
+        transcript.push_str(chunk);
+        return;
+    }
+
+    let left = transcript.chars().collect::<Vec<_>>();
+    let right = chunk.chars().collect::<Vec<_>>();
+    let max_overlap = left.len().min(right.len()).min(MAX_TEXT_OVERLAP_CHARS);
+    let overlap = (2..=max_overlap)
+        .rev()
+        .find(|&length| left[left.len() - length..] == right[..length])
+        .unwrap_or(0);
+    if overlap > 0 {
+        transcript.extend(right[overlap..].iter().copied());
+    } else {
+        append_segment(transcript, chunk);
+    }
 }
 
 pub struct SherpaOnlineSession {
@@ -1034,6 +1176,58 @@ mod tests {
         append_segment(&mut text, "你好");
         append_segment(&mut text, "world");
         assert_eq!(text, "你好 world");
+    }
+
+    #[test]
+    fn append_chunk_transcript_removes_exact_overlap() {
+        let mut text = "今天讨论发布计划".to_string();
+        append_chunk_transcript(&mut text, "发布计划和风险");
+        assert_eq!(text, "今天讨论发布计划和风险");
+    }
+
+    #[test]
+    fn two_hour_audio_is_planned_as_bounded_chunks() {
+        let audio_bytes = PCM_BYTES_PER_SECOND * 60 * 60 * 2;
+        let mut offset = 0u64;
+        let mut chunk_count = 0usize;
+        let mut max_chunk_bytes = 0u64;
+
+        while offset < audio_bytes {
+            let chunk_bytes = (audio_bytes - offset).min(OFFLINE_PCM_CHUNK_BYTES);
+            max_chunk_bytes = max_chunk_bytes.max(chunk_bytes);
+            chunk_count += 1;
+            if offset + chunk_bytes >= audio_bytes {
+                break;
+            }
+            offset += chunk_bytes - OFFLINE_PCM_OVERLAP_BYTES;
+        }
+
+        assert!(chunk_count > 200);
+        assert_eq!(max_chunk_bytes, OFFLINE_PCM_CHUNK_BYTES);
+        assert_eq!(OFFLINE_PCM_CHUNK_BYTES, 960_000);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires an installed sherpa-onnx model"]
+    async fn installed_sherpa_model_decodes_without_ort_api_mismatch() {
+        let alias = sherpa::DEFAULT_MODEL_ALIAS;
+        let dir = sherpa::model_dir_for_alias(alias).unwrap();
+        if ensure_required_files(alias, &dir).is_err() {
+            return;
+        }
+
+        let runtime = SherpaOnnxRuntime::new();
+        let _text = runtime
+            .transcribe_pcm(
+                alias,
+                &vec![0u8; PCM_BYTES_PER_SECOND as usize],
+                Some("zh"),
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        runtime.release_now().await.unwrap();
     }
 
     #[cfg(target_os = "windows")]

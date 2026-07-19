@@ -75,14 +75,10 @@ pub(crate) fn current_foreground_app_identity() -> Option<crate::types::Foregrou
         let process_name = get_process_name_by_pid(pid)?;
         let exe_path = get_process_exe_path(pid);
         let display_name = get_file_description(&exe_path);
-        let window_title = get_window_title(hwnd);
 
         Some(crate::types::ForegroundAppIdentity {
             process_name,
-            process_id: pid,
-            exe_path,
             display_name,
-            window_title,
         })
     }
 }
@@ -243,7 +239,11 @@ pub(crate) fn list_open_window_apps() -> Vec<crate::types::OpenWindowApp> {
         }
 
         let exe_path = get_process_exe_path(pid);
-        let dedup_key = format!("{}|{}", process_name_lower, exe_path.as_deref().unwrap_or(""));
+        let dedup_key = format!(
+            "{}|{}",
+            process_name_lower,
+            exe_path.as_deref().unwrap_or("")
+        );
 
         if data.seen.contains(&dedup_key) {
             return TRUE;
@@ -344,11 +344,12 @@ pub(crate) fn restore_default_whitelist(apps: &mut Vec<ScreenshotWhitelistApp>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        ScreenshotWhitelistApp, ScreenshotWhitelistAppSource, UserPreferences,
-    };
+    use crate::types::{ScreenshotWhitelistApp, ScreenshotWhitelistAppSource, UserPreferences};
 
-    fn make_app(process_name: &str, source: ScreenshotWhitelistAppSource) -> ScreenshotWhitelistApp {
+    fn make_app(
+        process_name: &str,
+        source: ScreenshotWhitelistAppSource,
+    ) -> ScreenshotWhitelistApp {
         ScreenshotWhitelistApp {
             id: uuid::Uuid::new_v4().to_string(),
             display_name: process_name.trim_end_matches(".exe").to_string(),
@@ -378,7 +379,10 @@ mod tests {
 
     #[test]
     fn add_app_deduplicates_by_process_name() {
-        let mut apps = vec![make_app("chrome.exe", ScreenshotWhitelistAppSource::Default)];
+        let mut apps = vec![make_app(
+            "chrome.exe",
+            ScreenshotWhitelistAppSource::Default,
+        )];
         let added = add_app_to_whitelist(
             &mut apps,
             "Chrome".to_string(),
@@ -391,7 +395,10 @@ mod tests {
 
     #[test]
     fn add_app_inserts_new_entry() {
-        let mut apps = vec![make_app("chrome.exe", ScreenshotWhitelistAppSource::Default)];
+        let mut apps = vec![make_app(
+            "chrome.exe",
+            ScreenshotWhitelistAppSource::Default,
+        )];
         let added = add_app_to_whitelist(
             &mut apps,
             "Firefox".to_string(),
@@ -418,7 +425,10 @@ mod tests {
 
     #[test]
     fn remove_app_returns_false_for_missing() {
-        let mut apps = vec![make_app("chrome.exe", ScreenshotWhitelistAppSource::Default)];
+        let mut apps = vec![make_app(
+            "chrome.exe",
+            ScreenshotWhitelistAppSource::Default,
+        )];
         let removed = remove_app_from_whitelist(&mut apps, "firefox.exe");
         assert!(!removed);
         assert_eq!(apps.len(), 1);
@@ -426,7 +436,10 @@ mod tests {
 
     #[test]
     fn restore_default_adds_missing_defaults() {
-        let mut apps = vec![make_app("chrome.exe", ScreenshotWhitelistAppSource::Default)];
+        let mut apps = vec![make_app(
+            "chrome.exe",
+            ScreenshotWhitelistAppSource::Default,
+        )];
         restore_default_whitelist(&mut apps);
         // 应该补充了所有默认项
         let default_list = crate::types::default_screenshot_whitelist_apps_list();
@@ -435,17 +448,17 @@ mod tests {
 
     #[test]
     fn restore_default_preserves_user_entries() {
-        let mut apps = vec![make_app(
-            "myapp.exe",
-            ScreenshotWhitelistAppSource::User,
-        )];
+        let mut apps = vec![make_app("myapp.exe", ScreenshotWhitelistAppSource::User)];
         restore_default_whitelist(&mut apps);
         assert!(apps.iter().any(|app| app.process_name == "myapp.exe"));
     }
 
     #[test]
     fn restore_default_does_not_duplicate_existing() {
-        let mut apps = vec![make_app("chrome.exe", ScreenshotWhitelistAppSource::Default)];
+        let mut apps = vec![make_app(
+            "chrome.exe",
+            ScreenshotWhitelistAppSource::Default,
+        )];
         restore_default_whitelist(&mut apps);
         let chrome_count = apps
             .iter()

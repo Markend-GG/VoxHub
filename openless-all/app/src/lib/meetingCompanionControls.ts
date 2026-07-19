@@ -5,6 +5,7 @@ import type {
 } from './meetingCompanionState';
 
 export const MEETING_COMPANION_CONTROLS_HIDE_DELAY_MS = 800;
+export const MEETING_COMPANION_DRAG_THRESHOLD_PX = 3;
 
 export type MeetingCompanionCommandAction = 'pause' | 'resume' | 'stop';
 export type MeetingCompanionControlAction =
@@ -258,6 +259,20 @@ export function clampMeetingCompanionMenuPosition(
     x: Math.max(0, Math.min(x, Math.max(0, viewportWidth - menuWidth))),
     y: Math.max(0, Math.min(y, Math.max(0, viewportHeight - menuHeight))),
   };
+}
+
+export function shouldStartMeetingCompanionDrag(
+  startX: number,
+  startY: number,
+  currentX: number,
+  currentY: number,
+  primaryButtonPressed: boolean,
+  threshold = MEETING_COMPANION_DRAG_THRESHOLD_PX,
+): boolean {
+  if (!primaryButtonPressed) return false;
+  const deltaX = currentX - startX;
+  const deltaY = currentY - startY;
+  return deltaX * deltaX + deltaY * deltaY >= threshold * threshold;
 }
 
 export function nextMeetingCompanionDialogFocusIndex(
