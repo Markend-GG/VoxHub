@@ -573,6 +573,24 @@ fn run_desktop() {
             init_file_logger();
             log::info!("=== OpenLess 启动 ===");
 
+            match persistence::MeetingStore::new()
+                .and_then(|store| store.recover_orphaned_runtime_states())
+            {
+                Ok(recovered) => {
+                    for meeting in recovered {
+                        log::warn!(
+                            "[meetings] recovered orphaned meeting {} from {:?} to {:?}",
+                            meeting.id,
+                            meeting.previous_status,
+                            meeting.recovered_status
+                        );
+                    }
+                }
+                Err(error) => {
+                    log::warn!("[meetings] recover orphaned runtime states failed: {error}");
+                }
+            }
+
             #[cfg(target_os = "windows")]
             if let Err(err) =
                 crate::windows_ime_profile::apply_windows_openless_keyboard_list_pref(

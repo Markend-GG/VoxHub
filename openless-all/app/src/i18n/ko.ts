@@ -405,6 +405,7 @@ export const ko: typeof zhCN = {
     deleteFailed: '회의 삭제 실패: {{err}}',
     eventError: '회의 녹음 알림: {{message}}',
     asrInterrupted: 'ASR 전사가 중단되었습니다. 이미 인식된 원문은 보존됩니다. 녹음은 계속할 수 있으며 이후 단락은 가능한 한 추가됩니다.',
+    interruptedRecordingEnded: '회의 녹음이 종료되었습니다. 기존 원문과 오디오는 보존됩니다. 오디오를 재생하거나 다시 전사할 수 있습니다.',
     selectHint: '왼쪽에서 회의를 선택해 자세히 봅니다.',
     backToList: '목록으로',
     untitled: '제목 없는 회의',

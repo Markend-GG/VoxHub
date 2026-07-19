@@ -401,6 +401,7 @@ export const zhCN = {
     deleteFailed: '删除会议失败：{{err}}',
     eventError: '会议录音提示：{{message}}',
     asrInterrupted: 'ASR 转写已中断，已识别原文会保留。可以继续录音，后续段落会尽量追加。',
+    interruptedRecordingEnded: '会议录音已结束，已有原文和音频会保留。你可以播放音频或重新转写。',
     selectHint: '左侧选一场会议查看详情。',
     backToList: '返回列表',
     untitled: '未命名会议',

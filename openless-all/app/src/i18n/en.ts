@@ -403,6 +403,7 @@ export const en: typeof zhCN = {
     deleteFailed: 'Failed to delete meeting: {{err}}',
     eventError: 'Meeting recording notice: {{message}}',
     asrInterrupted: 'ASR transcription was interrupted. Recognized transcript is kept. Recording can continue and later segments will be appended when possible.',
+    interruptedRecordingEnded: 'Meeting recording has ended. Existing transcript and audio are preserved. You can play the audio or retranscribe it.',
     selectHint: 'Select a meeting on the left to see details.',
     backToList: 'Back to list',
     untitled: 'Untitled meeting',

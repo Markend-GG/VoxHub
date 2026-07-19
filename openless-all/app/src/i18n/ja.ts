@@ -405,6 +405,7 @@ export const ja: typeof zhCN = {
     deleteFailed: '会議の削除に失敗：{{err}}',
     eventError: '会議録音の通知：{{message}}',
     asrInterrupted: 'ASR の文字起こしが中断されました。認識済みの原文は保持されます。録音は継続でき、以降の段落は可能な範囲で追加されます。',
+    interruptedRecordingEnded: '会議録音は終了しました。既存の文字起こしと音声は保持されています。音声の再生または再文字起こしができます。',
     selectHint: '左側から会議を選択して詳細を表示します。',
     backToList: '一覧に戻る',
     untitled: '無題の会議',

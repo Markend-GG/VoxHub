@@ -403,6 +403,7 @@ export const zhTW: typeof zhCN = {
     deleteFailed: '刪除會議失敗：{{err}}',
     eventError: '會議錄音提示：{{message}}',
     asrInterrupted: 'ASR 轉寫已中斷，已識別原文會保留。可以繼續錄音，後續段落會盡量追加。',
+    interruptedRecordingEnded: '會議錄音已結束，已有原文和音訊會保留。你可以播放音訊或重新轉寫。',
     selectHint: '左側選一場會議查看詳情。',
     backToList: '返回列表',
     untitled: '未命名會議',

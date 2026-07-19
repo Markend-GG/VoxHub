@@ -787,7 +787,9 @@ export function Meetings({
                   )}
                   {(detailMeeting.status === 'transcribing_interrupted' || selectedActiveSnapshot?.asrInterrupted) && (
                     <ErrorBanner tone="warning">
-                      {t('meetings.asrInterrupted')}
+                      {selectedActiveSnapshot?.asrInterrupted
+                        ? t('meetings.asrInterrupted')
+                        : t('meetings.interruptedRecordingEnded')}
                     </ErrorBanner>
                   )}
                   {detailMeeting.audio.state === 'missing' && (
