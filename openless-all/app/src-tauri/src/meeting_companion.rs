@@ -14,10 +14,11 @@ use crate::coordinator::Coordinator;
 use crate::types::MeetingCompanionPosition;
 
 const WINDOW_LABEL: &str = "meeting-companion";
-const WINDOW_WIDTH: f64 = 350.0;
-const WINDOW_HEIGHT: f64 = 324.0;
+const WINDOW_WIDTH: f64 = 240.0;
+const WINDOW_HEIGHT: f64 = 232.0;
 const EDGE_MARGIN: f64 = 16.0;
 const DRAG_SETTLE_DELAY: Duration = Duration::from_millis(350);
+const FAILED_DISMISS_DELAY: Duration = Duration::from_secs(3);
 const COMPLETED_DISMISS_FALLBACK_DELAY: Duration = Duration::from_secs(9);
 
 static LIFECYCLE: OnceLock<Mutex<LifecycleState>> = OnceLock::new();
@@ -174,23 +175,29 @@ pub(crate) fn audio_level_reporting_enabled() -> bool {
 }
 
 pub(crate) fn schedule_completed_fallback_dismissal(app: &AppHandle, meeting_id: &str) {
+    schedule_terminal_dismissal(app, meeting_id, COMPLETED_DISMISS_FALLBACK_DELAY);
+}
+
+pub(crate) fn schedule_failed_dismissal(app: &AppHandle, meeting_id: &str) {
+    if lifecycle().lock().hidden_failure_finished(meeting_id) {
+        destroy_window(app);
+        return;
+    }
+    schedule_terminal_dismissal(app, meeting_id, FAILED_DISMISS_DELAY);
+}
+
+fn schedule_terminal_dismissal(app: &AppHandle, meeting_id: &str, delay: Duration) {
     if lifecycle().lock().active_meeting_id.as_deref() != Some(meeting_id) {
         return;
     }
     let app = app.clone();
     let meeting_id = meeting_id.to_string();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(COMPLETED_DISMISS_FALLBACK_DELAY).await;
+        tokio::time::sleep(delay).await;
         if lifecycle().lock().completion_finished(&meeting_id) {
             destroy_window(&app);
         }
     });
-}
-
-pub(crate) fn dismiss_failed_hidden_meeting(app: &AppHandle, meeting_id: &str) {
-    if lifecycle().lock().hidden_failure_finished(meeting_id) {
-        destroy_window(app);
-    }
 }
 
 pub(crate) fn setting_disabled(app: &AppHandle) {
@@ -785,8 +792,8 @@ mod tests {
         let display = monitor("primary", 0, 0, 1920, 1040, 1.0);
         let size = window_size_for_monitor(&display);
         assert_eq!(
-            snap_and_clamp_position(PhysicalPosition::new(1558, 747), size, &display),
-            PhysicalPosition::new(1570, 716)
+            snap_and_clamp_position(PhysicalPosition::new(1668, 797), size, &display),
+            PhysicalPosition::new(1680, 808)
         );
     }
 
@@ -816,7 +823,7 @@ mod tests {
             window_size_for_monitor(&display),
             display.work_area,
         );
-        assert_eq!(position, PhysicalPosition::new(1016, 404));
+        assert_eq!(position, PhysicalPosition::new(1126, 496));
     }
 
     #[test]
@@ -824,7 +831,7 @@ mod tests {
         let display_125 = monitor("display", 0, 0, 1920, 1040, 1.25);
         assert_eq!(
             window_size_for_monitor(&display_125),
-            PhysicalSize::new(438, 405)
+            PhysicalSize::new(300, 290)
         );
         let display_150 = monitor("display", 0, 0, 1600, 860, 1.5);
         let saved = MeetingCompanionPosition {
@@ -834,7 +841,7 @@ mod tests {
         };
         let placement =
             restore_placement(Some(&saved), &[display_150], None, None).expect("placement");
-        assert_eq!(placement.position, PhysicalPosition::new(1075, 374));
+        assert_eq!(placement.position, PhysicalPosition::new(1240, 512));
     }
 
     #[test]
@@ -850,7 +857,7 @@ mod tests {
         };
         let placement = restore_placement(Some(&saved), &displays, Some("right"), Some("primary"))
             .expect("placement");
-        assert_eq!(placement.position, PhysicalPosition::new(4022, 975));
+        assert_eq!(placement.position, PhysicalPosition::new(4160, 1090));
         assert_eq!(placement.monitor_id, "right");
     }
 
@@ -916,5 +923,10 @@ mod tests {
         assert!(!state.hidden_failure_finished("meeting-old"));
         assert!(state.hidden_failure_finished("meeting-a"));
         assert_eq!(state.active_meeting_id, None);
+    }
+
+    #[test]
+    fn failed_summary_dismissal_delay_is_three_seconds() {
+        assert_eq!(FAILED_DISMISS_DELAY, Duration::from_secs(3));
     }
 }

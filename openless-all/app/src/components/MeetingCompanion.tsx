@@ -84,6 +84,10 @@ import type {
   UserPreferences,
 } from '../lib/types';
 
+const MEETING_COMPANION_WIDTH = 240;
+const MEETING_COMPANION_STAGE_HEIGHT = 192;
+const MEETING_COMPANION_CONTROLS_HEIGHT = 40;
+
 const POSTER_URLS: Readonly<Record<string, string>> = {
   'idle-poster.png': idlePoster,
   'recording-poster.png': recordingPoster,
@@ -863,9 +867,9 @@ function VisibleMeetingCompanion({
       onClick={showControls}
       onContextMenu={openContextMenu}
       style={{
-        width: 350,
-        height: 324,
-        flex: '0 0 350px',
+        width: MEETING_COMPANION_WIDTH,
+        height: MEETING_COMPANION_STAGE_HEIGHT + MEETING_COMPANION_CONTROLS_HEIGHT,
+        flex: `0 0 ${MEETING_COMPANION_WIDTH}px`,
         position: 'relative',
         overflow: 'hidden',
         display: 'flex',
@@ -880,9 +884,9 @@ function VisibleMeetingCompanion({
         onPointerUp={finishDrag}
         onPointerCancel={cancelDrag}
         style={{
-          width: 350,
-          height: 280,
-          flex: '0 0 280px',
+          width: MEETING_COMPANION_WIDTH,
+          height: MEETING_COMPANION_STAGE_HEIGHT,
+          flex: `0 0 ${MEETING_COMPANION_STAGE_HEIGHT}px`,
           position: 'relative',
           overflow: 'hidden',
           cursor: interaction?.positionLocked ? 'default' : 'grab',
@@ -975,17 +979,17 @@ function VisibleMeetingCompanion({
             data-meeting-companion-timer
             style={{
               position: 'absolute',
-              left: 268,
-              top: 192,
-              width: 31,
-              height: 12,
+              left: 184,
+              top: 132,
+              width: 22,
+              height: 8,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               overflow: 'hidden',
               color: '#f8d6dc',
               fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
-              fontSize: elapsedText.length > 5 ? 6 : 8,
+              fontSize: elapsedText.length > 5 ? 5 : 6,
               fontWeight: 700,
               fontVariantNumeric: 'tabular-nums',
               letterSpacing: 0,
@@ -1005,10 +1009,10 @@ function VisibleMeetingCompanion({
               aria-hidden="true"
               style={{
                 position: 'absolute',
-                right: 18,
-                top: 18,
-                width: 28,
-                height: 28,
+                right: 12,
+                top: 12,
+                width: 24,
+                height: 24,
                 display: 'grid',
                 placeItems: 'center',
                 border: '1px solid rgba(255, 255, 255, 0.88)',
@@ -1020,8 +1024,8 @@ function VisibleMeetingCompanion({
               }}
             >
               {errorOverlay.kind === 'summary_failed'
-                ? <CircleAlert size={17} strokeWidth={2.4} />
-                : <TriangleAlert size={17} strokeWidth={2.4} />}
+                ? <CircleAlert size={15} strokeWidth={2.4} />
+                : <TriangleAlert size={15} strokeWidth={2.4} />}
             </div>
             <div
               data-meeting-companion-error-message={errorOverlay.kind}
@@ -1030,18 +1034,18 @@ function VisibleMeetingCompanion({
               style={{
                 position: 'absolute',
                 left: '50%',
-                top: 16,
+                top: 10,
                 transform: 'translateX(-50%)',
-                maxWidth: 224,
-                minHeight: 28,
-                padding: '6px 10px',
+                maxWidth: 154,
+                minHeight: 24,
+                padding: '4px 8px',
                 boxSizing: 'border-box',
                 borderRadius: 8,
                 background: errorOverlay.kind === 'summary_failed'
                   ? 'rgba(194, 65, 59, 0.94)'
                   : 'rgba(180, 83, 9, 0.94)',
                 color: '#fff',
-                fontSize: 11,
+                fontSize: 9,
                 fontWeight: 650,
                 lineHeight: 1.35,
                 textAlign: 'center',
@@ -1058,9 +1062,9 @@ function VisibleMeetingCompanion({
         data-meeting-companion-controls
         data-meeting-companion-controls-visible={controlsVisible ? 'true' : 'false'}
         style={{
-          width: 350,
-          height: 44,
-          flex: '0 0 44px',
+          width: MEETING_COMPANION_WIDTH,
+          height: MEETING_COMPANION_CONTROLS_HEIGHT,
+          flex: `0 0 ${MEETING_COMPANION_CONTROLS_HEIGHT}px`,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -1206,8 +1210,8 @@ function VisibleMeetingCompanion({
             aria-describedby="meeting-companion-stop-body"
             onKeyDown={handleStopDialogKeyDown}
             style={{
-              width: 286,
-              padding: 16,
+              width: 216,
+              padding: 14,
               boxSizing: 'border-box',
               border: '1px solid rgba(31, 41, 55, 0.18)',
               borderRadius: 8,

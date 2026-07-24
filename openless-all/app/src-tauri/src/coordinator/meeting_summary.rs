@@ -569,7 +569,7 @@ fn emit_meeting_summary(
                 crate::meeting_companion::schedule_completed_fallback_dismissal(&app, &record.id);
             }
             MeetingStatus::SummaryFailed => {
-                crate::meeting_companion::dismiss_failed_hidden_meeting(&app, &record.id);
+                crate::meeting_companion::schedule_failed_dismissal(&app, &record.id);
             }
             _ => {}
         }
