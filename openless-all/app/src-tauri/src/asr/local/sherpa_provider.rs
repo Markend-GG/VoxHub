@@ -49,6 +49,7 @@ struct OfflinePcmSpool {
     tx: Option<SyncSender<OfflineSpoolMessage>>,
     result_rx: Option<Receiver<Result<OfflinePcmFile>>>,
     join_handle: Option<JoinHandle<()>>,
+    audio_bytes: AtomicU64,
     error: Arc<Mutex<Option<String>>>,
     cancelled: Arc<AtomicBool>,
 }
@@ -127,6 +128,23 @@ impl SherpaOnnxAsr {
     #[allow(dead_code)]
     pub fn language_hint(&self) -> Option<&str> {
         self.language_hint.as_deref()
+    }
+
+    /// 当前缓冲音频时长（毫秒）。Offline 读 PCM buffer；Online 读 worker 已接收
+    /// 的 PCM 字节数。不消费缓冲。
+    pub fn buffer_duration_ms(&self) -> u64 {
+        match &self.mode {
+            SherpaProviderMode::Offline { spool } => spool
+                .lock()
+                .as_ref()
+                .map(|spool| pcm_duration_ms_from_bytes(spool.audio_bytes.load(Ordering::SeqCst)))
+                .unwrap_or(0),
+            SherpaProviderMode::Online { worker } => worker
+                .lock()
+                .as_ref()
+                .map(|worker| pcm_duration_ms_from_bytes(worker.audio_bytes.load(Ordering::SeqCst)))
+                .unwrap_or(0),
+        }
     }
 
     pub async fn transcribe(&self, audio_timeout: Duration) -> Result<RawTranscript> {
@@ -326,6 +344,7 @@ impl OfflinePcmSpool {
             tx: Some(tx),
             result_rx: Some(result_rx),
             join_handle: Some(join_handle),
+            audio_bytes: AtomicU64::new(0),
             error,
             cancelled,
         })
@@ -339,7 +358,10 @@ impl OfflinePcmSpool {
             return;
         };
         match tx.try_send(OfflineSpoolMessage::Pcm(pcm.to_vec())) {
-            Ok(()) => {}
+            Ok(()) => {
+                self.audio_bytes
+                    .fetch_add(pcm.len() as u64, Ordering::SeqCst);
+            }
             Err(TrySendError::Full(_)) => self.record_error(
                 "sherpa-onnx offline PCM spool is full; transcription was stopped to avoid unbounded memory growth",
             ),
@@ -619,6 +641,24 @@ mod tests {
 
         assert_eq!(pcm_file.bytes, 6);
         assert_eq!(pcm, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn offline_buffer_duration_reports_16k_pcm_duration_without_consuming() {
+        let provider = make_provider();
+        provider.consume_pcm_chunk(&vec![0u8; 32_000]);
+
+        assert_eq!(provider.buffer_duration_ms(), 1000);
+        match &provider.mode {
+            SherpaProviderMode::Offline { spool } => assert_eq!(
+                spool
+                    .lock()
+                    .as_ref()
+                    .map(|spool| spool.audio_bytes.load(Ordering::SeqCst)),
+                Some(32_000)
+            ),
+            SherpaProviderMode::Online { .. } => panic!("expected offline provider"),
+        }
     }
 
     #[tokio::test]

@@ -268,6 +268,7 @@ mod tests {
         let mut sessions = vec![crate::types::DictationSession {
             id: "hist-a".into(),
             created_at: chrono::Utc::now().to_rfc3339(),
+            source: crate::types::HistorySource::Voice,
             raw_transcript: "raw".into(),
             final_text: "final".into(),
             mode: crate::types::PolishMode::Structured,
@@ -284,6 +285,12 @@ mod tests {
             dictionary_entry_count: None,
             has_audio_recording: None,
             context_capture: None,
+            asr_provider: None,
+            asr_model: None,
+            llm_provider: None,
+            llm_model: None,
+            asr_ms: None,
+            polish_ms: None,
         }];
         enrich_voice_history_with_context(&mut sessions, &context);
         assert_eq!(sessions[0].context_capture.as_ref().unwrap().id, "ctx-a");

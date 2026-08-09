@@ -7,7 +7,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::selection::capture_selection;
+use crate::selection::capture_selection_with_status;
 use crate::types::{
     rewrite_error_code, ContextCaptureHistoryType, InsertStatus, RewriteHistoryEntry,
     RewriteStateKind, RewriteStatePayload, BUILTIN_STYLE_PACK_REWRITE_ID,
@@ -94,12 +94,12 @@ async fn run_rewrite_flow_impl(inner: &Arc<Inner>) {
     wait_for_modifiers_released(500);
 
     // 5. 读取选区（带一次重试）
-    let selection = match capture_selection() {
+    let selection = match capture_selection_with_status().selection {
         Some(s) => s,
         None => {
             // 首次失败可能是时序问题，等 100ms 再试一次
             std::thread::sleep(std::time::Duration::from_millis(100));
-            match capture_selection() {
+            match capture_selection_with_status().selection {
                 Some(s) => s,
                 None => {
                     append_rewrite_history(

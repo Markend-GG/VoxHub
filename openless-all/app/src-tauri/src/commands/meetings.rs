@@ -261,7 +261,7 @@ async fn retranscribe_meeting_audio_in_chunks(
                 break;
             }
             let chunk_duration_ms = pcm_duration_ms(pcm.len());
-            let text = coord.retranscribe_pcm(pcm).await?;
+            let (text, _asr_label) = coord.retranscribe_pcm(pcm).await?;
             let trimmed = text.trim();
             if !trimmed.is_empty() {
                 segments.push(TranscriptSegment {

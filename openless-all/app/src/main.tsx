@@ -13,6 +13,7 @@ const params = new URLSearchParams(window.location.search);
 const windowKind = params.get("window");
 const isCapsule = windowKind === "capsule";
 const isQa = windowKind === "qa";
+const isSelectionPolishPreview = windowKind === "selection-polish-preview";
 const isLessComputer = windowKind === "less-computer";
 const isLessComputerGlow = windowKind === "less-computer-glow";
 const isMeetingCompanion = windowKind === "meeting-companion";
@@ -29,6 +30,7 @@ const renderApp = () => {
       <App
         isCapsule={isCapsule}
         isQa={isQa}
+        isSelectionPolishPreview={isSelectionPolishPreview}
         isLessComputer={isLessComputer}
         isLessComputerGlow={isLessComputerGlow}
         isMeetingCompanion={isMeetingCompanion}

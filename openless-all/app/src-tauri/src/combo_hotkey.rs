@@ -11,6 +11,7 @@
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
+use std::time::Instant;
 
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use parking_lot::Mutex;
@@ -22,9 +23,9 @@ use crate::types::ShortcutBinding;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComboHotkeyEvent {
     /// 用户按下了配置的组合键。
-    Pressed,
+    Pressed { at: Instant },
     /// 用户松开了配置的组合键（用于 Hold 模式结束录音）。
-    Released,
+    Released { at: Instant },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -192,9 +193,10 @@ fn forward_loop(hotkey_id: u32, rx: Receiver<GlobalHotKeyEvent>, tx: Sender<Comb
         if event.id() != hotkey_id {
             continue;
         }
+        let at = Instant::now();
         let combo_event = match event.state() {
-            HotKeyState::Pressed => ComboHotkeyEvent::Pressed,
-            HotKeyState::Released => ComboHotkeyEvent::Released,
+            HotKeyState::Pressed => ComboHotkeyEvent::Pressed { at },
+            HotKeyState::Released => ComboHotkeyEvent::Released { at },
         };
         if let Err(e) = tx.send(combo_event) {
             log::warn!("[combo-hotkey] 事件投递失败: {e}");
@@ -467,7 +469,10 @@ mod passthrough_windows {
             let was_held = inner.primary_held.swap(true, Ordering::SeqCst);
             if !was_held && matcher.matches_current_modifiers(inner) {
                 inner.matched_held.store(true, Ordering::SeqCst);
-                if let Err(e) = inner.tx.send(ComboHotkeyEvent::Pressed) {
+                if let Err(e) = inner
+                    .tx
+                    .send(ComboHotkeyEvent::Pressed { at: Instant::now() })
+                {
                     log::warn!("[combo-hotkey] pass-through event send failed: {e}");
                 }
             }
@@ -475,7 +480,9 @@ mod passthrough_windows {
             let was_held = inner.primary_held.swap(false, Ordering::SeqCst);
             let matched = inner.matched_held.swap(false, Ordering::SeqCst);
             if was_held && matched {
-                let _ = inner.tx.send(ComboHotkeyEvent::Released);
+                let _ = inner
+                    .tx
+                    .send(ComboHotkeyEvent::Released { at: Instant::now() });
             }
         }
     }
@@ -649,8 +656,14 @@ mod passthrough_windows {
             dispatch_keyboard_event(&inner, VK_RETURN, WM_KEYDOWN);
             dispatch_keyboard_event(&inner, VK_RETURN, WM_KEYUP);
 
-            assert!(matches!(rx.recv().unwrap(), ComboHotkeyEvent::Pressed));
-            assert!(matches!(rx.recv().unwrap(), ComboHotkeyEvent::Released));
+            assert!(matches!(
+                rx.recv().unwrap(),
+                ComboHotkeyEvent::Pressed { .. }
+            ));
+            assert!(matches!(
+                rx.recv().unwrap(),
+                ComboHotkeyEvent::Released { .. }
+            ));
             assert!(rx.try_recv().is_err());
         }
 
@@ -778,8 +791,8 @@ mod tests {
 
         forward_loop(8, event_rx, out_tx);
 
-        assert!(matches!(out_rx.recv().unwrap(), ComboHotkeyEvent::Released));
-        assert!(matches!(out_rx.recv().unwrap(), ComboHotkeyEvent::Pressed));
+        assert!(matches!(out_rx.recv().unwrap(), ComboHotkeyEvent::Released { .. }));
+        assert!(matches!(out_rx.recv().unwrap(), ComboHotkeyEvent::Pressed { .. }));
         assert!(out_rx.try_recv().is_err());
     }
 }

@@ -1155,6 +1155,39 @@ async fn flush_meeting_asr(
                 Ok(MeetingAsrFlushOutcome::Raw(raw))
             }
         }
+        ActiveAsr::Qwen3Realtime(asr) => {
+            if let Err(error) = asr.send_last_frame().await {
+                log::warn!("[meeting] Qwen3 realtime send last frame failed: {error}");
+            }
+            let timeout = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            tokio::time::timeout(timeout, asr.await_final_result())
+                .await
+                .map_err(|_| "qwen3 realtime transcribe timeout".to_string())?
+                .map(MeetingAsrFlushOutcome::Raw)
+                .map_err(|e| e.to_string())
+        }
+        ActiveAsr::StepfunRealtime(asr) => {
+            if let Err(error) = asr.send_last_frame().await {
+                log::warn!("[meeting] StepFun realtime send last frame failed: {error}");
+            }
+            let timeout = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            tokio::time::timeout(timeout, asr.await_final_result())
+                .await
+                .map_err(|_| "stepfun realtime transcribe timeout".to_string())?
+                .map(MeetingAsrFlushOutcome::Raw)
+                .map_err(|e| e.to_string())
+        }
+        ActiveAsr::Xfyun(asr) => {
+            if let Err(error) = asr.send_last_frame().await {
+                log::warn!("[meeting] iFlytek ASR send last frame failed: {error}");
+            }
+            let timeout = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            tokio::time::timeout(timeout, asr.await_final_result())
+                .await
+                .map_err(|_| "xfyun transcribe timeout".to_string())?
+                .map(MeetingAsrFlushOutcome::Raw)
+                .map_err(|e| e.to_string())
+        }
         ActiveAsr::Whisper(whisper) => {
             debug_assert!(uses_global_timeout);
             let timeout =
@@ -1162,6 +1195,26 @@ async fn flush_meeting_asr(
             tokio::time::timeout(timeout, whisper.transcribe())
                 .await
                 .map_err(|_| "whisper transcribe timeout".to_string())?
+                .map(MeetingAsrFlushOutcome::Raw)
+                .map_err(|e| e.to_string())
+        }
+        ActiveAsr::DashScopeMultimodal(asr) => {
+            debug_assert!(uses_global_timeout);
+            let audio_secs = asr.buffer_duration_ms() as f64 / 1000.0;
+            let timeout = asr.transcribe_timeout(audio_secs);
+            tokio::time::timeout(timeout, asr.transcribe())
+                .await
+                .map_err(|_| "dashscope multimodal transcribe timeout".to_string())?
+                .map(MeetingAsrFlushOutcome::Raw)
+                .map_err(|e| e.to_string())
+        }
+        ActiveAsr::ElevenLabs(asr) => {
+            debug_assert!(uses_global_timeout);
+            let audio_secs = asr.buffer_duration_ms() as f64 / 1000.0;
+            let timeout = crate::asr::elevenlabs::transcribe_timeout(audio_secs);
+            tokio::time::timeout(timeout, asr.transcribe())
+                .await
+                .map_err(|_| "elevenlabs transcribe timeout".to_string())?
                 .map(MeetingAsrFlushOutcome::Raw)
                 .map_err(|e| e.to_string())
         }
@@ -1177,8 +1230,9 @@ async fn flush_meeting_asr(
         #[cfg(target_os = "windows")]
         ActiveAsr::FoundryLocalWhisper(local) => {
             debug_assert!(!uses_global_timeout);
+            let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
             let result = local
-                .transcribe(super::foundry_audio_transcribe_timeout_duration())
+                .transcribe(super::windows_local_asr_transcribe_timeout(audio_secs))
                 .await
                 .map(MeetingAsrFlushOutcome::Raw)
                 .map_err(|e| e.to_string());
@@ -1188,8 +1242,9 @@ async fn flush_meeting_asr(
         #[cfg(target_os = "windows")]
         ActiveAsr::SherpaOnnxLocal(local) => {
             debug_assert!(!uses_global_timeout);
+            let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
             let result = local
-                .transcribe(super::sherpa_audio_transcribe_timeout_duration())
+                .transcribe(super::windows_local_asr_transcribe_timeout(audio_secs))
                 .await
                 .map(MeetingAsrFlushOutcome::Raw)
                 .map_err(|e| e.to_string());

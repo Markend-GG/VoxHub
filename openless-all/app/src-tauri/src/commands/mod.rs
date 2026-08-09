@@ -47,9 +47,9 @@ pub(crate) use crate::persistence::{
     MeetingStore, PreferencesStore,
 };
 pub(crate) use crate::polish::{
-    http_client_builder, CodexOAuthConfig, CodexOAuthCredentials, CodexOAuthLLMProvider, LLMError,
-    OpenAICompatibleConfig, OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL,
-    CODEX_OAUTH_PROVIDER_ID,
+    http_client_builder, openai_compatible_temperature_for_provider, CodexOAuthConfig,
+    CodexOAuthCredentials, CodexOAuthLLMProvider, LLMError, OpenAICompatibleConfig,
+    OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL, CODEX_OAUTH_PROVIDER_ID,
 };
 #[cfg(not(mobile))]
 pub(crate) use crate::recorder::{AudioConsumer, Recorder};
@@ -87,6 +87,10 @@ mod rewrite;
 mod settings;
 #[cfg(not(mobile))]
 mod sherpa_asr;
+#[cfg(all(not(mobile), debug_assertions))]
+mod selection_polish;
+#[cfg(not(mobile))]
+mod selection_polish_preview;
 mod style_packs;
 mod whitelist;
 
@@ -117,6 +121,10 @@ pub use settings::*;
 #[cfg(not(mobile))]
 #[allow(unused_imports)]
 pub use sherpa_asr::*;
+#[cfg(all(not(mobile), debug_assertions))]
+pub use selection_polish::*;
+#[cfg(not(mobile))]
+pub use selection_polish_preview::*;
 pub use style_packs::*;
 pub use whitelist::*;
 
@@ -288,9 +296,35 @@ mod tests {
             volcengine_app_key: Some("app".into()),
             volcengine_access_key: Some("access".into()),
             volcengine_resource_id: Some("resource".into()),
+            volcengine_auth_mode: None, // 默认 AppIdToken 模式
             ..snapshot()
         };
         assert!(asr_configured_for_provider("volcengine", &volcengine));
+
+        // AppIdToken 模式缺 access_key → 未配置（即使 app_key / resource_id 已填）。
+        let volcengine_no_access = CredentialsSnapshot {
+            volcengine_app_key: Some("app".into()),
+            volcengine_resource_id: Some("resource".into()),
+            ..snapshot()
+        };
+        assert!(!asr_configured_for_provider("volcengine", &volcengine_no_access));
+
+        // ApiKey 模式：只需独立 api_key 槽 + resource_id，无需 app_key。
+        let volcengine_api_key = CredentialsSnapshot {
+            volcengine_api_key: Some("key".into()),
+            volcengine_resource_id: Some("resource".into()),
+            volcengine_auth_mode: Some("api_key".into()),
+            ..snapshot()
+        };
+        assert!(asr_configured_for_provider("volcengine", &volcengine_api_key));
+        // ApiKey 模式缺 api_key（旧 access_key 槽有值也不满足）→ 未配置。
+        let volcengine_api_key_missing = CredentialsSnapshot {
+            volcengine_access_key: Some("old-access-token".into()),
+            volcengine_resource_id: Some("resource".into()),
+            volcengine_auth_mode: Some("api_key".into()),
+            ..snapshot()
+        };
+        assert!(!asr_configured_for_provider("volcengine", &volcengine_api_key_missing));
 
         let whisper_key_only = CredentialsSnapshot {
             asr_api_key: Some("key".into()),
@@ -574,6 +608,22 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn credentials_status_requires_api_key_for_atlascloud() {
+        let keyless = CredentialsSnapshot {
+            ark_endpoint: Some("https://api.atlascloud.ai/v1".into()),
+            ark_model_id: Some("qwen/qwen3.5-flash".into()),
+            ..snapshot()
+        };
+        assert!(!llm_configured_for_provider("atlascloud", &keyless));
+
+        let ready = CredentialsSnapshot {
+            ark_api_key: Some("key".into()),
+            ..keyless
+        };
+        assert!(llm_configured_for_provider("atlascloud", &ready));
+    }
+
     impl SettingsWriter for FakeSettingsWriter {
         fn read_settings(&self) -> UserPreferences {
             self.saved.lock().unwrap().clone().unwrap_or_default()
@@ -647,6 +697,7 @@ mod tests {
         fn refresh_screenshot_record_hotkey(&self) {}
 
         fn cancel_active_screenshot_record(&self, _reason: &str) {}
+        fn refresh_selection_polish_hotkey(&self) {}
 
         fn refresh_coding_agent_hotkey(&self) {
             *self.coding_agent_refreshes.lock().unwrap() += 1;
@@ -792,6 +843,10 @@ mod tests {
                 primary: "RightControl".to_string(),
                 modifiers: vec![],
             }),
+            // This fixture deliberately assigns Right Control to Less Computer.
+            // Keep selection polish disabled so the test exercises the intended
+            // independent refresh paths.
+            selection_polish_hotkey: None,
             hotkey: HotkeyBinding {
                 trigger: HotkeyTrigger::Custom,
                 mode: HotkeyMode::Hold,
@@ -825,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn persist_settings_rejects_less_computer_dictation_overlap() {
+    fn persist_settings_reconciles_less_computer_dictation_overlap_and_saves() {
         let writer = FakeSettingsWriter::default();
         let binding = ShortcutBinding {
             primary: "LeftControl".into(),
@@ -837,11 +892,11 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            persist_settings(&writer, prefs),
-            Err("Less Computer 快捷键不能和听写快捷键相同".into())
-        );
-        assert!(writer.saved.lock().unwrap().is_none());
+        // 兜底（#904）：冲突不再拒绝整份保存，较低优先级的 Less Computer 键被停用。
+        persist_settings(&writer, prefs).unwrap();
+        let saved = writer.saved.lock().unwrap().clone().expect("prefs saved");
+        assert_eq!(saved.dictation_hotkey.primary, "LeftControl");
+        assert!(saved.coding_agent_voice_hotkey.is_none());
     }
 
     #[test]
@@ -1207,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn persist_settings_rejects_dictation_translation_overlap() {
+    fn persist_settings_reconciles_dictation_translation_overlap_and_saves() {
         let writer = FakeSettingsWriter::default();
         let binding = ShortcutBinding {
             primary: "RightControl".into(),
@@ -1219,15 +1274,15 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            persist_settings(&writer, prefs),
-            Err("翻译快捷键不能和听写快捷键相同".into())
-        );
-        assert!(writer.saved.lock().unwrap().is_none());
+        // 兜底（#904）：冲突不再拒绝整份保存，翻译键恢复为旧默认 Shift。
+        persist_settings(&writer, prefs).unwrap();
+        let saved = writer.saved.lock().unwrap().clone().expect("prefs saved");
+        assert_eq!(saved.dictation_hotkey.primary, "RightControl");
+        assert_eq!(saved.translation_hotkey.primary, "Shift");
     }
 
     #[test]
-    fn persist_settings_rejects_translation_switch_style_overlap() {
+    fn persist_settings_reconciles_translation_switch_style_overlap_and_saves() {
         let writer = FakeSettingsWriter::default();
         let binding = ShortcutBinding {
             primary: "T".into(),
@@ -1239,15 +1294,16 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            persist_settings(&writer, prefs),
-            Err("切换风格快捷键不能和翻译快捷键相同".into())
-        );
-        assert!(writer.saved.lock().unwrap().is_none());
+        // 兜底（#904）：冲突不再拒绝整份保存，切换风格键恢复为旧默认。
+        persist_settings(&writer, prefs).unwrap();
+        let saved = writer.saved.lock().unwrap().clone().expect("prefs saved");
+        let defaults = UserPreferences::default();
+        assert_eq!(saved.translation_hotkey.primary, "T");
+        assert_eq!(saved.switch_style_hotkey, defaults.switch_style_hotkey);
     }
 
     #[test]
-    fn persist_settings_rejects_switch_style_open_app_overlap() {
+    fn persist_settings_reconciles_switch_style_open_app_overlap_and_saves() {
         let writer = FakeSettingsWriter::default();
         let binding = ShortcutBinding {
             primary: "K".into(),
@@ -1255,15 +1311,16 @@ mod tests {
         };
         let prefs = UserPreferences {
             switch_style_hotkey: Some(binding.clone()),
-            open_app_hotkey: Some(binding),
+            open_app_hotkey: Some(binding.clone()),
             ..Default::default()
         };
 
-        assert_eq!(
-            persist_settings(&writer, prefs),
-            Err("打开应用快捷键不能和切换风格快捷键相同".into())
-        );
-        assert!(writer.saved.lock().unwrap().is_none());
+        // 兜底（#904）：冲突不再拒绝整份保存，打开应用键恢复为旧默认。
+        persist_settings(&writer, prefs).unwrap();
+        let saved = writer.saved.lock().unwrap().clone().expect("prefs saved");
+        let defaults = UserPreferences::default();
+        assert_eq!(saved.switch_style_hotkey, Some(binding));
+        assert_eq!(saved.open_app_hotkey, defaults.open_app_hotkey);
     }
 
     #[test]
@@ -1275,13 +1332,13 @@ mod tests {
   <entry>
     <id>tag:github.com,2008:Repository/X/v1.2.23-tauri</id>
     <updated>2026-05-07T09:05:00Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.2.23-tauri"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.2.23-tauri"/>
     <title>OpenLess v1.2.23-tauri</title>
   </entry>
   <entry>
     <id>tag:github.com,2008:Repository/X/v1.2.24-2-beta-tauri</id>
     <updated>2026-05-08T01:27:23Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.2.24-2-beta-tauri"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.2.24-2-beta-tauri"/>
     <title>OpenLess v1.2.24-2-beta-tauri</title>
   </entry>
 </feed>"#;
@@ -1289,16 +1346,67 @@ mod tests {
         assert_eq!(got.tag_name, "v1.2.24-2-beta-tauri");
         assert_eq!(
             got.html_url,
-            "https://github.com/appergb/openless/releases/tag/v1.2.24-2-beta-tauri"
+            "https://github.com/Open-Less/openless/releases/tag/v1.2.24-2-beta-tauri"
         );
         assert_eq!(got.published_at, "2026-05-08T01:27:23Z");
+    }
+
+    #[test]
+    fn parse_latest_beta_from_atom_prefers_modern_beta_tag_over_legacy_beta() {
+        let body = r#"<?xml version="1.0"?>
+<feed>
+  <entry>
+    <updated>2026-07-15T08:00:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-tauri"/>
+  </entry>
+  <entry>
+    <updated>2026-07-15T07:00:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.1-tauri"/>
+  </entry>
+  <entry>
+    <updated>2026-06-17T15:41:46Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.3.10-4-beta-tauri"/>
+  </entry>
+</feed>"#;
+
+        let got = parse_latest_beta_from_atom(body).expect("must find the newest Beta entry");
+
+        assert_eq!(got.tag_name, "v1.3.15-Beta.1-tauri");
+        assert_eq!(got.published_at, "2026-07-15T07:00:00Z");
+    }
+
+    #[test]
+    fn parse_latest_beta_from_atom_skips_malformed_modern_tags() {
+        let body = r#"<feed>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/garbage-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/1.3.15-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15.0-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1..15-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.x-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.x-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.1-extra-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.1-tauri-extra"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.2-Beta.1-tauri"/></entry>
+  <entry>
+    <updated>2026-07-15T07:00:00Z</updated>
+    <link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.1-tauri"/>
+  </entry>
+</feed>"#;
+
+        let got = parse_latest_beta_from_atom(body).expect("must skip malformed Beta tags");
+
+        assert_eq!(got.tag_name, "v1.3.15-Beta.1-tauri");
+        assert_eq!(got.published_at, "2026-07-15T07:00:00Z");
     }
 
     #[test]
     fn parse_latest_beta_from_atom_returns_none_when_only_stable_releases() {
         let body = r#"<feed>
   <entry>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.2.23-tauri"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.2.23-tauri"/>
     <updated>2026-05-07T09:05:00Z</updated>
   </entry>
 </feed>"#;
@@ -1340,6 +1448,7 @@ mod tests {
             base_url: format!("http://{}", addr),
             api_key: String::new(),
             extra_headers: Default::default(),
+            temperature: None,
         })
         .await
         .unwrap();
@@ -1388,6 +1497,7 @@ mod tests {
             extra_headers: [("x-openless-test-token".to_string(), "secret".to_string())]
                 .into_iter()
                 .collect(),
+            temperature: None,
         })
         .await
         .unwrap();
