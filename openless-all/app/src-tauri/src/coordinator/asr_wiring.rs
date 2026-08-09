@@ -41,29 +41,29 @@ pub(super) fn ensure_microphone_permission(_inner: &Arc<Inner>) -> Result<(), St
 
     #[cfg(not(target_os = "windows"))]
     {
-    let status = permissions::check_microphone();
-    if matches!(
-        status,
-        PermissionStatus::Granted | PermissionStatus::NotApplicable
-    ) {
-        return Ok(());
-    }
-    if status == PermissionStatus::NoDevice {
-        return Err("未检测到麦克风，请连接麦克风后重试".to_string());
-    }
+        let status = permissions::check_microphone();
+        if matches!(
+            status,
+            PermissionStatus::Granted | PermissionStatus::NotApplicable
+        ) {
+            return Ok(());
+        }
+        if status == PermissionStatus::NoDevice {
+            return Err("未检测到麦克风，请连接麦克风后重试".to_string());
+        }
 
-    // 听写路径不抢前台焦点：缺 mic 权限时直接请求系统授权，不再先 show_main_window。
-    // 用户在设置页手动点“请求权限”仍走 request_microphone_from_foreground，那是显式操作。
-    // 这里若系统不弹框，后续会通过 capsule error 引导用户主动去权限页处理。详见 #166。
-    let requested = permissions::request_microphone();
-    if matches!(
-        requested,
-        PermissionStatus::Granted | PermissionStatus::NotApplicable
-    ) {
-        Ok(())
-    } else {
-        Err(format!("需要麦克风权限，当前状态: {requested:?}"))
-    }
+        // 听写路径不抢前台焦点：缺 mic 权限时直接请求系统授权，不再先 show_main_window。
+        // 用户在设置页手动点“请求权限”仍走 request_microphone_from_foreground，那是显式操作。
+        // 这里若系统不弹框，后续会通过 capsule error 引导用户主动去权限页处理。详见 #166。
+        let requested = permissions::request_microphone();
+        if matches!(
+            requested,
+            PermissionStatus::Granted | PermissionStatus::NotApplicable
+        ) {
+            Ok(())
+        } else {
+            Err(format!("需要麦克风权限，当前状态: {requested:?}"))
+        }
     }
 }
 
@@ -130,17 +130,17 @@ pub(super) fn ensure_asr_credentials_for_provider(
         } else {
             CredentialsVault::get(CredentialAccount::AsrEndpoint)
         }
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        .ok()
+        .flatten()
+        .unwrap_or_default();
         let model = if provider_specific {
             CredentialsVault::get_asr_for_provider(active_asr, CredentialAccount::AsrModel)
         } else {
             CredentialsVault::get(CredentialAccount::AsrModel)
         }
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        .ok()
+        .flatten()
+        .unwrap_or_default();
         return require_openai_compatible_fields(&endpoint, &model);
     }
 
@@ -154,9 +154,9 @@ pub(super) fn ensure_asr_credentials_for_provider(
             } else {
                 CredentialsVault::get(CredentialAccount::AsrApiKey)
             }
-                .ok()
-                .flatten()
-                .unwrap_or_default();
+            .ok()
+            .flatten()
+            .unwrap_or_default();
             if api_key.trim().is_empty() {
                 return Err("请先在设置中填写 ASR 服务商 API Key".to_string());
             }
@@ -917,6 +917,15 @@ fn model_with_override(default_model: String, model_override: Option<&str>) -> S
         .unwrap_or(default_model)
 }
 
+fn meeting_effective_asr_provider(
+    provider_id: &str,
+    configured_model: String,
+    model_override: Option<&str>,
+) -> Result<String, String> {
+    let model = model_with_override(configured_model, model_override);
+    resolve_effective_asr_provider(provider_id, &model)
+}
+
 pub(super) async fn build_meeting_asr_start_with_options(
     inner: &Arc<Inner>,
     options: MeetingAsrStartOptions,
@@ -947,7 +956,18 @@ pub(super) async fn build_meeting_asr_start_with_options(
         .map(|(start, _)| start);
     }
 
-    match active_asr_provider_kind(active_asr) {
+    let configured_model =
+        CredentialsVault::get_asr_for_provider(active_asr, CredentialAccount::AsrModel)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+    let effective_asr = meeting_effective_asr_provider(
+        active_asr,
+        configured_model,
+        options.model_override.as_deref(),
+    )?;
+
+    match active_asr_provider_kind(&effective_asr) {
         ActiveAsrProviderKind::Bailian => {
             let mut credentials = read_bailian_credentials_for_provider(active_asr);
             credentials.model =
@@ -1043,8 +1063,7 @@ pub(super) async fn build_meeting_asr_start_with_options(
             Ok(QaAsrStart::Ready { active, consumer })
         }
         ActiveAsrProviderKind::ElevenLabs => {
-            let (api_key, base_url, model) =
-                read_elevenlabs_credentials_for_provider(active_asr);
+            let (api_key, base_url, model) = read_elevenlabs_credentials_for_provider(active_asr);
             let model = model_with_override(model, options.model_override.as_deref());
             let asr = Arc::new(ElevenLabsBatchASR::new(api_key, base_url, model));
             let active = ActiveAsr::ElevenLabs(Arc::clone(&asr));
@@ -1078,6 +1097,32 @@ mod tests {
         assert_eq!(
             model_with_override("whisper-1".to_string(), Some(" fun-asr-realtime ")),
             "fun-asr-realtime"
+        );
+    }
+
+    #[test]
+    fn meeting_unified_bailian_routes_qwen_realtime_model_to_realtime_protocol() {
+        assert_eq!(
+            meeting_effective_asr_provider(
+                crate::asr::bailian::PROVIDER_ID,
+                crate::asr::qwen_realtime::DEFAULT_MODEL.to_string(),
+                None,
+            )
+            .unwrap(),
+            crate::asr::qwen_realtime::PROVIDER_ID,
+        );
+    }
+
+    #[test]
+    fn meeting_model_override_controls_unified_bailian_protocol_routing() {
+        assert_eq!(
+            meeting_effective_asr_provider(
+                crate::asr::bailian::PROVIDER_ID,
+                crate::asr::bailian::DEFAULT_MODEL.to_string(),
+                Some(crate::asr::qwen_realtime::DEFAULT_MODEL),
+            )
+            .unwrap(),
+            crate::asr::qwen_realtime::PROVIDER_ID,
         );
     }
 

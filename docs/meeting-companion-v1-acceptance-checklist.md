@@ -1,8 +1,10 @@
 # 会议桌宠（Meeting Companion）V1 Acceptance Checklist
 
-状态：active
+状态：superseded（已被替代）
 
 日期：2026-07-19
+
+替代说明：本清单保留桌宠阶段的历史验收证据，不再作为当前会议悬浮窗的交付门槛。2026-08-07 起以 `docs/meeting-signal-rail-v1-acceptance-checklist.md` 为准；原有会议状态、控制、位置和错误边界仍须回归，桌宠媒体与尺寸条目不再适用。
 
 ## Scope Authority（范围权威）
 

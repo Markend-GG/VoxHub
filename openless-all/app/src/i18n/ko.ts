@@ -809,6 +809,12 @@ export const ko: typeof zhCN = {
     copied: '복사됨',
   },
   meetingCompanion: {
+    starting: '녹음 준비 중',
+    recording: '녹음 중',
+    quiet: '주변이 조용함',
+    paused: '일시정지됨',
+    processing: '회의 내용 정리 중',
+    completed: '회의 내용 정리 완료',
     pause: '일시정지',
     resume: '계속',
     stop: '중지',
@@ -823,6 +829,9 @@ export const ko: typeof zhCN = {
     commandFailed: '작업에 실패했습니다. 다시 시도하세요.',
     summaryFailed: '회의 요약에 실패했습니다',
     asrInterrupted: '전사가 중단되었습니다. 녹음은 계속 진행 중입니다.',
+    more: '회의 제어 더 보기',
+    options: '회의 제어',
+    closeOptions: '제어 닫기',
   },
   settings: {
     selectionPolish: {
@@ -840,9 +849,9 @@ export const ko: typeof zhCN = {
     title: '설정',
     desc: '녹음, 공급자, 단축키, 권한 설정.',
     meetingCompanion: {
-      title: '회의 컴패니언',
-      enabledLabel: '회의 중 표시',
-      positionLockedLabel: '컴패니언 위치 잠금',
+      title: '회의 캡슐',
+      enabledLabel: '회의 중 캡슐 표시',
+      positionLockedLabel: '캡슐 위치 잠금',
     },
     network: {
       title: '네트워크',

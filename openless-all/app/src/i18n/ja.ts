@@ -809,6 +809,12 @@ export const ja: typeof zhCN = {
     copied: 'コピー済み',
   },
   meetingCompanion: {
+    starting: '録音の準備中',
+    recording: '録音中',
+    quiet: '周囲は静かです',
+    paused: '一時停止中',
+    processing: '議事録を整理中',
+    completed: '議事録の整理完了',
     pause: '一時停止',
     resume: '再開',
     stop: '停止',
@@ -823,6 +829,9 @@ export const ja: typeof zhCN = {
     commandFailed: '操作に失敗しました。もう一度お試しください。',
     summaryFailed: '会議の要約に失敗しました',
     asrInterrupted: '文字起こしが中断されました。録音は継続しています。',
+    more: 'その他の会議操作',
+    options: '会議操作',
+    closeOptions: '操作を閉じる',
   },
   settings: {
     selectionPolish: {
@@ -840,9 +849,9 @@ export const ja: typeof zhCN = {
     title: '設定',
     desc: '録音、プロバイダー、ショートカット、権限の設定。',
     meetingCompanion: {
-      title: 'ミーティングコンパニオン',
-      enabledLabel: 'ミーティング中に表示',
-      positionLockedLabel: '表示位置を固定',
+      title: 'ミーティングカプセル',
+      enabledLabel: 'ミーティング中にカプセルを表示',
+      positionLockedLabel: 'カプセルの位置を固定',
     },
     network: {
       title: 'ネットワーク',

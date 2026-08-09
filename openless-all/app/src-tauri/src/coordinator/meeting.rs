@@ -33,6 +33,12 @@ use super::{
 const MEETING_AUDIO_LEVEL_INTERVAL: Duration = Duration::from_millis(100);
 const MEETING_STATE_TICK_INTERVAL: Duration = Duration::from_millis(500);
 
+struct DiscardingMeetingAudioConsumer;
+
+impl crate::recorder::AudioConsumer for DiscardingMeetingAudioConsumer {
+    fn consume_pcm_chunk(&self, _pcm: &[u8]) {}
+}
+
 #[derive(Debug, Default)]
 struct MeetingAudioLevelThrottle {
     last_emit_elapsed: Option<Duration>,
@@ -498,27 +504,50 @@ pub(super) async fn start_meeting_recording(
             return Err(error);
         }
     };
-    if let Err(error) = asr_start.open_streaming_session().await {
-        cleanup_unstored_meeting_asr_start(inner, &asr_start, asr_release_token.clone());
-        mark_start_failed_record(inner, &meeting_id, &error)?;
-        return Err(error);
-    }
-    let recorder =
-        match start_meeting_recorder(inner, &meeting_id, asr_start.recorder_consumer()).await {
-            Ok(recorder) => recorder,
-            Err(error) => {
-                cleanup_unstored_meeting_asr_start(inner, &asr_start, asr_release_token.clone());
-                mark_start_failed_record(inner, &meeting_id, &error)?;
-                return Err(error);
-            }
+    let (asr_start, asr_interruption) = match asr_start.open_streaming_session().await {
+        Ok(()) => (Some(asr_start), None),
+        Err(error) => {
+            cleanup_unstored_meeting_asr_start(inner, &asr_start, asr_release_token.clone());
+            (None, Some(error))
+        }
+    };
+    if asr_interruption.is_some() {
+        let result = {
+            let mut session_guard = inner.meeting_session.lock();
+            let session = session_guard
+                .as_mut()
+                .ok_or_else(|| "meeting recording not active".to_string())?;
+            commit_meeting_asr_interruption(session, Utc::now(), persist_meeting_record)
         };
+        if let Err(error) = result {
+            mark_start_failed_record(inner, &meeting_id, &error)?;
+            return Err(error);
+        }
+    }
+    let recorder_consumer = asr_start
+        .as_ref()
+        .map(QaAsrStart::recorder_consumer)
+        .unwrap_or_else(|| Arc::new(DiscardingMeetingAudioConsumer));
+    let recorder = match start_meeting_recorder(inner, &meeting_id, recorder_consumer).await {
+        Ok(recorder) => recorder,
+        Err(error) => {
+            if let Some(asr_start) = asr_start.as_ref() {
+                cleanup_unstored_meeting_asr_start(inner, asr_start, asr_release_token.clone());
+            }
+            mark_start_failed_record(inner, &meeting_id, &error)?;
+            return Err(error);
+        }
+    };
 
-    *inner.meeting_asr.lock() = Some(asr_start.active_asr());
+    *inner.meeting_asr.lock() = asr_start.as_ref().map(QaAsrStart::active_asr);
     *inner.meeting_recorder.lock() = Some(recorder);
 
     let snapshot = meeting_snapshot(inner, Utc::now())?
         .ok_or_else(|| "meeting recording not active".to_string())?;
     emit_meeting_state(inner, &snapshot);
+    if let Some(error) = asr_interruption {
+        emit_meeting_error(inner, Some(meeting_id), "asrInterrupted", &error);
+    }
     Ok(snapshot)
 }
 
@@ -636,18 +665,26 @@ pub(super) async fn resume_meeting_recording(
             return Err(error);
         }
     };
-    if let Err(error) = asr_start.open_streaming_session().await {
-        cleanup_unstored_meeting_asr_start(inner, &asr_start, asr_release_token.clone());
-        return Err(error);
-    }
-    let recorder =
-        match start_meeting_recorder(inner, meeting_id, asr_start.recorder_consumer()).await {
-            Ok(recorder) => recorder,
-            Err(error) => {
-                cleanup_unstored_meeting_asr_start(inner, &asr_start, asr_release_token.clone());
-                return Err(error);
+    let (asr_start, asr_interruption) = match asr_start.open_streaming_session().await {
+        Ok(()) => (Some(asr_start), None),
+        Err(error) => {
+            cleanup_unstored_meeting_asr_start(inner, &asr_start, asr_release_token.clone());
+            (None, Some(error))
+        }
+    };
+    let recorder_consumer = asr_start
+        .as_ref()
+        .map(QaAsrStart::recorder_consumer)
+        .unwrap_or_else(|| Arc::new(DiscardingMeetingAudioConsumer));
+    let recorder = match start_meeting_recorder(inner, meeting_id, recorder_consumer).await {
+        Ok(recorder) => recorder,
+        Err(error) => {
+            if let Some(asr_start) = asr_start.as_ref() {
+                cleanup_unstored_meeting_asr_start(inner, asr_start, asr_release_token.clone());
             }
-        };
+            return Err(error);
+        }
+    };
     let commit_result = {
         let mut session_guard = inner.meeting_session.lock();
         match session_guard.as_mut() {
@@ -659,6 +696,7 @@ pub(super) async fn resume_meeting_recording(
                     provider_session_id,
                     audio_part_index,
                     session_start_ms,
+                    asr_start.is_some(),
                     persist_meeting_record,
                 )
             }
@@ -672,15 +710,25 @@ pub(super) async fn resume_meeting_recording(
         Err(error) => {
             recorder.stop();
             release_recording_mute(inner, "meeting");
-            cleanup_unstored_meeting_asr_start(inner, &asr_start, asr_release_token);
+            if let Some(asr_start) = asr_start.as_ref() {
+                cleanup_unstored_meeting_asr_start(inner, asr_start, asr_release_token);
+            }
             return Err(error);
         }
     }
-    *inner.meeting_asr.lock() = Some(asr_start.active_asr());
+    *inner.meeting_asr.lock() = asr_start.as_ref().map(QaAsrStart::active_asr);
     *inner.meeting_recorder.lock() = Some(recorder);
     let snapshot = meeting_snapshot(inner, Utc::now())?
         .ok_or_else(|| "meeting recording not active".to_string())?;
     emit_meeting_state(inner, &snapshot);
+    if let Some(error) = asr_interruption {
+        emit_meeting_error(
+            inner,
+            Some(meeting_id.to_string()),
+            "asrInterrupted",
+            &error,
+        );
+    }
     Ok(snapshot)
 }
 
@@ -1685,12 +1733,18 @@ fn commit_meeting_resume(
     provider_session_id: String,
     audio_part_index: u32,
     session_start_ms: u64,
+    asr_available: bool,
     persist: impl FnOnce(&MeetingRecord) -> Result<(), String>,
 ) -> Result<usize, String> {
     let original = session.clone();
     let result = (|| {
         session.resume(now)?;
-        session.set_active_asr_session(provider_session_id, audio_part_index, session_start_ms);
+        if asr_available {
+            session.set_active_asr_session(provider_session_id, audio_part_index, session_start_ms);
+        } else {
+            session.mark_asr_interrupted(now);
+            session.clear_active_asr_session();
+        }
         persist(session.record())?;
         Ok(session.record().transcript_segments.len())
     })();
@@ -1698,6 +1752,21 @@ fn commit_meeting_resume(
         *session = original;
     }
     result
+}
+
+fn commit_meeting_asr_interruption(
+    session: &mut MeetingSession,
+    now: DateTime<Utc>,
+    persist: impl FnOnce(&MeetingRecord) -> Result<(), String>,
+) -> Result<(), String> {
+    let original = session.clone();
+    session.mark_asr_interrupted(now);
+    session.clear_active_asr_session();
+    if let Err(error) = persist(session.record()) {
+        *session = original;
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn apply_meeting_audio_retention_state(
@@ -2437,6 +2506,7 @@ mod tests {
             "session-rollback".to_string(),
             2,
             60_000,
+            true,
             |_record| Err("persist failed".into()),
         );
 
@@ -2445,6 +2515,61 @@ mod tests {
         assert_eq!(session.record().status, crate::types::MeetingStatus::Paused);
         assert_eq!(session.accumulated_paused_ms, 0);
         assert_eq!(session.paused_at, Some(paused));
+    }
+
+    #[test]
+    fn commit_meeting_resume_without_asr_keeps_recording_and_marks_interrupted() {
+        let started = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 0).unwrap();
+        let paused = Utc.with_ymd_and_hms(2026, 7, 4, 9, 31, 0).unwrap();
+        let resumed = Utc.with_ymd_and_hms(2026, 7, 4, 9, 32, 0).unwrap();
+        let mut session = MeetingSession::new(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            started,
+            "bailian".to_string(),
+        );
+        session.pause(paused).unwrap();
+
+        let result = commit_meeting_resume(
+            &mut session,
+            resumed,
+            "unused-session".to_string(),
+            2,
+            60_000,
+            false,
+            |_record| Ok(()),
+        );
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(session.phase(), MeetingSessionPhase::Recording);
+        assert_eq!(
+            session.record().status,
+            crate::types::MeetingStatus::TranscribingInterrupted
+        );
+        assert!(session.snapshot(resumed).asr_interrupted);
+        assert_eq!(session.snapshot(resumed).active_provider_session_id, None);
+    }
+
+    #[test]
+    fn commit_meeting_asr_interruption_keeps_active_recording_session() {
+        let started = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 0).unwrap();
+        let interrupted = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 1).unwrap();
+        let mut session = MeetingSession::new(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            started,
+            "bailian".to_string(),
+        );
+        session.set_active_asr_session("failed-session".to_string(), 1, 0);
+
+        commit_meeting_asr_interruption(&mut session, interrupted, |_record| Ok(())).unwrap();
+
+        let snapshot = session.snapshot(interrupted);
+        assert_eq!(session.phase(), MeetingSessionPhase::Recording);
+        assert_eq!(
+            snapshot.phase,
+            MeetingRecordingPhase::TranscribingInterrupted
+        );
+        assert!(snapshot.asr_interrupted);
+        assert_eq!(snapshot.active_provider_session_id, None);
     }
 
     #[test]

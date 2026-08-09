@@ -286,6 +286,12 @@ export function nextMeetingCompanionDialogFocusIndex(
 }
 
 export const MEETING_COMPANION_I18N_KEYS = [
+  'starting',
+  'recording',
+  'quiet',
+  'paused',
+  'processing',
+  'completed',
   'pause',
   'resume',
   'stop',
@@ -300,4 +306,7 @@ export const MEETING_COMPANION_I18N_KEYS = [
   'commandFailed',
   'summaryFailed',
   'asrInterrupted',
+  'more',
+  'options',
+  'closeOptions',
 ] as const;

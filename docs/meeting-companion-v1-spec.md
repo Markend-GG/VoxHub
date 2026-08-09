@@ -1,8 +1,10 @@
 # 会议桌宠（Meeting Companion）V1 Spec
 
-状态：approved for implementation
+状态：superseded（已被替代）
 
 日期：2026-07-18
+
+替代说明：用户于 2026-08-07 确认会议期间不再使用动漫桌宠，改为“录音棚信号条”胶囊。本文档保留为历史实现记录；视觉展示、窗口几何和素材验收以 `docs/meeting-signal-rail-v1-spec.md` 为准，会议状态机、控制安全、位置记忆和错误恢复能力继续复用。
 
 任务等级：Level 2
 当前强制验收平台：Windows

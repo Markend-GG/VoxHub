@@ -805,6 +805,12 @@ export const zhCN = {
     copied: '已复制',
   },
   meetingCompanion: {
+    starting: '准备录音',
+    recording: '录音中',
+    quiet: '环境安静',
+    paused: '已暂停',
+    processing: '正在整理',
+    completed: '整理完成',
     pause: '暂停',
     resume: '继续',
     stop: '停止',
@@ -819,6 +825,9 @@ export const zhCN = {
     commandFailed: '操作失败，请重试',
     summaryFailed: '会议总结失败',
     asrInterrupted: '语音转写已中断，录音仍在继续',
+    more: '更多会议控制',
+    options: '会议控制',
+    closeOptions: '收起控制',
   },
   settings: {
     selectionPolish: {
@@ -836,9 +845,9 @@ export const zhCN = {
     title: '设置',
     desc: '录音、提供商、快捷键与权限配置。',
     meetingCompanion: {
-      title: '会议桌宠',
-      enabledLabel: '会议期间显示桌宠',
-      positionLockedLabel: '锁定桌宠位置',
+      title: '会议胶囊',
+      enabledLabel: '会议期间显示胶囊',
+      positionLockedLabel: '锁定胶囊位置',
     },
     network: {
       title: '网络',

@@ -5,24 +5,15 @@ import {
   ExternalLink,
   EyeOff,
   Lock,
+  MoreHorizontal,
   Pause,
   Play,
   Square,
   TriangleAlert,
   Unlock,
+  X,
 } from 'lucide-react';
-import completedPoster from '../assets/meeting-companion/completed-poster.png';
-import completedWebm from '../assets/meeting-companion/completed.webm';
-import idlePoster from '../assets/meeting-companion/idle-poster.png';
-import idleWebm from '../assets/meeting-companion/idle.webm';
-import pausedPoster from '../assets/meeting-companion/paused-poster.png';
-import pausedWebm from '../assets/meeting-companion/paused.webm';
-import processingPoster from '../assets/meeting-companion/processing-poster.png';
-import processingWebm from '../assets/meeting-companion/processing.webm';
-import quietPoster from '../assets/meeting-companion/quiet-poster.png';
-import quietWebm from '../assets/meeting-companion/quiet.webm';
-import recordingPoster from '../assets/meeting-companion/recording-poster.png';
-import recordingWebm from '../assets/meeting-companion/recording.webm';
+import { MeetingSignalRail } from './MeetingSignalRail';
 import {
   dismissCompletedMeetingCompanion,
   getActiveMeetingRecording,
@@ -38,10 +29,8 @@ import {
 } from '../lib/ipc';
 import { getSettings } from '../lib/ipc/settings';
 import {
-  clampMeetingCompanionMenuPosition,
   executeMeetingCompanionCommand,
   MeetingCompanionCommandGate,
-  MeetingCompanionControlsVisibility,
   meetingCompanionControlActions,
   meetingCompanionMenuActions,
   nextMeetingCompanionDialogFocusIndex,
@@ -49,15 +38,11 @@ import {
   type MeetingCompanionCommandAction,
   type MeetingCompanionControlAction,
   type MeetingCompanionMenuAction,
-  type MeetingCompanionMenuPosition,
 } from '../lib/meetingCompanionControls';
 import {
-  MEETING_COMPANION_MEDIA,
-  MeetingCompanionMediaController,
-  shouldPlayMeetingCompanionVideo,
-  shouldShowMeetingCompanionMinimalFallback,
-  type MeetingCompanionMediaState,
-} from '../lib/meetingCompanionMedia';
+  MEETING_SIGNAL_COMPLETE_ANIMATION_MS,
+  MEETING_SIGNAL_IDLE_MS,
+} from '../lib/meetingCompanionSignal';
 import {
   initialMeetingCompanionState,
   meetingCompanionReducer,
@@ -84,40 +69,23 @@ import type {
   UserPreferences,
 } from '../lib/types';
 
-const MEETING_COMPANION_WIDTH = 240;
-const MEETING_COMPANION_STAGE_HEIGHT = 192;
-const MEETING_COMPANION_CONTROLS_HEIGHT = 40;
-
-const POSTER_URLS: Readonly<Record<string, string>> = {
-  'idle-poster.png': idlePoster,
-  'recording-poster.png': recordingPoster,
-  'quiet-poster.png': quietPoster,
-  'paused-poster.png': pausedPoster,
-  'processing-poster.png': processingPoster,
-  'completed-poster.png': completedPoster,
-};
-
-const VIDEO_URLS: Readonly<Record<string, string>> = {
-  'idle.webm': idleWebm,
-  'recording.webm': recordingWebm,
-  'quiet.webm': quietWebm,
-  'paused.webm': pausedWebm,
-  'processing.webm': processingWebm,
-  'completed.webm': completedWebm,
-};
+const MEETING_COMPANION_WIDTH = 320;
+const MEETING_COMPANION_HEIGHT = 64;
 
 export interface MeetingCompanionProps {
   visualState?: MeetingCompanionVisualState;
   timerInput?: MeetingCompanionTimerInput | null;
   errorOverlay?: MeetingCompanionErrorOverlay | null;
   animationPaused?: boolean;
+  audioLevel?: number;
 }
 
 export function MeetingCompanion(props: MeetingCompanionProps) {
   const hasExplicitPresentation = props.visualState !== undefined
     || props.timerInput !== undefined
     || props.errorOverlay !== undefined
-    || props.animationPaused !== undefined;
+    || props.animationPaused !== undefined
+    || props.audioLevel !== undefined;
   if (isTauri && !hasExplicitPresentation) return <ConnectedMeetingCompanion />;
   return (
     <MeetingCompanionView
@@ -125,6 +93,7 @@ export function MeetingCompanion(props: MeetingCompanionProps) {
       timerInput={props.timerInput ?? null}
       errorOverlay={props.errorOverlay ?? null}
       animationPaused={props.animationPaused ?? false}
+      audioLevel={props.audioLevel ?? 0.08}
       interaction={null}
     />
   );
@@ -146,6 +115,7 @@ interface MeetingCompanionViewProps {
   timerInput: MeetingCompanionTimerInput | null;
   errorOverlay: MeetingCompanionErrorOverlay | null;
   animationPaused: boolean;
+  audioLevel: number;
   interaction: MeetingCompanionInteraction | null;
   onCompletedPlaybackFinished?: () => void;
 }
@@ -155,6 +125,7 @@ function MeetingCompanionView({
   timerInput,
   errorOverlay,
   animationPaused,
+  audioLevel,
   interaction,
   onCompletedPlaybackFinished,
 }: MeetingCompanionViewProps) {
@@ -165,6 +136,7 @@ function MeetingCompanionView({
       timerInput={timerInput}
       errorOverlay={errorOverlay}
       animationPaused={animationPaused}
+      audioLevel={audioLevel}
       interaction={interaction}
       onCompletedPlaybackFinished={onCompletedPlaybackFinished}
     />
@@ -176,6 +148,7 @@ function ConnectedMeetingCompanion() {
   const [busyAction, setBusyAction] = useState<MeetingCompanionCommandAction | null>(null);
   const [positionLocked, setPositionLocked] = useState(false);
   const [positionLockBusy, setPositionLockBusy] = useState(false);
+  const [audioLevel, setAudioLevel] = useState(0);
   const gateRef = useRef<MeetingCompanionEventGate | null>(null);
   const commandGateRef = useRef<MeetingCompanionCommandGate | null>(null);
   const quietDetectorRef = useRef<MeetingCompanionQuietDetector | null>(null);
@@ -264,6 +237,7 @@ function ConnectedMeetingCompanion() {
     commandGateRef.current?.cancel();
     setBusyAction(null);
     setPositionLockBusy(false);
+    setAudioLevel(0);
   }, [state.meetingId]);
 
   useEffect(() => {
@@ -356,6 +330,7 @@ function ConnectedMeetingCompanion() {
             if (cancelled) return;
             const payload = event.payload;
             if (!gate.acceptRelatedEvent(payload.meetingId)) return;
+            setAudioLevel(Math.max(0, Math.min(1, payload.level)));
             const result = detector.sample(payload, performance.now());
             if (result.changed) {
               dispatch({
@@ -400,7 +375,7 @@ function ConnectedMeetingCompanion() {
     if (!documentVisible || !meetingId) return;
 
     if (state.visualState === 'idle') {
-      timer.schedule(MEETING_COMPANION_MEDIA.idle.durationMs, () => {
+      timer.schedule(MEETING_SIGNAL_IDLE_MS, () => {
         if (gateRef.current?.isCurrent(meetingId)) {
           dispatch({ type: 'idle-finished', meetingId });
         }
@@ -530,6 +505,7 @@ function ConnectedMeetingCompanion() {
       timerInput={timerInput}
       errorOverlay={state.error}
       animationPaused={state.error?.kind === 'summary_failed'}
+      audioLevel={audioLevel}
       interaction={state.meetingId ? {
         meetingId: state.meetingId,
         positionLocked,
@@ -546,10 +522,11 @@ function ConnectedMeetingCompanion() {
 }
 
 interface VisibleMeetingCompanionProps {
-  visualState: MeetingCompanionMediaState;
+  visualState: MeetingCompanionVisualState;
   timerInput: MeetingCompanionTimerInput | null;
   errorOverlay: MeetingCompanionErrorOverlay | null;
   animationPaused: boolean;
+  audioLevel: number;
   interaction: MeetingCompanionInteraction | null;
   onCompletedPlaybackFinished?: () => void;
 }
@@ -559,28 +536,15 @@ function VisibleMeetingCompanion({
   timerInput,
   errorOverlay,
   animationPaused,
+  audioLevel,
   interaction,
   onCompletedPlaybackFinished,
 }: VisibleMeetingCompanionProps) {
   const { t } = useTranslation();
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const mediaControllerRef = useRef<MeetingCompanionMediaController | null>(null);
-  if (!mediaControllerRef.current) {
-    mediaControllerRef.current = new MeetingCompanionMediaController();
-  }
-
   const reducedMotion = useReducedMotion();
-  const documentVisible = useDocumentVisibility();
   const elapsedText = useMeetingCompanionElapsed(timerInput);
-  const [videoReadyState, setVideoReadyState] = useState<MeetingCompanionMediaState | null>(null);
-  const [mediaFailedState, setMediaFailedState] = useState<MeetingCompanionMediaState | null>(null);
-  const [posterFailedState, setPosterFailedState] = useState<MeetingCompanionMediaState | null>(null);
-  const [controlsVisible, setControlsVisible] = useState(false);
-  const [contextMenu, setContextMenu] = useState<MeetingCompanionMenuPosition | null>(null);
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
-  const completionNotifiedRef = useRef(false);
-  const controlsVisibilityRef = useRef<MeetingCompanionControlsVisibility | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const cancelStopRef = useRef<HTMLButtonElement | null>(null);
   const dragGestureRef = useRef<{
@@ -589,20 +553,6 @@ function VisibleMeetingCompanion({
     startY: number;
     started: boolean;
   } | null>(null);
-  if (!controlsVisibilityRef.current) {
-    controlsVisibilityRef.current = new MeetingCompanionControlsVisibility(setControlsVisible);
-  }
-
-  const mediaConfig = MEETING_COMPANION_MEDIA[visualState];
-  const posterUrl = POSTER_URLS[mediaConfig.poster] ?? '';
-  const videoUrl = VIDEO_URLS[mediaConfig.webm] ?? '';
-  const videoReady = videoReadyState === visualState;
-  const posterFailed = !posterUrl || posterFailedState === visualState;
-  const videoEnabled = !animationPaused
-    && shouldPlayMeetingCompanionVideo(visualState, reducedMotion, documentVisible)
-    && mediaFailedState !== visualState;
-  const videoVisible = videoReady && videoEnabled;
-  const minimalFallback = shouldShowMeetingCompanionMinimalFallback(posterFailed, videoVisible);
   const errorKind = errorOverlay?.kind ?? null;
   const controlActions = interaction
     ? meetingCompanionControlActions(visualState, errorKind)
@@ -611,14 +561,6 @@ function VisibleMeetingCompanion({
     ? meetingCompanionMenuActions(visualState, errorKind, interaction.positionLocked)
     : [];
 
-  useEffect(() => () => controlsVisibilityRef.current?.dispose(), []);
-
-  useEffect(() => {
-    if (contextMenu || stopConfirmOpen || errorKind === 'summary_failed') {
-      controlsVisibilityRef.current?.show();
-    }
-  }, [contextMenu, errorKind, stopConfirmOpen]);
-
   useEffect(() => {
     if (!stopConfirmOpen) return;
     const stopAllowed = controlActions.some(action => action.action === 'stop');
@@ -626,21 +568,13 @@ function VisibleMeetingCompanion({
   }, [controlActions, stopConfirmOpen]);
 
   useEffect(() => {
-    if (!contextMenu) return;
-    const closeOnPointerDown = (event: PointerEvent) => {
-      if (menuRef.current?.contains(event.target as Node)) return;
-      setContextMenu(null);
-    };
+    if (!contextMenuOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setContextMenu(null);
+      if (event.key === 'Escape') setContextMenuOpen(false);
     };
-    document.addEventListener('pointerdown', closeOnPointerDown, true);
     document.addEventListener('keydown', closeOnEscape, true);
-    return () => {
-      document.removeEventListener('pointerdown', closeOnPointerDown, true);
-      document.removeEventListener('keydown', closeOnEscape, true);
-    };
-  }, [contextMenu]);
+    return () => document.removeEventListener('keydown', closeOnEscape, true);
+  }, [contextMenuOpen]);
 
   useEffect(() => {
     if (!stopConfirmOpen) return;
@@ -655,56 +589,24 @@ function VisibleMeetingCompanion({
   }, [stopConfirmOpen]);
 
   useEffect(() => {
-    setVideoReadyState(null);
-    setMediaFailedState(null);
-    setPosterFailedState(null);
-    completionNotifiedRef.current = false;
+    setContextMenuOpen(false);
   }, [visualState]);
 
-  const notifyCompletedPlaybackFinished = useCallback(() => {
-    if (visualState !== 'completed' || completionNotifiedRef.current) return;
-    completionNotifiedRef.current = true;
-    onCompletedPlaybackFinished?.();
-  }, [onCompletedPlaybackFinished, visualState]);
-
   useEffect(() => {
-    if (visualState === 'completed' && !videoEnabled) {
-      notifyCompletedPlaybackFinished();
-    }
-  }, [notifyCompletedPlaybackFinished, videoEnabled, visualState]);
-
-  useEffect(() => {
-    const controller = mediaControllerRef.current;
-    if (!controller || !videoEnabled || !videoRef.current) {
-      controller?.stop();
-      setVideoReadyState(null);
-      return;
-    }
-
-    const stateAtStart = visualState;
-    setVideoReadyState(null);
-    controller.start({
-      video: videoRef.current,
-      source: videoUrl,
-      loop: mediaConfig.loop,
-      onReady: () => setVideoReadyState(stateAtStart),
-      onFallback: reason => {
-        console.warn(`[meeting-companion] ${stateAtStart} video fallback: ${reason}`);
-        setVideoReadyState(null);
-        setMediaFailedState(stateAtStart);
-      },
-    });
-    return () => controller.stop();
-  }, [mediaConfig.loop, videoEnabled, videoUrl, visualState]);
-
-  useEffect(() => () => mediaControllerRef.current?.stop(), []);
+    if (visualState !== 'completed') return;
+    const timeout = globalThis.setTimeout(
+      () => onCompletedPlaybackFinished?.(),
+      reducedMotion ? 0 : MEETING_SIGNAL_COMPLETE_ANIMATION_MS,
+    );
+    return () => globalThis.clearTimeout(timeout);
+  }, [onCompletedPlaybackFinished, reducedMotion, visualState]);
 
   const startDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     if (
       event.button !== 0
       || interaction?.positionLocked
       || stopConfirmOpen
-      || contextMenu
+      || contextMenuOpen
     ) return;
     dragGestureRef.current = {
       pointerId: event.pointerId,
@@ -757,14 +659,6 @@ function VisibleMeetingCompanion({
     }
   };
 
-  const mediaMode = reducedMotion
-    ? 'poster-reduced-motion'
-    : minimalFallback
-      ? 'minimal-fallback'
-      : videoVisible
-        ? 'video'
-        : 'poster';
-
   const errorLabel = errorKind === 'summary_failed'
     ? t('meetingCompanion.summaryFailed')
     : errorKind === 'transcribing_interrupted'
@@ -772,20 +666,15 @@ function VisibleMeetingCompanion({
       : errorKind === 'command_failed'
         ? t('meetingCompanion.commandFailed')
         : null;
-
-  const showControls = () => controlsVisibilityRef.current?.show();
-  const scheduleControlsHide = () => {
-    if (!contextMenu && !stopConfirmOpen && errorKind !== 'summary_failed') {
-      controlsVisibilityRef.current?.scheduleHide();
-    }
-  };
+  const statusLabel = errorKind === 'summary_failed' || errorKind === 'command_failed'
+    ? errorLabel
+    : t(meetingCompanionStatusKey(visualState));
 
   const runControlAction = (action: MeetingCompanionControlAction) => {
     if (!interaction) return;
     if (action === 'stop') {
-      setContextMenu(null);
+      setContextMenuOpen(false);
       setStopConfirmOpen(true);
-      showControls();
       return;
     }
     if (action === 'open-meeting') {
@@ -797,7 +686,7 @@ function VisibleMeetingCompanion({
 
   const runMenuAction = (action: MeetingCompanionMenuAction) => {
     if (!interaction) return;
-    setContextMenu(null);
+    setContextMenuOpen(false);
     if (action === 'hide') {
       void interaction.hide();
       return;
@@ -818,17 +707,7 @@ function VisibleMeetingCompanion({
     event.preventDefault();
     event.stopPropagation();
     if (!interaction || menuActions.length === 0 || stopConfirmOpen) return;
-    showControls();
-    const width = 174;
-    const height = menuActions.length * 34 + 8;
-    setContextMenu(clampMeetingCompanionMenuPosition(
-      event.clientX,
-      event.clientY,
-      width,
-      height,
-      window.innerWidth,
-      window.innerHeight,
-    ));
+    setContextMenuOpen(true);
   };
 
   const handleStopDialogKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -859,413 +738,279 @@ function VisibleMeetingCompanion({
     <div
       data-meeting-companion-root
       data-meeting-companion-state={visualState}
-      data-meeting-companion-media-mode={mediaMode}
-      data-meeting-companion-loop={mediaConfig.loop && !animationPaused ? 'true' : 'false'}
-      data-meeting-companion-duration-ms={mediaConfig.durationMs}
-      onPointerEnter={showControls}
-      onPointerLeave={scheduleControlsHide}
-      onClick={showControls}
+      data-meeting-companion-skin="signal-rail"
       onContextMenu={openContextMenu}
       style={{
         width: MEETING_COMPANION_WIDTH,
-        height: MEETING_COMPANION_STAGE_HEIGHT + MEETING_COMPANION_CONTROLS_HEIGHT,
+        height: MEETING_COMPANION_HEIGHT,
         flex: `0 0 ${MEETING_COMPANION_WIDTH}px`,
         position: 'relative',
         overflow: 'hidden',
         display: 'flex',
-        flexDirection: 'column',
+        alignItems: 'center',
+        padding: 4,
+        boxSizing: 'border-box',
         userSelect: 'none',
       }}
     >
       <div
-        data-meeting-companion-stage
-        onPointerDown={startDrag}
-        onPointerMove={continueDrag}
-        onPointerUp={finishDrag}
-        onPointerCancel={cancelDrag}
+        data-meeting-companion-capsule
         style={{
-          width: MEETING_COMPANION_WIDTH,
-          height: MEETING_COMPANION_STAGE_HEIGHT,
-          flex: `0 0 ${MEETING_COMPANION_STAGE_HEIGHT}px`,
+          width: '100%',
+          height: '100%',
           position: 'relative',
           overflow: 'hidden',
-          cursor: interaction?.positionLocked ? 'default' : 'grab',
-          touchAction: 'none',
-        }}
-      >
-        {!posterFailed && (
-          <img
-            data-meeting-companion-poster
-            data-meeting-companion-poster-state={visualState}
-            src={posterUrl}
-            alt=""
-            draggable={false}
-            onError={() => setPosterFailedState(visualState)}
-            style={{
-              display: 'block',
-              position: 'absolute',
-              inset: 0,
-              width: '100%',
-              height: '100%',
-              objectFit: 'contain',
-              opacity: videoVisible ? 0 : 1,
-              pointerEvents: 'none',
-            }}
-          />
-        )}
-
-        {videoEnabled && (
-          <video
-            ref={videoRef}
-            data-meeting-companion-video
-            data-meeting-companion-video-state={visualState}
-            aria-hidden="true"
-            muted
-            playsInline
-            onEnded={notifyCompletedPlaybackFinished}
-            style={{
-              display: 'block',
-              position: 'absolute',
-              inset: 0,
-              width: '100%',
-              height: '100%',
-              objectFit: 'contain',
-              opacity: videoVisible ? 1 : 0,
-              pointerEvents: 'none',
-            }}
-          />
-        )}
-
-        {minimalFallback ? (
-          <div
-            data-meeting-companion-minimal-fallback
-            style={{
-              position: 'absolute',
-              left: '50%',
-              top: '50%',
-              transform: 'translate(-50%, -50%)',
-              minWidth: 108,
-              height: 38,
-              padding: '0 12px',
-              boxSizing: 'border-box',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              border: '1px solid rgba(31, 41, 55, 0.18)',
-              borderRadius: 8,
-              background: 'rgba(255, 255, 255, 0.94)',
-              color: '#1f2937',
-              boxShadow: '0 4px 16px rgba(31, 41, 55, 0.14)',
-              pointerEvents: 'none',
-            }}
-          >
-            <span
-              aria-hidden="true"
-              style={{
-                width: 8,
-                height: 8,
-                flex: '0 0 8px',
-                borderRadius: '50%',
-                background: statusColor(visualState),
-              }}
-            />
-            <span style={{ font: '600 13px ui-monospace, SFMono-Regular, Consolas, monospace' }}>
-              {elapsedText}
-            </span>
-          </div>
-        ) : (
-          <div
-            data-meeting-companion-timer
-            style={{
-              position: 'absolute',
-              left: 184,
-              top: 132,
-              width: 22,
-              height: 8,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              overflow: 'hidden',
-              color: '#f8d6dc',
-              fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
-              fontSize: elapsedText.length > 5 ? 5 : 6,
-              fontWeight: 700,
-              fontVariantNumeric: 'tabular-nums',
-              letterSpacing: 0,
-              lineHeight: 1,
-              whiteSpace: 'nowrap',
-              textShadow: '0 1px rgba(31, 20, 24, 0.65)',
-              pointerEvents: 'none',
-            }}
-          >
-            {elapsedText}
-          </div>
-        )}
-        {errorOverlay && (
-          <>
-            <div
-              data-meeting-companion-error={errorOverlay.kind}
-              aria-hidden="true"
-              style={{
-                position: 'absolute',
-                right: 12,
-                top: 12,
-                width: 24,
-                height: 24,
-                display: 'grid',
-                placeItems: 'center',
-                border: '1px solid rgba(255, 255, 255, 0.88)',
-                borderRadius: '50%',
-                background: errorOverlay.kind === 'summary_failed' ? '#c2413b' : '#d97706',
-                color: '#fff',
-                boxShadow: '0 3px 10px rgba(31, 41, 55, 0.24)',
-                pointerEvents: 'none',
-              }}
-            >
-              {errorOverlay.kind === 'summary_failed'
-                ? <CircleAlert size={15} strokeWidth={2.4} />
-                : <TriangleAlert size={15} strokeWidth={2.4} />}
-            </div>
-            <div
-              data-meeting-companion-error-message={errorOverlay.kind}
-              role="status"
-              aria-live="polite"
-              style={{
-                position: 'absolute',
-                left: '50%',
-                top: 10,
-                transform: 'translateX(-50%)',
-                maxWidth: 154,
-                minHeight: 24,
-                padding: '4px 8px',
-                boxSizing: 'border-box',
-                borderRadius: 8,
-                background: errorOverlay.kind === 'summary_failed'
-                  ? 'rgba(194, 65, 59, 0.94)'
-                  : 'rgba(180, 83, 9, 0.94)',
-                color: '#fff',
-                fontSize: 9,
-                fontWeight: 650,
-                lineHeight: 1.35,
-                textAlign: 'center',
-                pointerEvents: 'none',
-              }}
-            >
-              {errorLabel}
-            </div>
-          </>
-        )}
-      </div>
-
-      <div
-        data-meeting-companion-controls
-        data-meeting-companion-controls-visible={controlsVisible ? 'true' : 'false'}
-        style={{
-          width: MEETING_COMPANION_WIDTH,
-          height: MEETING_COMPANION_CONTROLS_HEIGHT,
-          flex: `0 0 ${MEETING_COMPANION_CONTROLS_HEIGHT}px`,
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'center',
-          gap: 8,
-          pointerEvents: controlsVisible && controlActions.length > 0 ? 'auto' : 'none',
+          border: '1px solid rgba(255, 255, 255, 0.13)',
+          borderRadius: 18,
+          background: 'rgba(16, 18, 18, 0.97)',
+          boxShadow: '0 7px 20px rgba(0, 0, 0, 0.32), inset 0 1px rgba(255, 255, 255, 0.04)',
+          color: '#f5f7f6',
         }}
       >
-        {controlsVisible && controlActions.map(action => {
-          const disabled = Boolean(interaction?.busyAction);
-          const label = t(action.labelKey);
-          const openMeeting = action.action === 'open-meeting';
-          return (
-            <button
-              key={action.action}
-              type="button"
-              className="ol-focus-ring"
-              data-meeting-companion-control={action.action}
-              title={label}
-              aria-label={label}
-              disabled={disabled}
-              onPointerDown={event => event.stopPropagation()}
-              onClick={event => {
-                event.stopPropagation();
-                runControlAction(action.action);
-              }}
-              style={{
-                width: openMeeting ? 116 : 34,
-                height: 34,
-                padding: openMeeting ? '0 12px' : 0,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 7,
-                border: action.danger
-                  ? '1px solid rgba(194, 65, 59, 0.42)'
-                  : '1px solid rgba(31, 41, 55, 0.18)',
-                borderRadius: 8,
-                background: action.danger ? 'rgba(255, 241, 240, 0.96)' : 'rgba(255, 255, 255, 0.96)',
-                color: action.danger ? '#b42318' : '#1f2937',
-                boxShadow: '0 3px 12px rgba(31, 41, 55, 0.16)',
-                fontFamily: 'inherit',
-                fontSize: 12,
-                fontWeight: 650,
-                letterSpacing: 0,
-                cursor: disabled ? 'not-allowed' : 'pointer',
-                opacity: disabled ? 0.58 : 1,
-              }}
-            >
-              {meetingCompanionActionIcon(action.action, 17)}
-              {openMeeting && <span>{label}</span>}
-            </button>
-          );
-        })}
-      </div>
-
-      {contextMenu && interaction && (
-        <div
-          ref={menuRef}
-          data-meeting-companion-context-menu
-          role="menu"
-          onPointerDown={event => event.stopPropagation()}
-          onContextMenu={event => event.preventDefault()}
-          style={{
-            position: 'absolute',
-            left: contextMenu.x,
-            top: contextMenu.y,
-            width: 174,
-            padding: 4,
-            boxSizing: 'border-box',
-            display: 'flex',
-            flexDirection: 'column',
-            border: '1px solid rgba(31, 41, 55, 0.18)',
-            borderRadius: 8,
-            background: 'rgba(255, 255, 255, 0.98)',
-            color: '#1f2937',
-            boxShadow: '0 8px 24px rgba(31, 41, 55, 0.22)',
-            zIndex: 20,
-          }}
-        >
-          {menuActions.map(action => {
-            const disabled = (isMeetingCompanionCommandAction(action.action)
-              && Boolean(interaction.busyAction))
-              || (action.action === 'toggle-position-lock' && interaction.positionLockBusy);
-            const label = t(action.labelKey);
-            return (
-              <button
-                key={action.action}
-                type="button"
-                className="ol-focus-ring"
-                role="menuitem"
-                data-meeting-companion-menu-action={action.action}
-                aria-label={label}
-                disabled={disabled}
-                onClick={() => runMenuAction(action.action)}
-                style={{
-                  width: '100%',
-                  height: 34,
-                  padding: '0 9px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 9,
-                  border: 0,
-                  borderRadius: 6,
-                  background: 'transparent',
-                  color: action.danger ? '#b42318' : '#1f2937',
-                  fontFamily: 'inherit',
-                  fontSize: 12,
-                  fontWeight: 550,
-                  letterSpacing: 0,
-                  textAlign: 'left',
-                  cursor: disabled ? 'not-allowed' : 'pointer',
-                  opacity: disabled ? 0.52 : 1,
-                }}
-              >
-                {meetingCompanionActionIcon(action.action, 16, interaction.positionLocked)}
-                <span>{label}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {stopConfirmOpen && interaction && (
-        <div
-          data-meeting-companion-stop-dialog-backdrop
-          onPointerDown={event => event.stopPropagation()}
-          style={{
-            position: 'absolute',
-            inset: 0,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'rgba(17, 24, 39, 0.28)',
-            zIndex: 30,
-          }}
-        >
+        {!contextMenuOpen && !stopConfirmOpen && (
           <div
-            ref={dialogRef}
-            data-meeting-companion-stop-dialog
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="meeting-companion-stop-title"
-            aria-describedby="meeting-companion-stop-body"
-            onKeyDown={handleStopDialogKeyDown}
+            data-meeting-companion-main
             style={{
-              width: 216,
-              padding: 14,
+              width: '100%',
+              height: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '0 8px 0 10px',
               boxSizing: 'border-box',
-              border: '1px solid rgba(31, 41, 55, 0.18)',
-              borderRadius: 8,
-              background: '#fff',
-              color: '#1f2937',
-              boxShadow: '0 12px 32px rgba(17, 24, 39, 0.28)',
             }}
           >
             <div
-              id="meeting-companion-stop-title"
-              style={{ fontSize: 15, fontWeight: 700, lineHeight: 1.35 }}
-            >
-              {t('meetingCompanion.stopConfirmTitle')}
-            </div>
-            <div
-              id="meeting-companion-stop-body"
-              style={{ marginTop: 7, fontSize: 12, lineHeight: 1.5, color: '#4b5563' }}
-            >
-              {t('meetingCompanion.stopConfirmBody')}
-            </div>
-            <div
+              data-meeting-companion-drag-region
+              onPointerDown={startDrag}
+              onPointerMove={continueDrag}
+              onPointerUp={finishDrag}
+              onPointerCancel={cancelDrag}
               style={{
-                marginTop: 14,
+                minWidth: 0,
+                flex: '1 1 auto',
+                height: 42,
                 display: 'flex',
-                justifyContent: 'flex-end',
-                gap: 8,
+                alignItems: 'center',
+                gap: 7,
+                cursor: interaction?.positionLocked ? 'default' : 'grab',
+                touchAction: 'none',
               }}
             >
+              <div style={{ minWidth: 0, flex: '1 1 auto' }}>
+                <div
+                  data-meeting-companion-status
+                  style={{
+                    height: 14,
+                    overflow: 'hidden',
+                    color: errorKind ? '#ffaaa5' : '#a9b1ad',
+                    fontSize: 9,
+                    fontWeight: 650,
+                    lineHeight: '14px',
+                    letterSpacing: 0,
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {statusLabel}
+                </div>
+                <MeetingSignalRail
+                  state={visualState}
+                  level={audioLevel}
+                  errorKind={errorKind}
+                  reducedMotion={reducedMotion}
+                  frozen={animationPaused}
+                  style={{ width: '100%', height: 24 }}
+                />
+              </div>
+              {errorOverlay && (
+                <span
+                  data-meeting-companion-error={errorOverlay.kind}
+                  title={errorOverlay.message || errorLabel || undefined}
+                  aria-label={errorLabel || undefined}
+                  role="status"
+                  style={{ color: errorKind === 'summary_failed' ? '#ff6b63' : '#f0ad4e', flex: '0 0 auto' }}
+                >
+                  {errorKind === 'summary_failed' || errorKind === 'command_failed'
+                    ? <CircleAlert size={14} strokeWidth={2.2} />
+                    : <TriangleAlert size={14} strokeWidth={2.2} />}
+                </span>
+              )}
+            </div>
+
+            <div
+              data-meeting-companion-timer
+              style={{
+                width: 54,
+                flex: '0 0 54px',
+                color: '#f3f6f4',
+                fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+                fontSize: elapsedText.length > 5 ? 10 : 11,
+                fontWeight: 650,
+                fontVariantNumeric: 'tabular-nums',
+                letterSpacing: 0,
+                textAlign: 'center',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {elapsedText}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: '0 0 auto' }}>
+              {controlActions.map(action => {
+                const disabled = Boolean(interaction?.busyAction);
+                const label = t(action.labelKey);
+                return (
+                  <button
+                    key={action.action}
+                    type="button"
+                    className="ol-focus-ring"
+                    data-meeting-companion-control={action.action}
+                    title={label}
+                    aria-label={label}
+                    disabled={disabled}
+                    onPointerDown={event => event.stopPropagation()}
+                    onClick={() => runControlAction(action.action)}
+                    style={compactActionButtonStyle(Boolean(action.danger), disabled)}
+                  >
+                    {meetingCompanionActionIcon(action.action, 15)}
+                  </button>
+                );
+              })}
+              {interaction && (
+                <button
+                  type="button"
+                  className="ol-focus-ring"
+                  data-meeting-companion-more
+                  title={t('meetingCompanion.more')}
+                  aria-label={t('meetingCompanion.more')}
+                  onClick={() => setContextMenuOpen(true)}
+                  style={compactActionButtonStyle(false, false)}
+                >
+                  <MoreHorizontal size={16} strokeWidth={2.1} />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {contextMenuOpen && interaction && (
+          <div
+            data-meeting-companion-context-menu
+            role="menu"
+            onContextMenu={event => event.preventDefault()}
+            style={{
+              width: '100%',
+              height: '100%',
+              padding: '0 8px 0 12px',
+              boxSizing: 'border-box',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+            }}
+          >
+            <span style={{ minWidth: 0, flex: '1 1 auto', color: '#a9b1ad', fontSize: 10, fontWeight: 650 }}>
+              {t('meetingCompanion.options')}
+            </span>
+            {menuActions.map(action => {
+              const disabled = (isMeetingCompanionCommandAction(action.action)
+                && Boolean(interaction.busyAction))
+                || (action.action === 'toggle-position-lock' && interaction.positionLockBusy);
+              const label = t(action.labelKey);
+              return (
+                <button
+                  key={action.action}
+                  type="button"
+                  className="ol-focus-ring"
+                  role="menuitem"
+                  data-meeting-companion-menu-action={action.action}
+                  title={label}
+                  aria-label={label}
+                  disabled={disabled}
+                  onClick={() => runMenuAction(action.action)}
+                  style={compactActionButtonStyle(Boolean(action.danger), disabled)}
+                >
+                  {meetingCompanionActionIcon(action.action, 15, interaction.positionLocked)}
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              className="ol-focus-ring"
+              title={t('meetingCompanion.closeOptions')}
+              aria-label={t('meetingCompanion.closeOptions')}
+              onClick={() => setContextMenuOpen(false)}
+              style={compactActionButtonStyle(false, false)}
+            >
+              <X size={15} strokeWidth={2.1} />
+            </button>
+          </div>
+        )}
+
+        {stopConfirmOpen && interaction && (
+          <div
+            data-meeting-companion-stop-dialog-backdrop
+            style={{ width: '100%', height: '100%' }}
+          >
+            <div
+              ref={dialogRef}
+              data-meeting-companion-stop-dialog
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="meeting-companion-stop-title"
+              aria-describedby="meeting-companion-stop-body"
+              onKeyDown={handleStopDialogKeyDown}
+              style={{
+                width: '100%',
+                height: '100%',
+                padding: '0 9px 0 13px',
+                boxSizing: 'border-box',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 7,
+              }}
+            >
+              <div
+                id="meeting-companion-stop-title"
+                style={{ minWidth: 0, flex: '1 1 auto', fontSize: 11, fontWeight: 700, lineHeight: 1.35 }}
+              >
+                {t('meetingCompanion.stopConfirmTitle')}
+              </div>
+              <span
+                id="meeting-companion-stop-body"
+                style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}
+              >
+                {t('meetingCompanion.stopConfirmBody')}
+              </span>
               <button
                 ref={cancelStopRef}
                 type="button"
                 className="ol-focus-ring"
+                title={t('meetingCompanion.cancel')}
                 aria-label={t('meetingCompanion.cancel')}
                 disabled={interaction.busyAction === 'stop'}
                 onClick={() => setStopConfirmOpen(false)}
-                style={dialogButtonStyle(false, interaction.busyAction === 'stop')}
+                style={compactActionButtonStyle(false, interaction.busyAction === 'stop')}
               >
-                {t('meetingCompanion.cancel')}
+                <X size={15} strokeWidth={2.2} />
               </button>
               <button
                 type="button"
                 className="ol-focus-ring"
                 data-meeting-companion-confirm-stop
+                title={t('meetingCompanion.confirmStop')}
                 aria-label={t('meetingCompanion.confirmStop')}
                 disabled={interaction.busyAction !== null}
                 onClick={confirmStop}
-                style={dialogButtonStyle(true, interaction.busyAction !== null)}
+                style={compactActionButtonStyle(true, interaction.busyAction !== null)}
               >
-                {t('meetingCompanion.confirmStop')}
+                <Square size={14} fill="currentColor" strokeWidth={1.8} />
               </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -1291,22 +1036,30 @@ function isMeetingCompanionCommandAction(
   return action === 'pause' || action === 'resume' || action === 'stop';
 }
 
-function dialogButtonStyle(danger: boolean, disabled: boolean): React.CSSProperties {
+function compactActionButtonStyle(danger: boolean, disabled: boolean): React.CSSProperties {
   return {
-    minWidth: 84,
-    height: 32,
-    padding: '0 12px',
-    border: danger ? '1px solid #b42318' : '1px solid rgba(31, 41, 55, 0.22)',
-    borderRadius: 7,
-    background: danger ? '#b42318' : '#fff',
-    color: danger ? '#fff' : '#1f2937',
-    fontFamily: 'inherit',
-    fontSize: 12,
-    fontWeight: 650,
-    letterSpacing: 0,
+    width: 30,
+    height: 30,
+    flex: '0 0 30px',
+    padding: 0,
+    display: 'inline-grid',
+    placeItems: 'center',
+    border: danger ? '1px solid rgba(255, 107, 99, 0.52)' : '1px solid rgba(255, 255, 255, 0.12)',
+    borderRadius: 8,
+    background: danger ? 'rgba(110, 29, 25, 0.76)' : 'rgba(255, 255, 255, 0.055)',
+    color: danger ? '#ff8a83' : '#d9dfdc',
     cursor: disabled ? 'not-allowed' : 'pointer',
-    opacity: disabled ? 0.58 : 1,
+    opacity: disabled ? 0.46 : 1,
   };
+}
+
+function meetingCompanionStatusKey(visualState: MeetingCompanionVisualState): string {
+  if (visualState === 'recording') return 'meetingCompanion.recording';
+  if (visualState === 'quiet') return 'meetingCompanion.quiet';
+  if (visualState === 'paused') return 'meetingCompanion.paused';
+  if (visualState === 'processing') return 'meetingCompanion.processing';
+  if (visualState === 'completed') return 'meetingCompanion.completed';
+  return 'meetingCompanion.starting';
 }
 
 function errorMessage(error: unknown): string {
@@ -1377,11 +1130,4 @@ function useMeetingCompanionElapsed(input: MeetingCompanionTimerInput | null): s
     ? display.elapsedMs
     : input?.elapsedMs ?? 0;
   return formatMeetingCompanionElapsed(elapsedMs);
-}
-
-function statusColor(visualState: MeetingCompanionMediaState): string {
-  if (visualState === 'paused') return '#d97706';
-  if (visualState === 'completed') return '#16a34a';
-  if (visualState === 'processing') return '#64748b';
-  return '#dc2626';
 }

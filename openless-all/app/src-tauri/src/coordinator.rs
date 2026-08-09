@@ -3158,18 +3158,28 @@ fn read_qwen3_realtime_credentials() -> Qwen3RealtimeCredentials {
     }
 }
 
+fn qwen_realtime_endpoint_for_provider(provider_id: &str, stored_endpoint: String) -> String {
+    if is_bailian_provider(provider_id) {
+        derive_bailian_endpoint(&stored_endpoint, BailianEndpointProtocol::QwenRealtime)
+            .unwrap_or(stored_endpoint)
+    } else {
+        stored_endpoint
+    }
+}
+
 fn read_qwen3_realtime_credentials_for_provider(provider_id: &str) -> Qwen3RealtimeCredentials {
     let api_key =
         CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrApiKey)
             .ok()
             .flatten()
             .unwrap_or_default();
-    let endpoint =
+    let stored_endpoint =
         CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrEndpoint)
             .ok()
             .flatten()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| crate::asr::qwen_realtime::DEFAULT_ENDPOINT.to_string());
+    let endpoint = qwen_realtime_endpoint_for_provider(provider_id, stored_endpoint);
     let model = CredentialsVault::get_asr_for_provider(provider_id, CredentialAccount::AsrModel)
         .ok()
         .flatten()
@@ -4155,6 +4165,24 @@ mod tests {
         assert_eq!(
             derive_bailian_endpoint("", BailianEndpointProtocol::QwenRealtime).unwrap(),
             crate::asr::qwen_realtime::DEFAULT_ENDPOINT
+        );
+    }
+
+    #[test]
+    fn unified_bailian_meeting_credentials_use_qwen_realtime_endpoint() {
+        assert_eq!(
+            qwen_realtime_endpoint_for_provider(
+                crate::asr::bailian::PROVIDER_ID,
+                crate::asr::bailian::DEFAULT_ENDPOINT.to_string(),
+            ),
+            crate::asr::qwen_realtime::DEFAULT_ENDPOINT,
+        );
+        assert_eq!(
+            qwen_realtime_endpoint_for_provider(
+                crate::asr::qwen_realtime::PROVIDER_ID,
+                "wss://custom.example.test/realtime".to_string(),
+            ),
+            "wss://custom.example.test/realtime",
         );
     }
 

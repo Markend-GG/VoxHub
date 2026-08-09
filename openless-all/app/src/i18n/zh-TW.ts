@@ -807,6 +807,12 @@ export const zhTW: typeof zhCN = {
     copied: '已複製',
   },
   meetingCompanion: {
+    starting: '準備錄音',
+    recording: '錄音中',
+    quiet: '環境安靜',
+    paused: '已暫停',
+    processing: '正在整理',
+    completed: '整理完成',
     pause: '暫停',
     resume: '繼續',
     stop: '停止',
@@ -821,6 +827,9 @@ export const zhTW: typeof zhCN = {
     commandFailed: '操作失敗，請重試',
     summaryFailed: '會議摘要失敗',
     asrInterrupted: '語音轉錄已中斷，錄音仍在繼續',
+    more: '更多會議控制',
+    options: '會議控制',
+    closeOptions: '收起控制',
   },
   settings: {
     selectionPolish: {
@@ -838,9 +847,9 @@ export const zhTW: typeof zhCN = {
     title: '設置',
     desc: '錄音、提供商、快捷鍵與權限配置。',
     meetingCompanion: {
-      title: '會議桌寵',
-      enabledLabel: '會議期間顯示桌寵',
-      positionLockedLabel: '鎖定桌寵位置',
+      title: '會議膠囊',
+      enabledLabel: '會議期間顯示膠囊',
+      positionLockedLabel: '鎖定膠囊位置',
     },
     network: {
       title: '網路',

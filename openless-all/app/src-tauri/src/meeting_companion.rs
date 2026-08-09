@@ -14,8 +14,8 @@ use crate::coordinator::Coordinator;
 use crate::types::MeetingCompanionPosition;
 
 const WINDOW_LABEL: &str = "meeting-companion";
-const WINDOW_WIDTH: f64 = 240.0;
-const WINDOW_HEIGHT: f64 = 232.0;
+const WINDOW_WIDTH: f64 = 320.0;
+const WINDOW_HEIGHT: f64 = 64.0;
 const EDGE_MARGIN: f64 = 16.0;
 const DRAG_SETTLE_DELAY: Duration = Duration::from_millis(350);
 const FAILED_DISMISS_DELAY: Duration = Duration::from_secs(3);
@@ -792,8 +792,8 @@ mod tests {
         let display = monitor("primary", 0, 0, 1920, 1040, 1.0);
         let size = window_size_for_monitor(&display);
         assert_eq!(
-            snap_and_clamp_position(PhysicalPosition::new(1668, 797), size, &display),
-            PhysicalPosition::new(1680, 808)
+            snap_and_clamp_position(PhysicalPosition::new(1588, 965), size, &display),
+            PhysicalPosition::new(1600, 976)
         );
     }
 
@@ -823,7 +823,7 @@ mod tests {
             window_size_for_monitor(&display),
             display.work_area,
         );
-        assert_eq!(position, PhysicalPosition::new(1126, 496));
+        assert_eq!(position, PhysicalPosition::new(1046, 664));
     }
 
     #[test]
@@ -831,7 +831,7 @@ mod tests {
         let display_125 = monitor("display", 0, 0, 1920, 1040, 1.25);
         assert_eq!(
             window_size_for_monitor(&display_125),
-            PhysicalSize::new(300, 290)
+            PhysicalSize::new(400, 80)
         );
         let display_150 = monitor("display", 0, 0, 1600, 860, 1.5);
         let saved = MeetingCompanionPosition {
@@ -841,7 +841,7 @@ mod tests {
         };
         let placement =
             restore_placement(Some(&saved), &[display_150], None, None).expect("placement");
-        assert_eq!(placement.position, PhysicalPosition::new(1240, 512));
+        assert_eq!(placement.position, PhysicalPosition::new(1120, 764));
     }
 
     #[test]
@@ -857,7 +857,7 @@ mod tests {
         };
         let placement = restore_placement(Some(&saved), &displays, Some("right"), Some("primary"))
             .expect("placement");
-        assert_eq!(placement.position, PhysicalPosition::new(4160, 1090));
+        assert_eq!(placement.position, PhysicalPosition::new(4060, 1300));
         assert_eq!(placement.monitor_id, "right");
     }
 

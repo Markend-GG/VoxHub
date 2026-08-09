@@ -807,6 +807,12 @@ export const en: typeof zhCN = {
     copied: 'Copied',
   },
   meetingCompanion: {
+    starting: 'Getting ready',
+    recording: 'Recording',
+    quiet: 'Room is quiet',
+    paused: 'Paused',
+    processing: 'Organizing notes',
+    completed: 'Notes ready',
     pause: 'Pause',
     resume: 'Resume',
     stop: 'Stop',
@@ -821,6 +827,9 @@ export const en: typeof zhCN = {
     commandFailed: 'Action failed. Try again.',
     summaryFailed: 'Meeting summary failed',
     asrInterrupted: 'Transcription was interrupted. Recording is still active.',
+    more: 'More meeting controls',
+    options: 'Meeting controls',
+    closeOptions: 'Close controls',
   },
   settings: {
     selectionPolish: {
@@ -838,9 +847,9 @@ export const en: typeof zhCN = {
     title: 'Settings',
     desc: 'Recording, providers, shortcuts, and permissions.',
     meetingCompanion: {
-      title: 'Meeting companion',
-      enabledLabel: 'Show during meetings',
-      positionLockedLabel: 'Lock companion position',
+      title: 'Meeting capsule',
+      enabledLabel: 'Show capsule during meetings',
+      positionLockedLabel: 'Lock capsule position',
     },
     network: {
       title: 'Network',
