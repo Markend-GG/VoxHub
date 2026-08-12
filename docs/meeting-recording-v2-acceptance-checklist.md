@@ -42,6 +42,12 @@ Phase 0 已按当前基线核查代码与自动测试。除 V2-1 现有代码证
 - 当前后台 job 仍明确失败为 `postMeetingAsrAdapterUnavailable`，不伪造云端成功，不自动生成总结，也不自动切换模型。`MeetingAudioSource`、真实 `fun-asr` / `paraformer-v2` adapter 和本地说话人模型管线尚未实现。
 - 自动验证：`cargo test meeting`（122 passed）、`cargo test preferences`（13 passed）、`cargo test credentials`（45 passed）、`cargo test bailian`（39 passed）、MSVC `cargo check`、`tsc --noEmit`、`npm run build`、`git diff --check` 通过。`credentials` 首次串行命令中有一个 localhost 重定向测试受进程内全局代理开关并行状态影响得到 502，单项和完整 45 项复跑均通过；未修改网络模块。真实百炼、Tauri UI、stop 延迟、重启、取消 / 重试和本地模型人工验证尚未完成。
 
+### Phase 3 云端会后 ASR 进行中证据（2026-08-12）
+
+- 新增 `MeetingAudioSource`，支持单个 WAV 和按 1-based 序号连续排列的分片 WAV；逐个校验 16 kHz、单声道、16-bit PCM 标准 WAV，合并流只输出一个 WAV header，并提前计算确定的 content length。
+- 音频流按 64 KiB 上限读取 PCM，不构造完整会议 WAV / PCM 副本；运行时取消标志会以 `Interrupted` 终止流。
+- 自动验证：`cargo test meeting_audio_source`（4 passed），覆盖分片顺序缺口、非标准 WAV、单 header / 完整 PCM 和取消。真实 OSS 上传、长会议峰值内存和 120 分钟验证尚未完成。
+
 ## V2-1 Realtime ASR
 
 | ID | Requirement（需求） | Source（来源） | Status（状态） | Evidence（证据） | Verification（验证） | Notes（备注） |
@@ -58,7 +64,7 @@ Phase 0 已按当前基线核查代码与自动测试。除 V2-1 现有代码证
 | MR-V2-102 | 开始会议选择自动或预计发言人数，并将本场配置完整快照。 | V2-2 plan 2.2、4 | partial | `Meetings.tsx` 提供 auto / 1～20 人；`start_meeting_recording(options)` 后端解析并持久化 `MeetingPostProcessingConfig`；0 人和缺本地模型测试通过 | 仍需进行中修改全局设置不影响本场配置的集成测试与 Tauri 人工验证 | 后端保存 `Option<u32>`，实时实际模型建立后同步写入已固化配置 |
 | MR-V2-103 | 会后 ASR 默认 `fun-asr`，下拉可选 `paraformer-v2`，不能路由到其他模型。 | V2 plan 1、3；V2-2 plan 1、7 | partial | 后端注册表只返回两个模型，默认和非法模型测试通过；设置和重试下拉均使用注册表 | 真实 adapter 尚未接入；仍需 Tauri 下拉人工验证 | 实时 ASR 与会后 ASR 独立快照；备选不表示自动 fallback |
 | MR-V2-104 | 停止会议快速返回，后处理任务持久化并在后台执行。 | V2-2 plan 5、10 | partial | `stop_meeting_recording` 固化实时 revision、job 和 hold，持久化后清理 runtime 并 spawn 后台 job；`bind_app` 扫描非终态任务 | 非终态 / 终态扫描测试通过；仍缺真实 adapter、stop 延迟测量和应用重启人工验证 | 当前 placeholder job 明确失败，不伪造完成 |
-| MR-V2-105 | 会议音频使用 `MeetingAudioSource` 从分片 WAV 按块读取，上传路径不复制完整 PCM/WAV。 | V2-2 plan 6 | missing | - | 合并 header、取消、峰值内存和 120 分钟测试 | 当前内存客户端不能直接用于会议 |
+| MR-V2-105 | 会议音频使用 `MeetingAudioSource` 从分片 WAV 按块读取，上传路径不复制完整 PCM/WAV。 | V2-2 plan 6 | partial | `asr/meeting_audio_source.rs` 支持单 WAV / 连续分片 WAV，校验 canonical 16 kHz mono 16-bit PCM 格式，计算确定长度并以单 header + 64 KiB PCM 块输出；4 项单测通过 | 仍缺真实 OSS 流式上传、上传取消集成、峰值内存和 120 分钟测试 | 现有短口述内存客户端不用于会议；云端 adapter 将消费该流 |
 | MR-V2-106 | `fun-asr` 和 `paraformer-v2` 共用任务框架并分别适配请求 / 结果；云端说话人模式解析 sentence time、text、speaker_id。 | V2-2 plan 6.3、7 | missing | - | 双模型 fixture parser + 真实百炼任务 | 关闭说话人时设置 `diarization_enabled=false` |
 | MR-V2-107 | 云端结果作为新的整理后原文 revision 原子提交，失败保留实时原文和旧总结。 | V2-2 plan 4、5、7 | partial | staging revision 校验、幂等激活和无效 revision 保留实时原文测试通过；重试会拒绝旧 staging | 真实 adapter 尚未调用 revision 提交；仍缺持久化故障注入和重启恢复测试 | 禁止跨模型硬贴 speaker label |
 | MR-V2-108 | 总结只在会后 ASR / 说话人处理完成，或用户明确沿用实时原文后启动。 | V2-2 plan 1、5 | partial | `meeting_summary.rs` 只接受 `completed` / `realtime_accepted`；失败或取消后 UI 可明确沿用实时原文 | 自动门禁测试通过；仍缺真实完成顺序和 Tauri 失败 UI 验证 | 关闭说话人也必须先完成会后 ASR |
