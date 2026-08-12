@@ -1078,6 +1078,7 @@ mod tests {
                 retained: true,
                 path: None,
             },
+            realtime_asr: None,
             created_at: "2026-07-06T10:00:00Z".to_string(),
             updated_at: "2026-07-06T11:00:00Z".to_string(),
         }

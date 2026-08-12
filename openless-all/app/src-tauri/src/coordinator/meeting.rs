@@ -17,17 +17,17 @@ use crate::persistence::{
 use crate::recorder::{Recorder, RecorderError};
 use crate::types::{
     MeetingAsrMode, MeetingAudioLevelEvent, MeetingAudioMeta, MeetingAudioState, MeetingErrorEvent,
-    MeetingRecord, MeetingRecordingPhase, MeetingRecordingSnapshot, MeetingStatus, MeetingSummary,
-    MeetingTranscriptDraftEvent, MeetingTranscriptSegmentEvent, MeetingVadSilencePreset,
-    TranscriptSegment, TranscriptSegmentMetadata, TranscriptSegmentSource,
+    MeetingRealtimeAsrSnapshot, MeetingRecord, MeetingRecordingPhase, MeetingRecordingSnapshot,
+    MeetingStatus, MeetingSummary, MeetingTranscriptDraftEvent, MeetingTranscriptSegmentEvent,
+    MeetingVadSilencePreset, TranscriptSegment, TranscriptSegmentMetadata, TranscriptSegmentSource,
 };
 
 use super::{
     acquire_recording_mute, asr_transcribe_uses_global_timeout,
     build_meeting_asr_start_with_options, cancel_active_asr, ensure_asr_credentials_for_provider,
     ensure_microphone_permission, prepare_and_spawn_auto_meeting_summary, release_recording_mute,
-    selected_microphone_device_name, stop_microphone_preview_monitor, ActiveAsr, Inner,
-    MeetingAsrStartOptions, QaAsrStart, COORDINATOR_GLOBAL_TIMEOUT_SECS,
+    selected_microphone_device_name, stop_microphone_preview_monitor, ActiveAsr, AsrCallLabel,
+    Inner, MeetingAsrStartOptions, QaAsrStart, COORDINATOR_GLOBAL_TIMEOUT_SECS,
 };
 
 const MEETING_AUDIO_LEVEL_INTERVAL: Duration = Duration::from_millis(100);
@@ -153,6 +153,7 @@ impl MeetingSession {
                     retained: false,
                     path: None,
                 },
+                realtime_asr: None,
                 created_at: timestamp.clone(),
                 updated_at: timestamp,
             },
@@ -210,6 +211,17 @@ impl MeetingSession {
 
     pub(super) fn model_override(&self) -> Option<String> {
         self.model_override.clone()
+    }
+
+    fn lock_realtime_asr_label(&mut self, label: &AsrCallLabel, now: DateTime<Utc>) {
+        self.model_override = label.model.clone();
+        self.record.realtime_asr = Some(MeetingRealtimeAsrSnapshot {
+            provider_id: self.active_provider.clone(),
+            resolved_provider_id: label.provider.clone(),
+            model_id: label.model.clone(),
+            silence_preset: self.silence_preset.clone(),
+        });
+        self.record.updated_at = now.to_rfc3339();
     }
 
     pub(super) fn set_active_asr_session(
@@ -475,7 +487,7 @@ pub(super) async fn start_meeting_recording(
         effective_asr.provider_id.clone(),
         Some(provider_session_id.clone()),
     );
-    let asr_start = match build_meeting_asr_start(
+    let (asr_start, asr_label) = match build_meeting_asr_start(
         inner,
         MeetingAsrStartOptions {
             provider_id: effective_asr.provider_id.clone(),
@@ -504,6 +516,19 @@ pub(super) async fn start_meeting_recording(
             return Err(error);
         }
     };
+
+    let label_persist_result = {
+        let mut session_guard = inner.meeting_session.lock();
+        let session = session_guard
+            .as_mut()
+            .ok_or_else(|| "meeting recording not active".to_string())?;
+        commit_meeting_realtime_asr_label(session, &asr_label, Utc::now(), persist_meeting_record)
+    };
+    if let Err(error) = label_persist_result {
+        cleanup_unstored_meeting_asr_start(inner, &asr_start, asr_release_token.clone());
+        mark_start_failed_record(inner, &meeting_id, &error)?;
+        return Err(error);
+    }
     let (asr_start, asr_interruption) = match asr_start.open_streaming_session().await {
         Ok(()) => (Some(asr_start), None),
         Err(error) => {
@@ -637,7 +662,7 @@ pub(super) async fn resume_meeting_recording(
         active_provider.clone(),
         Some(provider_session_id.clone()),
     );
-    let asr_start = match build_meeting_asr_start(
+    let (asr_start, _asr_label) = match build_meeting_asr_start(
         inner,
         MeetingAsrStartOptions {
             provider_id: active_provider.clone(),
@@ -867,7 +892,7 @@ fn duration_ms_between(start: DateTime<Utc>, end: DateTime<Utc>) -> u64 {
 async fn build_meeting_asr_start(
     inner: &Arc<Inner>,
     options: MeetingAsrStartOptions,
-) -> Result<QaAsrStart, String> {
+) -> Result<(QaAsrStart, AsrCallLabel), String> {
     build_meeting_asr_start_with_options(inner, options).await
 }
 
@@ -1714,6 +1739,21 @@ fn persist_meeting_record(record: &MeetingRecord) -> Result<(), String> {
     Ok(())
 }
 
+fn commit_meeting_realtime_asr_label(
+    session: &mut MeetingSession,
+    label: &AsrCallLabel,
+    now: DateTime<Utc>,
+    persist: impl FnOnce(&MeetingRecord) -> Result<(), String>,
+) -> Result<(), String> {
+    let original = session.clone();
+    session.lock_realtime_asr_label(label, now);
+    if let Err(error) = persist(session.record()) {
+        *session = original;
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn prune_meeting_audio_retention_with_current_preference() -> Result<(), String> {
     MeetingStore::new()
         .map_err(|e| e.to_string())?
@@ -2377,20 +2417,60 @@ mod tests {
     }
 
     #[test]
-    fn meeting_session_locks_model_override_for_resume() {
+    fn meeting_session_locks_actual_asr_label_for_resume_and_audit() {
         let started = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 0).unwrap();
-        let session = MeetingSession::new_with_asr_settings(
+        let observed = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 1).unwrap();
+        let mut session = MeetingSession::new_with_asr_settings(
             "550e8400-e29b-41d4-a716-446655440000".to_string(),
             started,
             "bailian".to_string(),
-            MeetingVadSilencePreset::Standard,
-            Some("fun-asr-realtime".to_string()),
+            MeetingVadSilencePreset::Long,
+            None,
+        );
+        session.lock_realtime_asr_label(
+            &AsrCallLabel::new("bailian", Some("fun-asr-realtime".to_string())),
+            observed,
         );
 
         assert_eq!(
             session.model_override().as_deref(),
             Some("fun-asr-realtime")
         );
+        assert_eq!(
+            session.record().realtime_asr,
+            Some(MeetingRealtimeAsrSnapshot {
+                provider_id: "bailian".to_string(),
+                resolved_provider_id: "bailian".to_string(),
+                model_id: Some("fun-asr-realtime".to_string()),
+                silence_preset: MeetingVadSilencePreset::Long,
+            })
+        );
+        assert_eq!(session.record().updated_at, observed.to_rfc3339());
+    }
+
+    #[test]
+    fn meeting_realtime_asr_label_rolls_back_when_persist_fails() {
+        let started = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 0).unwrap();
+        let observed = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 1).unwrap();
+        let mut session = MeetingSession::new_with_asr_settings(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            started,
+            "bailian".to_string(),
+            MeetingVadSilencePreset::Standard,
+            None,
+        );
+        let original = session.clone();
+
+        let result = commit_meeting_realtime_asr_label(
+            &mut session,
+            &AsrCallLabel::new("bailian", Some("fun-asr-realtime".to_string())),
+            observed,
+            |_record| Err("persist failed".to_string()),
+        );
+
+        assert_eq!(result, Err("persist failed".to_string()));
+        assert_eq!(session.model_override(), original.model_override());
+        assert_eq!(session.record(), original.record());
     }
 
     #[test]

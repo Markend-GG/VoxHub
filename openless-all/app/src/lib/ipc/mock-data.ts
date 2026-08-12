@@ -705,6 +705,12 @@ export const mockMeetings: MeetingRecord[] = [
             retained: true,
             path: null,
         },
+        realtimeAsr: {
+            providerId: "bailian",
+            resolvedProviderId: "bailian",
+            modelId: "fun-asr-realtime",
+            silencePreset: "standard",
+        },
         createdAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
         updatedAt: new Date().toISOString(),
     },

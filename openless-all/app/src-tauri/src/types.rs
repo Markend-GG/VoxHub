@@ -706,6 +706,15 @@ pub struct MeetingAudioMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct MeetingRealtimeAsrSnapshot {
+    pub provider_id: String,
+    pub resolved_provider_id: String,
+    pub model_id: Option<String>,
+    pub silence_preset: MeetingVadSilencePreset,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct MeetingRecord {
     pub id: String,
     pub title: String,
@@ -716,6 +725,8 @@ pub struct MeetingRecord {
     pub transcript_segments: Vec<TranscriptSegment>,
     pub summary: MeetingSummary,
     pub audio: MeetingAudioMeta,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_asr: Option<MeetingRealtimeAsrSnapshot>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -4669,6 +4680,7 @@ mod tests {
                 retained: false,
                 path: None,
             },
+            realtime_asr: None,
             created_at: "2026-07-08T09:00:00Z".to_string(),
             updated_at: "2026-07-08T09:00:00Z".to_string(),
         };
@@ -4683,6 +4695,52 @@ mod tests {
 
         let value = serde_json::to_value(&snapshot).unwrap();
         assert_eq!(value["activeProviderSessionId"], "session-1");
+    }
+
+    #[test]
+    fn meeting_record_realtime_asr_snapshot_is_backward_compatible() {
+        let record: MeetingRecord = serde_json::from_str(
+            r#"{
+                "id":"meeting-legacy",
+                "title":"旧会议",
+                "status":"completed",
+                "startedAt":"2026-07-08T09:00:00Z",
+                "endedAt":"2026-07-08T10:00:00Z",
+                "durationMs":3600000,
+                "transcriptSegments":[],
+                "summary":{
+                    "overview":"",
+                    "keyDecisions":[],
+                    "todos":[],
+                    "risksAndOpenQuestions":[]
+                },
+                "audio":{"state":"retained","retained":true,"path":null},
+                "createdAt":"2026-07-08T09:00:00Z",
+                "updatedAt":"2026-07-08T10:00:00Z"
+            }"#,
+        )
+        .unwrap();
+
+        assert!(record.realtime_asr.is_none());
+    }
+
+    #[test]
+    fn meeting_record_realtime_asr_snapshot_round_trips() {
+        let snapshot = MeetingRealtimeAsrSnapshot {
+            provider_id: "bailian".to_string(),
+            resolved_provider_id: "bailian".to_string(),
+            model_id: Some("fun-asr-realtime".to_string()),
+            silence_preset: MeetingVadSilencePreset::Long,
+        };
+        let value = serde_json::to_value(&snapshot).unwrap();
+
+        assert_eq!(value["providerId"], "bailian");
+        assert_eq!(value["resolvedProviderId"], "bailian");
+        assert_eq!(value["modelId"], "fun-asr-realtime");
+        assert_eq!(value["silencePreset"], "long");
+
+        let restored: MeetingRealtimeAsrSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, snapshot);
     }
 
     #[test]

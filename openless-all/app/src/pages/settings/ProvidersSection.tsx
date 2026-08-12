@@ -509,7 +509,9 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
   const meetingModelOverrideValue = meetingAsr.modelProviderId === effectiveMeetingProviderId
     ? meetingAsr.modelOverride || ''
     : '';
-  const meetingCapability = asrCapabilities.find(capability => capability.providerId === meetingProviderId);
+  const meetingCapability = asrCapabilities.find(
+    capability => capability.providerId === effectiveMeetingProviderId,
+  );
   const showMeetingSilencePreset = Boolean(meetingCapability?.supportsVadSilencePreset);
   const showLlm = kind === 'all' || kind === 'llm';
   const showAsr = kind === 'all' || kind === 'asr';

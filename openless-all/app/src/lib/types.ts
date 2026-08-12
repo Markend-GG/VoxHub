@@ -380,6 +380,13 @@ export interface MeetingAudioMeta {
   path: string | null;
 }
 
+export interface MeetingRealtimeAsrSnapshot {
+  providerId: string;
+  resolvedProviderId: string;
+  modelId: string | null;
+  silencePreset: MeetingVadSilencePreset;
+}
+
 export interface MeetingRecord {
   id: string;
   title: string;
@@ -390,6 +397,7 @@ export interface MeetingRecord {
   transcriptSegments: TranscriptSegment[];
   summary: MeetingSummary;
   audio: MeetingAudioMeta;
+  realtimeAsr?: MeetingRealtimeAsrSnapshot | null;
   createdAt: string;
   updatedAt: string;
 }

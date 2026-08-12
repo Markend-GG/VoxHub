@@ -1,5 +1,7 @@
 # 08-说话人识别/分离落地
 
+> 范围说明（2026-08-12）：本文是通用本地 ASR 管线的早期子计划，只描述本地 speaker diarization（说话人分离）方向。会议 V2 的范围权威为 `docs/meeting-recording-v2-plan.md`，详细会议管线为 `docs/meeting-recording-v2-2-diarization-plan.md`。本文不能覆盖 V2-2 已确认的会后 ASR 模型下拉（默认 `fun-asr`、备选 `paraformer-v2`）或 V2-3 按 ASR 模型类型动态路由的范围。
+
 ## 本次只做一个改动点
 
 只实现 `use_speaker_diarization` 的 batch 后处理。不要做实时说话人预览。
@@ -23,15 +25,16 @@ sherpa-onnx Rust API 有 `OfflineSpeakerDiarization`，适合完整音频后处�
 
 建议第一版：
 
-1. 录音结束后保留完整 PCM。
+1. 录音结束后保留受管 WAV / PCM 音频源；长会议不要额外复制完整 PCM。
 2. 如果 `use_speaker_diarization=true`，先跑 diarization 得到 segments。
 3. ASR 仍按当前方式转写。
 4. 如果暂时无法精确按 speaker 切文本，先把 speaker segments 放进 metadata，不改变插入文本。
 
-更完整版本再做：
+会议 V2-2 的完整版本按阶段计划执行：
 
 ```text
-speaker segments -> 按时间切音频 -> 每段 ASR -> 拼接带 speaker label 的文本
+现场会议：所选云端会后 ASR -> speaker turns -> 与会后 ASR 整理后原文时间戳对齐
+导入音频：speaker turns -> 按时间窗运行 local batch ASR -> 带 speakerId 的原文
 ```
 
 ## 非目标
@@ -73,6 +76,7 @@ cargo check
 ```text
 请只实现 use_speaker_diarization 的 batch 后处理。
 第一版不要做实名声纹识别，也不要做实时 speaker 预览。
+会议功能请遵循 docs/meeting-recording-v2-2-diarization-plan.md，不能把本文件的早期 metadata-only 建议当成会议 V2 完整交付标准。
 优先让结果进入 metadata；只有在能可靠按 segment 转写时，才输出 Speaker 1/Speaker 2 文本。
 失败必须回退普通 ASR。
 不要改 VAD 和标点逻辑。

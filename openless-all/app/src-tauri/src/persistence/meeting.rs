@@ -420,6 +420,7 @@ mod tests {
                 retained: false,
                 path: None,
             },
+            realtime_asr: None,
             created_at: created_at.to_string(),
             updated_at: created_at.to_string(),
         }
