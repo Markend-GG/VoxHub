@@ -18,6 +18,7 @@ pub mod sherpa_download;
 pub mod sherpa_provider;
 pub mod sherpa_runtime;
 pub mod speaker_diarization;
+pub mod speaker_diarization_runtime;
 pub mod test_run;
 
 pub use cache::LocalAsrCache;

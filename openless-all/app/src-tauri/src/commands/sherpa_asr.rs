@@ -237,6 +237,9 @@ pub fn delete_speaker_diarization_model(
     if manager.speaker_diarization_is_active(&model_id) {
         return Err("speakerDiarizationModelDownloadActive: 请先取消模型下载".to_string());
     }
+    if crate::asr::local::speaker_diarization_runtime::model_is_active(&model_id) {
+        return Err("speakerDiarizationModelInUse: 模型正在执行本地说话人分析".to_string());
+    }
     ensure_speaker_model_not_in_use(&model_id)?;
     speaker_diarization::delete_package(&model_id).map_err(|error| format!("{error:#}"))?;
 
@@ -273,6 +276,7 @@ fn ensure_speaker_model_not_in_use(model_id: &str) -> Result<(), String> {
                     | MeetingPostProcessingStatus::PreparingAudio
                     | MeetingPostProcessingStatus::Uploading
                     | MeetingPostProcessingStatus::Running
+                    | MeetingPostProcessingStatus::LocalAnalyzing
                     | MeetingPostProcessingStatus::Applying
             )
         })

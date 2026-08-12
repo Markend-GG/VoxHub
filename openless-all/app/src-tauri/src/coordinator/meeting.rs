@@ -1666,6 +1666,8 @@ fn metadata_from_asr_segment(
         provider_start_ms,
         provider_end_ms,
         token_timestamps: segment.token_timestamps.clone(),
+        needs_review: false,
+        overlapping: false,
     }
 }
 

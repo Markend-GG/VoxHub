@@ -11,6 +11,9 @@ use uuid::Uuid;
 use crate::asr::dashscope_multimodal::{
     DashScopeAsyncRequestOptions, DashScopeAsyncTranscript, DashScopeMultimodalASR,
 };
+use crate::asr::local::speaker_diarization_runtime::{
+    run_local_diarization, LocalDiarizationOutput,
+};
 use crate::asr::MeetingAudioSource;
 use crate::persistence::{
     meeting_recording_existing_path_for_id, CredentialAccount, CredentialsVault, MeetingStore,
@@ -137,6 +140,9 @@ pub(super) fn resolve_initial_post_processing_config(
 fn normalize_expected_speaker_count(value: Option<u32>) -> Result<Option<u32>, String> {
     match value {
         Some(0) => Err("expected speaker count must be greater than zero".to_string()),
+        Some(value) if value > 20 => {
+            Err("expected speaker count must not exceed twenty".to_string())
+        }
         other => Ok(other),
     }
 }
@@ -368,9 +374,6 @@ async fn run_post_processing_job(
     let store = MeetingStore::new().map_err(|error| error.to_string())?;
     let record = current_post_processing_record(&store, meeting_id, job_id)?;
     let state = record.post_processing.as_ref().unwrap().clone();
-    if state.diarization_mode == MeetingDiarizationMode::Local {
-        return Err("localDiarizationPipelineUnavailable: 本地说话人处理管线尚未就绪".to_string());
-    }
     if state.resolved_runtime_kind != MeetingAsrRuntimeKind::Cloud {
         return Err("postMeetingAsrRuntimeUnsupported: 会后 ASR 运行时不是云端".to_string());
     }
@@ -453,23 +456,83 @@ async fn run_post_processing_job(
         .await
         .map_err(|error| format!("postMeetingAsrTaskFailed: {error}"))?;
     ensure_job_not_cancelled(&store, meeting_id, job_id, &cancelled)?;
-    update_post_processing_progress(
-        inner,
-        &store,
-        meeting_id,
-        job_id,
-        MeetingPostProcessingStatus::Applying,
-        Some(0.9),
-        Some(provider_task_id.clone()),
-    )?;
-    let mut completed = apply_cloud_post_processing_result(
-        &store,
-        meeting_id,
-        job_id,
-        &descriptor.model_id,
-        &provider_task_id,
-        transcript,
-    )?;
+
+    let mut completed = if state.diarization_mode == MeetingDiarizationMode::Local {
+        update_post_processing_progress(
+            inner,
+            &store,
+            meeting_id,
+            job_id,
+            MeetingPostProcessingStatus::LocalAnalyzing,
+            Some(0.75),
+            Some(provider_task_id.clone()),
+        )?;
+        let local_model_id = record
+            .post_processing_config
+            .as_ref()
+            .and_then(|config| config.local_diarization_model_id.clone())
+            .ok_or_else(|| {
+                "localDiarizationModelNotReady: 本场会议没有本地说话人模型快照".to_string()
+            })?;
+        crate::asr::local::speaker_diarization::ensure_package_ready(&local_model_id)
+            .map_err(|error| format!("localDiarizationModelNotReady: {error:#}"))?;
+        let path = meeting_recording_existing_path_for_id(meeting_id)
+            .map_err(|error| format!("meetingAudioUnavailable: {error}"))?;
+        let source = MeetingAudioSource::from_path(&path)
+            .map_err(|error| format!("meetingAudioInvalid: {error}"))?;
+        let expected_speaker_count = state.expected_speaker_count;
+        let cancelled_for_runtime = Arc::clone(&cancelled);
+        let local_model_for_runtime = local_model_id.clone();
+        let local_output = tauri::async_runtime::spawn_blocking(move || {
+            run_local_diarization(
+                source,
+                &local_model_for_runtime,
+                expected_speaker_count,
+                cancelled_for_runtime,
+            )
+        })
+        .await
+        .map_err(|error| format!("localDiarizationRuntimeFailed: worker join failed: {error}"))?
+        .map_err(|error| format!("localDiarizationRuntimeFailed: {error:#}"))?;
+        ensure_job_not_cancelled(&store, meeting_id, job_id, &cancelled)?;
+        update_post_processing_progress(
+            inner,
+            &store,
+            meeting_id,
+            job_id,
+            MeetingPostProcessingStatus::Applying,
+            Some(0.95),
+            Some(provider_task_id.clone()),
+        )?;
+        apply_local_post_processing_result(
+            &store,
+            meeting_id,
+            job_id,
+            &descriptor.model_id,
+            &provider_task_id,
+            &local_model_id,
+            transcript,
+            local_output,
+        )?
+    } else {
+        update_post_processing_progress(
+            inner,
+            &store,
+            meeting_id,
+            job_id,
+            MeetingPostProcessingStatus::Applying,
+            Some(0.9),
+            Some(provider_task_id.clone()),
+        )?;
+        apply_cloud_post_processing_result(
+            &store,
+            meeting_id,
+            job_id,
+            &descriptor.model_id,
+            &provider_task_id,
+            transcript,
+        )?
+    };
     emit_post_processing_event(inner, &completed);
     prepare_and_spawn_auto_meeting_summary(inner, &mut completed)?;
     let retention_count = inner.prefs.get().meeting_audio_retention_count;
@@ -485,7 +548,9 @@ fn resume_provider_task_id(state: &MeetingPostProcessingState) -> Result<Option<
     }
     if matches!(
         state.status,
-        MeetingPostProcessingStatus::Running | MeetingPostProcessingStatus::Applying
+        MeetingPostProcessingStatus::Running
+            | MeetingPostProcessingStatus::LocalAnalyzing
+            | MeetingPostProcessingStatus::Applying
     ) {
         return Err(
             "postMeetingAsrSubmissionOutcomeUnknown: 云端任务提交结果未知；为避免重复提交，请手动重试"
@@ -521,6 +586,7 @@ fn post_processing_status_is_active(status: MeetingPostProcessingStatus) -> bool
             | MeetingPostProcessingStatus::PreparingAudio
             | MeetingPostProcessingStatus::Uploading
             | MeetingPostProcessingStatus::Running
+            | MeetingPostProcessingStatus::LocalAnalyzing
             | MeetingPostProcessingStatus::Applying
     )
 }
@@ -660,6 +726,44 @@ fn apply_cloud_post_processing_result(
     updated.ok_or_else(|| "postMeetingAsrJobCancelled: 后处理任务已取消或被替换".to_string())
 }
 
+fn apply_local_post_processing_result(
+    store: &MeetingStore,
+    meeting_id: &str,
+    job_id: &str,
+    model_id: &str,
+    provider_task_id: &str,
+    local_model_id: &str,
+    transcript: DashScopeAsyncTranscript,
+    local_output: LocalDiarizationOutput,
+) -> Result<MeetingRecord, String> {
+    let now = Utc::now().to_rfc3339();
+    let mut transition_error = None;
+    let updated = store
+        .update_if(meeting_id, |record| {
+            match apply_local_result_transition(
+                record,
+                job_id,
+                model_id,
+                provider_task_id,
+                local_model_id,
+                &transcript,
+                &local_output,
+                &now,
+            ) {
+                Ok(applied) => applied,
+                Err(error) => {
+                    transition_error = Some(error);
+                    false
+                }
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    if let Some(error) = transition_error {
+        return Err(format!("localDiarizationResultInvalid: {error}"));
+    }
+    updated.ok_or_else(|| "postMeetingAsrJobCancelled: 后处理任务已取消或被替换".to_string())
+}
+
 fn apply_cloud_result_transition(
     record: &mut MeetingRecord,
     job_id: &str,
@@ -694,6 +798,72 @@ fn apply_cloud_result_transition(
     )?;
     record.speaker_profiles = profiles;
     record.speaker_turns = turns;
+    activate_staging_transcript_revision(record, revision)?;
+    let state = record.post_processing.as_mut().unwrap();
+    state.status = MeetingPostProcessingStatus::Completed;
+    state.progress = Some(1.0);
+    state.error_code = None;
+    state.error_message = None;
+    state.updated_at = now.to_string();
+    state.completed_at = Some(now.to_string());
+    record.processing_hold = None;
+    record.updated_at = now.to_string();
+    Ok(true)
+}
+
+fn apply_local_result_transition(
+    record: &mut MeetingRecord,
+    job_id: &str,
+    model_id: &str,
+    provider_task_id: &str,
+    local_model_id: &str,
+    transcript: &DashScopeAsyncTranscript,
+    local_output: &LocalDiarizationOutput,
+    now: &str,
+) -> Result<bool, String> {
+    let state = record
+        .post_processing
+        .as_ref()
+        .ok_or_else(|| "meeting has no post-processing job".to_string())?;
+    if state.job_id != job_id || state.status != MeetingPostProcessingStatus::Applying {
+        return Ok(false);
+    }
+    if state.model_ref.provider_id != POST_MEETING_PROVIDER_ID
+        || state.model_ref.model_id != model_id
+        || state.provider_task_id.as_deref() != Some(provider_task_id)
+        || state.diarization_mode != MeetingDiarizationMode::Local
+    {
+        return Ok(false);
+    }
+    let config = record
+        .post_processing_config
+        .as_ref()
+        .ok_or_else(|| "meeting post-processing config is missing".to_string())?;
+    if config.local_diarization_model_id.as_deref() != Some(local_model_id) {
+        return Ok(false);
+    }
+    let revision = state.processing_revision;
+    let (cloud_segments, _, _) = normalize_cloud_transcript(
+        model_id,
+        provider_task_id,
+        MeetingDiarizationMode::Local,
+        transcript,
+    )?;
+    let (segments, profiles) = align_local_speakers(cloud_segments, &local_output.turns)?;
+    if profiles.len() != local_output.detected_speaker_count as usize {
+        return Err(
+            "local diarization speaker count is inconsistent with speaker turns".to_string(),
+        );
+    }
+    stage_transcript_revision(
+        record,
+        revision,
+        TranscriptRevisionSource::LocalPostprocess,
+        segments,
+        now,
+    )?;
+    record.speaker_profiles = profiles;
+    record.speaker_turns = local_output.turns.clone();
     activate_staging_transcript_revision(record, revision)?;
     let state = record.post_processing.as_mut().unwrap();
     state.status = MeetingPostProcessingStatus::Completed;
@@ -790,6 +960,140 @@ fn normalize_cloud_transcript(
         })
         .collect();
     Ok((segments, profiles, turns))
+}
+
+const LOCAL_ALIGNMENT_MIN_PRIMARY_RATIO: f64 = 0.50;
+const LOCAL_ALIGNMENT_SIGNIFICANT_SPEAKER_RATIO: f64 = 0.20;
+
+fn align_local_speakers(
+    mut segments: Vec<TranscriptSegment>,
+    turns: &[SpeakerTurn],
+) -> Result<(Vec<TranscriptSegment>, Vec<SpeakerProfile>), String> {
+    if turns.is_empty() {
+        return Err("local diarization returned no speaker turns".to_string());
+    }
+    let mut speaker_ids = Vec::<String>::new();
+    for turn in turns {
+        if turn.end_ms <= turn.start_ms {
+            return Err("local diarization returned an invalid speaker turn".to_string());
+        }
+        if !speaker_ids.contains(&turn.speaker_id) {
+            speaker_ids.push(turn.speaker_id.clone());
+        }
+    }
+
+    for segment in &mut segments {
+        let Some(end_ms) = segment.end_ms.filter(|end_ms| *end_ms > segment.start_ms) else {
+            mark_segment_for_review(segment, false);
+            continue;
+        };
+        let duration = end_ms - segment.start_ms;
+        let mut overlaps_by_speaker = speaker_ids
+            .iter()
+            .map(|speaker_id| {
+                let intervals = turns
+                    .iter()
+                    .filter(|turn| turn.speaker_id == *speaker_id)
+                    .filter_map(|turn| {
+                        let start = segment.start_ms.max(turn.start_ms);
+                        let end = end_ms.min(turn.end_ms);
+                        (end > start).then_some((start, end))
+                    })
+                    .collect::<Vec<_>>();
+                (speaker_id.clone(), merged_interval_duration(intervals))
+            })
+            .filter(|(_, overlap)| *overlap > 0)
+            .collect::<Vec<_>>();
+        overlaps_by_speaker
+            .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        let overlapping = turns.iter().enumerate().any(|(index, turn)| {
+            turns.iter().skip(index + 1).any(|other| {
+                turn.speaker_id != other.speaker_id
+                    && ranges_overlap(
+                        segment.start_ms,
+                        end_ms,
+                        turn.start_ms.max(other.start_ms),
+                        turn.end_ms.min(other.end_ms),
+                    ) > 0
+            })
+        });
+        let Some((primary_speaker_id, primary_overlap)) = overlaps_by_speaker.first() else {
+            mark_segment_for_review(segment, overlapping);
+            continue;
+        };
+        let primary_ratio = *primary_overlap as f64 / duration as f64;
+        let significant_speaker_count = overlaps_by_speaker
+            .iter()
+            .filter(|(_, overlap)| {
+                *overlap as f64 / duration as f64 >= LOCAL_ALIGNMENT_SIGNIFICANT_SPEAKER_RATIO
+            })
+            .count();
+        let needs_review = primary_ratio < LOCAL_ALIGNMENT_MIN_PRIMARY_RATIO
+            || significant_speaker_count > 1
+            || overlapping;
+        segment.speaker_id = Some(primary_speaker_id.clone());
+        segment.speaker_label = speaker_display_name(primary_speaker_id);
+        let metadata = segment
+            .metadata
+            .get_or_insert_with(TranscriptSegmentMetadata::default);
+        metadata.needs_review = needs_review;
+        metadata.overlapping = overlapping;
+    }
+
+    let profiles = speaker_ids
+        .into_iter()
+        .map(|speaker_id| SpeakerProfile {
+            display_name: speaker_display_name(&speaker_id),
+            id: speaker_id,
+            provider_speaker_id: None,
+            manually_named: false,
+        })
+        .collect();
+    Ok((segments, profiles))
+}
+
+fn mark_segment_for_review(segment: &mut TranscriptSegment, overlapping: bool) {
+    segment.speaker_id = None;
+    segment.speaker_label = "未确认".to_string();
+    let metadata = segment
+        .metadata
+        .get_or_insert_with(TranscriptSegmentMetadata::default);
+    metadata.needs_review = true;
+    metadata.overlapping = overlapping;
+}
+
+fn speaker_display_name(speaker_id: &str) -> String {
+    speaker_id
+        .strip_prefix("speaker-")
+        .and_then(|index| index.parse::<usize>().ok())
+        .map(|index| format!("发言人 {}", index + 1))
+        .unwrap_or_else(|| "未确认".to_string())
+}
+
+fn merged_interval_duration(mut intervals: Vec<(u64, u64)>) -> u64 {
+    intervals.sort_by_key(|interval| interval.0);
+    let mut total = 0u64;
+    let mut current: Option<(u64, u64)> = None;
+    for (start, end) in intervals {
+        match current {
+            Some((current_start, current_end)) if start <= current_end => {
+                current = Some((current_start, current_end.max(end)));
+            }
+            Some((current_start, current_end)) => {
+                total = total.saturating_add(current_end - current_start);
+                current = Some((start, end));
+            }
+            None => current = Some((start, end)),
+        }
+    }
+    if let Some((start, end)) = current {
+        total = total.saturating_add(end - start);
+    }
+    total
+}
+
+fn ranges_overlap(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> u64 {
+    a_end.min(b_end).saturating_sub(a_start.max(b_start))
 }
 
 fn fail_post_processing_job(
@@ -1228,6 +1532,7 @@ fn resumable_post_processing_job(record: MeetingRecord) -> Option<(String, Strin
             | MeetingPostProcessingStatus::PreparingAudio
             | MeetingPostProcessingStatus::Uploading
             | MeetingPostProcessingStatus::Running
+            | MeetingPostProcessingStatus::LocalAnalyzing
             | MeetingPostProcessingStatus::Applying
     )
     .then(|| (record.id, state.job_id.clone()))
@@ -1427,6 +1732,7 @@ mod tests {
     fn submitted_job_without_provider_task_id_rejects_automatic_resubmission() {
         for status in [
             MeetingPostProcessingStatus::Running,
+            MeetingPostProcessingStatus::LocalAnalyzing,
             MeetingPostProcessingStatus::Applying,
         ] {
             let mut record = record();
@@ -1652,6 +1958,161 @@ mod tests {
             .all(|segment| segment.speaker_label == "未区分"));
     }
 
+    fn local_turn(speaker_id: &str, start_ms: u64, end_ms: u64) -> SpeakerTurn {
+        SpeakerTurn {
+            speaker_id: speaker_id.to_string(),
+            start_ms,
+            end_ms,
+            confidence: None,
+            overlapping: false,
+        }
+    }
+
+    fn local_alignment_segments() -> Vec<TranscriptSegment> {
+        normalize_cloud_transcript(
+            FUN_ASR_MODEL_ID,
+            "task-local",
+            MeetingDiarizationMode::Local,
+            &cloud_transcript(false),
+        )
+        .unwrap()
+        .0
+    }
+
+    #[test]
+    fn local_alignment_assigns_a_single_speaker_without_review() {
+        let (segments, profiles) = align_local_speakers(
+            local_alignment_segments(),
+            &[local_turn("speaker-0", 0, 2_200)],
+        )
+        .unwrap();
+
+        assert_eq!(profiles.len(), 1);
+        assert!(segments
+            .iter()
+            .all(|segment| segment.speaker_id.as_deref() == Some("speaker-0")));
+        assert!(segments.iter().all(|segment| {
+            let metadata = segment.metadata.as_ref().unwrap();
+            !metadata.needs_review && !metadata.overlapping
+        }));
+    }
+
+    #[test]
+    fn local_alignment_marks_low_coverage_and_missing_timestamps_for_review() {
+        let mut segments = local_alignment_segments();
+        segments[1].end_ms = None;
+        let (segments, _) = align_local_speakers(
+            segments,
+            &[
+                local_turn("speaker-0", 100, 400),
+                local_turn("speaker-1", 1_700, 2_100),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(segments[0].speaker_id.as_deref(), Some("speaker-0"));
+        assert!(segments[0].metadata.as_ref().unwrap().needs_review);
+        assert!(segments[1].speaker_id.is_none());
+        assert_eq!(segments[1].speaker_label, "未确认");
+        assert!(segments[1].metadata.as_ref().unwrap().needs_review);
+    }
+
+    #[test]
+    fn local_alignment_keeps_cross_speaker_sentence_whole_and_marks_review() {
+        let original_text = local_alignment_segments()[0].text.clone();
+        let (segments, profiles) = align_local_speakers(
+            vec![local_alignment_segments().remove(0)],
+            &[
+                local_turn("speaker-0", 100, 600),
+                local_turn("speaker-1", 600, 900),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, original_text);
+        assert_eq!(segments[0].speaker_id.as_deref(), Some("speaker-0"));
+        assert!(segments[0].metadata.as_ref().unwrap().needs_review);
+        assert_eq!(profiles.len(), 2);
+    }
+
+    #[test]
+    fn local_alignment_preserves_overlap_marker() {
+        let mut primary = local_turn("speaker-0", 100, 900);
+        primary.overlapping = true;
+        let mut secondary = local_turn("speaker-1", 500, 800);
+        secondary.overlapping = true;
+        let (segments, _) = align_local_speakers(
+            vec![local_alignment_segments().remove(0)],
+            &[primary, secondary],
+        )
+        .unwrap();
+
+        let metadata = segments[0].metadata.as_ref().unwrap();
+        assert!(metadata.needs_review);
+        assert!(metadata.overlapping);
+    }
+
+    #[test]
+    fn local_alignment_merges_duplicate_same_speaker_coverage() {
+        assert_eq!(
+            merged_interval_duration(vec![(100, 700), (300, 900), (900, 1_000)]),
+            900
+        );
+    }
+
+    #[test]
+    fn local_result_transition_activates_only_the_current_job_atomically() {
+        let mut candidate = record();
+        let config = candidate.post_processing_config.as_mut().unwrap();
+        config.diarization_mode = MeetingDiarizationMode::Local;
+        config.local_diarization_model_id = Some("local-speaker-model".to_string());
+        prepare_post_processing_after_stop(&mut candidate, "2026-08-12T10:00:01Z").unwrap();
+        let state = candidate.post_processing.as_mut().unwrap();
+        state.status = MeetingPostProcessingStatus::Applying;
+        state.provider_task_id = Some("task-local".to_string());
+        let job_id = state.job_id.clone();
+        let output = LocalDiarizationOutput {
+            turns: vec![local_turn("speaker-0", 0, 2_200)],
+            detected_speaker_count: 1,
+        };
+
+        assert!(!apply_local_result_transition(
+            &mut candidate,
+            "stale-job",
+            FUN_ASR_MODEL_ID,
+            "task-local",
+            "local-speaker-model",
+            &cloud_transcript(false),
+            &output,
+            "2026-08-12T10:02:00Z",
+        )
+        .unwrap());
+        assert_eq!(candidate.active_transcript_revision, Some(0));
+
+        assert!(apply_local_result_transition(
+            &mut candidate,
+            &job_id,
+            FUN_ASR_MODEL_ID,
+            "task-local",
+            "local-speaker-model",
+            &cloud_transcript(false),
+            &output,
+            "2026-08-12T10:02:00Z",
+        )
+        .unwrap());
+        assert_eq!(candidate.active_transcript_revision, Some(1));
+        assert_eq!(
+            candidate.transcript_revisions.last().unwrap().source,
+            TranscriptRevisionSource::LocalPostprocess
+        );
+        assert_eq!(
+            candidate.post_processing.as_ref().unwrap().status,
+            MeetingPostProcessingStatus::Completed
+        );
+        assert!(candidate.processing_hold.is_none());
+    }
+
     #[test]
     fn cloud_result_rejects_stale_job_or_missing_speaker_id() {
         let mut candidate = record();
@@ -1819,6 +2280,7 @@ mod tests {
             MeetingPostProcessingStatus::PreparingAudio,
             MeetingPostProcessingStatus::Uploading,
             MeetingPostProcessingStatus::Running,
+            MeetingPostProcessingStatus::LocalAnalyzing,
             MeetingPostProcessingStatus::Applying,
         ] {
             let mut candidate = record();
@@ -1858,7 +2320,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_config_rejects_zero_expected_speakers_and_missing_local_model() {
+    fn initial_config_rejects_out_of_range_expected_speakers_and_missing_local_model() {
         let prefs = UserPreferences::default();
         let zero = StartMeetingRecordingOptions {
             expected_speaker_count: Some(0),
@@ -1867,6 +2329,15 @@ mod tests {
         assert_eq!(
             resolve_initial_post_processing_config(&prefs, Some(&zero), "bailian", None),
             Err("expected speaker count must be greater than zero".to_string())
+        );
+
+        let too_many = StartMeetingRecordingOptions {
+            expected_speaker_count: Some(21),
+            ..StartMeetingRecordingOptions::default()
+        };
+        assert_eq!(
+            resolve_initial_post_processing_config(&prefs, Some(&too_many), "bailian", None),
+            Err("expected speaker count must not exceed twenty".to_string())
         );
 
         let local = StartMeetingRecordingOptions {

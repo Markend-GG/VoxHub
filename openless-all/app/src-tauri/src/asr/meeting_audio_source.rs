@@ -194,6 +194,54 @@ impl MeetingAudioSource {
         Ok((info, Box::pin(stream)))
     }
 
+    pub fn read_waveform(
+        &self,
+        cancelled: &AtomicBool,
+    ) -> Result<(MeetingAudioInfo, Vec<f32>)> {
+        let info = self.inspect()?;
+        let sample_count = usize::try_from(info.pcm_bytes / BLOCK_ALIGN as u64)
+            .context("meeting audio is too large for this process")?;
+        if cancelled.load(Ordering::Acquire) {
+            anyhow::bail!("meeting audio waveform read cancelled");
+        }
+        let mut samples = Vec::new();
+        samples
+            .try_reserve_exact(sample_count)
+            .context("reserve meeting waveform memory failed")?;
+        let mut buffer = vec![0u8; PCM_CHUNK_BYTES];
+
+        for path in self.paths() {
+            if cancelled.load(Ordering::Acquire) {
+                anyhow::bail!("meeting audio waveform read cancelled");
+            }
+            let pcm_bytes = inspect_wav(path)?;
+            let mut file = std::fs::File::open(path)
+                .with_context(|| format!("read meeting WAV failed: {}", path.display()))?;
+            std::io::Seek::seek(&mut file, io::SeekFrom::Start(WAV_HEADER_BYTES))
+                .with_context(|| format!("seek meeting WAV failed: {}", path.display()))?;
+            let mut remaining = pcm_bytes;
+            while remaining > 0 {
+                if cancelled.load(Ordering::Acquire) {
+                    anyhow::bail!("meeting audio waveform read cancelled");
+                }
+                let chunk_len = remaining.min(buffer.len() as u64) as usize;
+                std::io::Read::read_exact(&mut file, &mut buffer[..chunk_len])
+                    .with_context(|| format!("read meeting WAV PCM failed: {}", path.display()))?;
+                for bytes in buffer[..chunk_len].chunks_exact(2) {
+                    samples.push(i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32_768.0);
+                }
+                remaining -= chunk_len as u64;
+            }
+        }
+        if samples.len() != sample_count {
+            anyhow::bail!(
+                "meeting waveform sample count mismatch: actual={} expected={sample_count}",
+                samples.len()
+            );
+        }
+        Ok((info, samples))
+    }
+
     fn paths(&self) -> &[PathBuf] {
         match self {
             Self::SingleWav(path) => std::slice::from_ref(path),
@@ -347,6 +395,45 @@ mod tests {
             .into_stream(cancelled)
             .unwrap();
         assert_eq!(stream.try_next().await.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn segmented_source_reads_one_preallocated_waveform_in_order() {
+        let dir = temp_dir();
+        std::fs::write(
+            dir.join("part-0001.wav"),
+            encode_wav_16k_mono(&[i16::MIN, 0]),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("part-0002.wav"),
+            encode_wav_16k_mono(&[i16::MAX]),
+        )
+        .unwrap();
+        let source = MeetingAudioSource::from_path(&dir).unwrap();
+        let (info, waveform) = source.read_waveform(&AtomicBool::new(false)).unwrap();
+
+        assert_eq!(info.pcm_bytes, 6);
+        assert_eq!(waveform.len(), 3);
+        assert_eq!(waveform[0], -1.0);
+        assert_eq!(waveform[1], 0.0);
+        assert!((waveform[2] - (i16::MAX as f32 / 32_768.0)).abs() < f32::EPSILON);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn waveform_read_honors_cancellation_before_allocation() {
+        let dir = temp_dir();
+        let path = dir.join("audio.wav");
+        std::fs::write(&path, encode_wav_16k_mono(&[1, 2])).unwrap();
+        let error = MeetingAudioSource::from_path(&path)
+            .unwrap()
+            .read_waveform(&AtomicBool::new(true))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cancelled"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

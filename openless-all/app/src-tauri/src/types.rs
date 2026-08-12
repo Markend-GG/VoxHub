@@ -661,6 +661,8 @@ pub struct TranscriptSegmentMetadata {
     pub provider_start_ms: Option<u64>,
     pub provider_end_ms: Option<u64>,
     pub token_timestamps: Vec<TranscriptTokenTimestamp>,
+    pub needs_review: bool,
+    pub overlapping: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -793,6 +795,7 @@ pub enum MeetingPostProcessingStatus {
     PreparingAudio,
     Uploading,
     Running,
+    LocalAnalyzing,
     Applying,
     Completed,
     Failed,
@@ -4867,6 +4870,26 @@ mod tests {
     }
 
     #[test]
+    fn transcript_segment_metadata_defaults_new_review_fields_for_old_records() {
+        let segment: TranscriptSegment = serde_json::from_str(
+            r#"{
+                "id":"seg-000001",
+                "speakerLabel":"未区分",
+                "startMs":0,
+                "endMs":1200,
+                "text":"我们开始吧",
+                "source":"realtime_asr",
+                "metadata":{"providerId":"bailian","tokenTimestamps":[]}
+            }"#,
+        )
+        .unwrap();
+
+        let metadata = segment.metadata.unwrap();
+        assert!(!metadata.needs_review);
+        assert!(!metadata.overlapping);
+    }
+
+    #[test]
     fn transcript_segment_metadata_round_trips_timestamp_fields() {
         let segment = TranscriptSegment {
             id: "seg-000001".to_string(),
@@ -4894,6 +4917,8 @@ mod tests {
                     provider_end_ms: Some(700),
                     kind: TranscriptTokenKind::Word,
                 }],
+                needs_review: false,
+                overlapping: false,
             }),
         };
 

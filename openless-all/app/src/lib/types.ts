@@ -346,6 +346,8 @@ export interface TranscriptSegmentMetadata {
   providerStartMs: number | null;
   providerEndMs: number | null;
   tokenTimestamps: TranscriptTokenTimestamp[];
+  needsReview?: boolean;
+  overlapping?: boolean;
 }
 
 export interface TranscriptSegment {
@@ -432,6 +434,7 @@ export type MeetingPostProcessingStatus =
   | 'preparing_audio'
   | 'uploading'
   | 'running'
+  | 'local_analyzing'
   | 'applying'
   | 'completed'
   | 'failed'

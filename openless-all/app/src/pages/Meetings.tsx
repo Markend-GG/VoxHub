@@ -1166,9 +1166,15 @@ function PostProcessingSection({
   if (!state || !config) return null;
 
   const retryable = state.status === 'failed' || state.status === 'cancelled';
-  const cancellable = ['pending', 'preparing_audio', 'uploading', 'running', 'applying', 'failed'].includes(state.status);
+  const cancellable = ['pending', 'preparing_audio', 'uploading', 'running', 'local_analyzing', 'applying', 'failed'].includes(state.status);
   const selectedModel = models.find(model => `${model.providerId}/${model.modelId}` === modelValue);
   const busy = actionLoading === 'postProcessing';
+  const detectedSpeakerCount = record.speakerProfiles?.length ?? 0;
+  const speakerCountMismatch = state.status === 'completed'
+    && state.diarizationMode !== 'off'
+    && state.expectedSpeakerCount != null
+    && detectedSpeakerCount > 0
+    && detectedSpeakerCount !== state.expectedSpeakerCount;
 
   return (
     <section style={{ padding: '12px 0', borderBottom: '0.5px solid var(--ol-line)', marginBottom: 12 }}>
@@ -1189,6 +1195,16 @@ function PostProcessingSection({
       {state.errorMessage && (
         <div style={{ marginTop: 10 }}>
           <ErrorBanner tone="error">{state.errorMessage}</ErrorBanner>
+        </div>
+      )}
+      {speakerCountMismatch && (
+        <div style={{ marginTop: 10 }}>
+          <ErrorBanner tone="warning">
+            {t('meetings.postProcessing.speakerCountMismatch', {
+              expected: state.expectedSpeakerCount,
+              detected: detectedSpeakerCount,
+            })}
+          </ErrorBanner>
         </div>
       )}
       {retryable && (
@@ -1934,6 +1950,12 @@ function TranscriptRow({ segment }: { segment: TranscriptSegment }) {
         <Pill size="sm" tone="outline">{segment.speakerLabel || t('meetings.unknownSpeaker')}</Pill>
         <Pill size="sm" tone="default">{formatTimestamp(segment.startMs)}</Pill>
         <Pill size="sm" tone="outline">{sourceLabel(segment.source, t)}</Pill>
+        {segment.metadata?.needsReview && (
+          <Pill size="sm" tone="outline">{t('meetings.postProcessing.needsReview')}</Pill>
+        )}
+        {segment.metadata?.overlapping && (
+          <Pill size="sm" tone="outline">{t('meetings.postProcessing.overlappingSpeech')}</Pill>
+        )}
       </div>
       <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink)', whiteSpace: 'pre-wrap' }}>
         {segment.text}
