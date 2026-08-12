@@ -29,7 +29,7 @@ pub mod xfyun;
 pub use bailian::{BailianCredentials, BailianRealtimeASR};
 pub use dashscope_multimodal::DashScopeMultimodalASR;
 pub use elevenlabs::ElevenLabsBatchASR;
-pub use meeting_audio_source::{MeetingAudioInfo, MeetingAudioSource};
+pub use meeting_audio_source::MeetingAudioSource;
 pub use mimo::MimoBatchASR;
 pub use qwen_realtime::{Qwen3RealtimeASR, Qwen3RealtimeCredentials};
 pub use stepfun_realtime::{StepfunRealtimeASR, StepfunRealtimeCredentials};

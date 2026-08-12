@@ -92,7 +92,9 @@ pub(crate) use asr_wiring::whisper_request_format;
 use capsule_focus::*;
 use hotkey_loops::*;
 use meeting::*;
-pub(crate) use meeting_post_processing::cancel_post_processing_for_deletion;
+pub(crate) use meeting_post_processing::{
+    cancel_post_processing_for_deletion, dispatch_post_processing_cancellation,
+};
 use meeting_summary::*;
 use polish_flow::*;
 use qa_session::*;

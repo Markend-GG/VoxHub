@@ -76,12 +76,13 @@ pub fn update_meeting_record(record: MeetingRecord) -> Result<MeetingRecord, Str
 pub fn delete_meeting_record(id: String) -> Result<(), String> {
     validate_meeting_id(&id)?;
     let store = MeetingStore::new().map_err(|e| e.to_string())?;
+    let mut cancellation = None;
     store
         .delete_with_cleanup(
             &id,
             |record| {
                 ensure_meeting_record_is_not_active(record).map_err(anyhow::Error::msg)?;
-                crate::coordinator::cancel_post_processing_for_deletion(
+                cancellation = crate::coordinator::cancel_post_processing_for_deletion(
                     record,
                     &Utc::now().to_rfc3339(),
                 );
@@ -93,6 +94,9 @@ pub fn delete_meeting_record(id: String) -> Result<(), String> {
             },
         )
         .map_err(|e| e.to_string())?;
+    if let Some(cancellation) = cancellation {
+        crate::coordinator::dispatch_post_processing_cancellation(cancellation);
+    }
     Ok(())
 }
 
