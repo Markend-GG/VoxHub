@@ -19,15 +19,20 @@ use crate::types::{
     MeetingAsrMode, MeetingAudioLevelEvent, MeetingAudioMeta, MeetingAudioState, MeetingErrorEvent,
     MeetingRealtimeAsrSnapshot, MeetingRecord, MeetingRecordingPhase, MeetingRecordingSnapshot,
     MeetingStatus, MeetingSummary, MeetingTranscriptDraftEvent, MeetingTranscriptSegmentEvent,
-    MeetingVadSilencePreset, TranscriptSegment, TranscriptSegmentMetadata, TranscriptSegmentSource,
+    MeetingVadSilencePreset, StartMeetingRecordingOptions, TranscriptSegment,
+    TranscriptSegmentMetadata, TranscriptSegmentSource,
 };
 
+use super::meeting_post_processing::{
+    lock_realtime_model_in_post_processing_config, prepare_post_processing_after_stop,
+    resolve_initial_post_processing_config, spawn_post_processing_job,
+};
 use super::{
     acquire_recording_mute, asr_transcribe_uses_global_timeout,
     build_meeting_asr_start_with_options, cancel_active_asr, ensure_asr_credentials_for_provider,
-    ensure_microphone_permission, prepare_and_spawn_auto_meeting_summary, release_recording_mute,
-    selected_microphone_device_name, stop_microphone_preview_monitor, ActiveAsr, AsrCallLabel,
-    Inner, MeetingAsrStartOptions, QaAsrStart, COORDINATOR_GLOBAL_TIMEOUT_SECS,
+    ensure_microphone_permission, release_recording_mute, selected_microphone_device_name,
+    stop_microphone_preview_monitor, ActiveAsr, AsrCallLabel, Inner, MeetingAsrStartOptions,
+    QaAsrStart, COORDINATOR_GLOBAL_TIMEOUT_SECS,
 };
 
 const MEETING_AUDIO_LEVEL_INTERVAL: Duration = Duration::from_millis(100);
@@ -154,6 +159,13 @@ impl MeetingSession {
                     path: None,
                 },
                 realtime_asr: None,
+                post_processing_config: None,
+                post_processing: None,
+                transcript_revisions: Vec::new(),
+                active_transcript_revision: None,
+                speaker_profiles: Vec::new(),
+                speaker_turns: Vec::new(),
+                processing_hold: None,
                 created_at: timestamp.clone(),
                 updated_at: timestamp,
             },
@@ -221,6 +233,11 @@ impl MeetingSession {
             model_id: label.model.clone(),
             silence_preset: self.silence_preset.clone(),
         });
+        lock_realtime_model_in_post_processing_config(
+            &mut self.record,
+            &label.provider,
+            label.model.clone(),
+        );
         self.record.updated_at = now.to_rfc3339();
     }
 
@@ -324,6 +341,7 @@ impl MeetingSession {
         let end_ms = end_ms.or(Some(fallback_end_ms));
         let segment = TranscriptSegment {
             id: format!("seg-{:06}", self.next_segment_index),
+            speaker_id: None,
             speaker_label: "未区分".to_string(),
             start_ms: start_ms.unwrap_or_else(|| {
                 self.record
@@ -445,6 +463,7 @@ fn next_meeting_audio_part_index(inner: &Arc<Inner>) -> u32 {
 
 pub(super) async fn start_meeting_recording(
     inner: &Arc<Inner>,
+    options: Option<StartMeetingRecordingOptions>,
 ) -> Result<MeetingRecordingSnapshot, String> {
     if inner.meeting_session.lock().is_some() {
         return Err("meeting recording already active".to_string());
@@ -453,6 +472,12 @@ pub(super) async fn start_meeting_recording(
         return Err("dictation is active".to_string());
     }
     let effective_asr = resolve_effective_meeting_asr(inner);
+    let post_processing_config = resolve_initial_post_processing_config(
+        &inner.prefs.get(),
+        options.as_ref(),
+        &effective_asr.provider_id,
+        effective_asr.model_override.clone(),
+    )?;
     ensure_asr_credentials_for_provider(&effective_asr.provider_id, true)?;
     ensure_microphone_permission(inner)?;
 
@@ -467,6 +492,7 @@ pub(super) async fn start_meeting_recording(
         effective_asr.silence_preset.clone(),
         effective_asr.model_override.clone(),
     );
+    session.record_mut().post_processing_config = Some(post_processing_config);
     session.set_active_asr_session(provider_session_id.clone(), audio_part_index, 0);
     MeetingStore::new()
         .map_err(|e| e.to_string())?
@@ -779,7 +805,7 @@ pub(super) async fn stop_meeting_recording(
     emit_meeting_transcript_draft_clear(inner, meeting_id);
 
     let now = Utc::now();
-    let (mut record, completed_provider) = {
+    let (record, completed_provider, post_processing_started) = {
         let mut session_guard = inner.meeting_session.lock();
         let session = session_guard
             .as_mut()
@@ -817,6 +843,8 @@ pub(super) async fn stop_meeting_recording(
 
         session.finish(now, interrupted);
         session.clear_active_asr_session();
+        let post_processing_started =
+            prepare_post_processing_after_stop(session.record_mut(), &now.to_rfc3339())?;
         if let Some(error) = apply_meeting_audio_retention_state(inner, session.record_mut()) {
             emit_meeting_error(
                 inner,
@@ -825,7 +853,11 @@ pub(super) async fn stop_meeting_recording(
                 &error,
             );
         }
-        (session.record().clone(), completed_provider)
+        (
+            session.record().clone(),
+            completed_provider,
+            post_processing_started,
+        )
     };
     persist_meeting_record(&record)?;
     if let Err(error) = prune_meeting_audio_retention_with_current_preference() {
@@ -839,15 +871,13 @@ pub(super) async fn stop_meeting_recording(
     }
 
     clear_active_meeting_runtime(inner);
-    if record.status == MeetingStatus::Completed {
-        if let Err(error) = prepare_and_spawn_auto_meeting_summary(inner, &mut record) {
-            emit_meeting_error(
-                inner,
-                Some(meeting_id.to_string()),
-                "summaryPrepareFailed",
-                &error,
-            );
-            log::warn!("[meeting] summary prepare failed: {error}");
+    if post_processing_started {
+        if let Some(job_id) = record
+            .post_processing
+            .as_ref()
+            .map(|state| state.job_id.clone())
+        {
+            spawn_post_processing_job(inner, meeting_id.to_string(), job_id);
         }
     }
     emit_meeting_state(
@@ -1839,6 +1869,12 @@ fn apply_meeting_audio_retention_state_with(
         record.audio.path = None;
         return None;
     }
+    if record.processing_hold.is_some() {
+        record.audio.state = MeetingAudioState::Retained;
+        record.audio.retained = true;
+        record.audio.path = None;
+        return None;
+    }
     if retention_count == 0 {
         match remove_audio(&record.id) {
             Ok(()) => {
@@ -1986,7 +2022,7 @@ fn emit_meeting_error(inner: &Arc<Inner>, meeting_id: Option<String>, code: &str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TranscriptSegmentSource;
+    use crate::types::{ProcessingHold, TranscriptSegmentSource};
     use chrono::{TimeZone, Utc};
 
     #[test]
@@ -2696,6 +2732,30 @@ mod tests {
         assert_eq!(record.transcript_segments.len(), 1);
     }
 
+    #[test]
+    fn apply_meeting_audio_retention_state_keeps_audio_while_processing_hold_exists() {
+        let started = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 0).unwrap();
+        let mut record = MeetingSession::new(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            started,
+            "bailian".to_string(),
+        )
+        .record()
+        .clone();
+        record.processing_hold = Some(ProcessingHold {
+            job_id: "job-1".to_string(),
+            acquired_at: "2026-07-04T09:31:00Z".to_string(),
+        });
+
+        let error = apply_meeting_audio_retention_state_with(&mut record, true, 0, |_id| {
+            panic!("processing hold must prevent audio deletion")
+        });
+
+        assert_eq!(error, None);
+        assert_eq!(record.audio.state, MeetingAudioState::Retained);
+        assert!(record.audio.retained);
+    }
+
     trait MeetingRecordTestExt {
         fn append_transcript_segment_for_test(&mut self, text: &str, observed_at: DateTime<Utc>);
     }
@@ -2704,6 +2764,7 @@ mod tests {
         fn append_transcript_segment_for_test(&mut self, text: &str, observed_at: DateTime<Utc>) {
             self.transcript_segments.push(TranscriptSegment {
                 id: "seg-000001".into(),
+                speaker_id: None,
                 speaker_label: "未区分".into(),
                 start_ms: 0,
                 end_ms: Some(duration_ms_between(

@@ -230,6 +230,15 @@ async fn summarize_record(
 }
 
 fn validate_summary_mode(record: &MeetingRecord, mode: MeetingSummaryMode) -> Result<(), String> {
+    if record.post_processing.as_ref().is_some_and(|state| {
+        !matches!(
+            state.status,
+            crate::types::MeetingPostProcessingStatus::Completed
+                | crate::types::MeetingPostProcessingStatus::RealtimeAccepted
+        )
+    }) {
+        return Err("meeting post-processing is not completed".to_string());
+    }
     match (record.status.clone(), mode) {
         (
             MeetingStatus::Recording
@@ -704,6 +713,13 @@ mod tests {
                 path: None,
             },
             realtime_asr: None,
+            post_processing_config: None,
+            post_processing: None,
+            transcript_revisions: Vec::new(),
+            active_transcript_revision: None,
+            speaker_profiles: Vec::new(),
+            speaker_turns: Vec::new(),
+            processing_hold: None,
             created_at: "2026-07-04T09:30:00+00:00".to_string(),
             updated_at: "2026-07-04T10:00:00+00:00".to_string(),
         }
@@ -712,6 +728,7 @@ mod tests {
     fn segment(id: &str, text: &str) -> TranscriptSegment {
         TranscriptSegment {
             id: id.to_string(),
+            speaker_id: None,
             speaker_label: "未区分".to_string(),
             start_ms: 12_000,
             end_ms: Some(18_000),
@@ -880,6 +897,45 @@ mod tests {
         );
         assert_eq!(
             validate_summary_mode(&failed, MeetingSummaryMode::Retry),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn meeting_summary_waits_for_post_processing_or_explicit_realtime_acceptance() {
+        let mut record = record_with_segments(vec![segment("seg-000001", "内容")]);
+        let now = "2026-08-12T10:00:00Z".to_string();
+        record.post_processing = Some(crate::types::MeetingPostProcessingState {
+            status: crate::types::MeetingPostProcessingStatus::Failed,
+            job_id: "job-1".to_string(),
+            model_ref: crate::types::MeetingAsrModelRef {
+                provider_id: "bailian".to_string(),
+                model_id: "fun-asr".to_string(),
+            },
+            resolved_runtime_kind: crate::types::MeetingAsrRuntimeKind::Cloud,
+            diarization_mode: crate::types::MeetingDiarizationMode::Off,
+            expected_speaker_count: None,
+            processing_revision: 1,
+            provider_task_id: None,
+            progress: None,
+            attempt: 1,
+            error_code: Some("network".to_string()),
+            error_message: Some("网络失败".to_string()),
+            created_at: now.clone(),
+            updated_at: now,
+            started_at: None,
+            completed_at: None,
+        });
+
+        assert_eq!(
+            validate_summary_mode(&record, MeetingSummaryMode::Generate),
+            Err("meeting post-processing is not completed".to_string())
+        );
+
+        record.post_processing.as_mut().unwrap().status =
+            crate::types::MeetingPostProcessingStatus::RealtimeAccepted;
+        assert_eq!(
+            validate_summary_mode(&record, MeetingSummaryMode::Generate),
             Ok(())
         );
     }

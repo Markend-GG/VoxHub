@@ -59,6 +59,14 @@ export let mockSettings: UserPreferences = {
         modelProviderId: null,
         silencePreset: "standard",
     },
+    postMeetingAsr: {
+        providerId: "bailian",
+        modelId: "fun-asr",
+        diarization: {
+            mode: "off",
+            localModelId: null,
+        },
+    },
     activeLlmProvider: "ark",
     llmThinkingEnabled: false,
     useSystemProxy: true,

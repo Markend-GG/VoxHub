@@ -9,7 +9,9 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::types::{
-    MeetingAudioState, MeetingListItem, MeetingStatus, TranscriptSegment, TranscriptSegmentSource,
+    MeetingAudioState, MeetingListItem, MeetingStatus, PostMeetingAsrModelDescriptor,
+    RetryMeetingPostProcessingOptions, StartMeetingRecordingOptions, TranscriptSegment,
+    TranscriptSegmentSource,
 };
 
 const WAV_HEADER_BYTES: u64 = 44;
@@ -74,29 +76,33 @@ pub fn update_meeting_record(record: MeetingRecord) -> Result<MeetingRecord, Str
 pub fn delete_meeting_record(id: String) -> Result<(), String> {
     validate_meeting_id(&id)?;
     let store = MeetingStore::new().map_err(|e| e.to_string())?;
-    delete_meeting_record_with_cleanup(
-        &id,
-        || store.get(&id).map_err(|e| e.to_string()),
-        |delete_id| {
-            store
-                .delete(delete_id)
-                .map_err(|e| e.to_string())
-                .map(|_| ())
-        },
-        |delete_id| {
-            let path = crate::persistence::meeting_recording_existing_path_for_id(delete_id)
-                .map_err(|e| e.to_string())?;
-            crate::persistence::remove_meeting_audio_path(&path).map_err(|e| e.to_string())
-        },
-    )
+    store
+        .delete_with_cleanup(
+            &id,
+            |record| {
+                ensure_meeting_record_is_not_active(record).map_err(anyhow::Error::msg)?;
+                crate::coordinator::cancel_post_processing_for_deletion(
+                    record,
+                    &Utc::now().to_rfc3339(),
+                );
+                Ok(())
+            },
+            |delete_id| {
+                let path = crate::persistence::meeting_recording_existing_path_for_id(delete_id)?;
+                crate::persistence::remove_meeting_audio_path(&path)
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn start_meeting_recording(
+    options: Option<StartMeetingRecordingOptions>,
     coord: CoordinatorState<'_>,
     app: AppHandle,
 ) -> Result<MeetingRecordingSnapshot, String> {
-    let snapshot = coord.start_meeting_recording().await?;
+    let snapshot = coord.start_meeting_recording(options).await?;
     #[cfg(not(mobile))]
     crate::meeting_companion::meeting_started(
         &app,
@@ -138,6 +144,52 @@ pub fn get_active_meeting_recording(
     coord: CoordinatorState<'_>,
 ) -> Result<Option<MeetingRecordingSnapshot>, String> {
     coord.active_meeting_recording()
+}
+
+#[tauri::command]
+pub fn list_post_meeting_asr_models(
+    coord: CoordinatorState<'_>,
+) -> Vec<PostMeetingAsrModelDescriptor> {
+    coord.list_post_meeting_asr_models()
+}
+
+#[tauri::command]
+pub fn retry_meeting_post_processing(
+    id: String,
+    options: Option<RetryMeetingPostProcessingOptions>,
+    coord: CoordinatorState<'_>,
+) -> Result<MeetingRecord, String> {
+    validate_meeting_id(&id)?;
+    coord.retry_meeting_post_processing(id, options)
+}
+
+#[tauri::command]
+pub fn cancel_meeting_post_processing(
+    id: String,
+    coord: CoordinatorState<'_>,
+) -> Result<MeetingRecord, String> {
+    validate_meeting_id(&id)?;
+    coord.cancel_meeting_post_processing(id)
+}
+
+#[tauri::command]
+pub fn use_realtime_transcript_and_summarize(
+    id: String,
+    coord: CoordinatorState<'_>,
+) -> Result<MeetingRecord, String> {
+    validate_meeting_id(&id)?;
+    coord.use_realtime_transcript_and_summarize(id)
+}
+
+#[tauri::command]
+pub fn rename_meeting_speaker(
+    meeting_id: String,
+    speaker_id: String,
+    display_name: String,
+    coord: CoordinatorState<'_>,
+) -> Result<MeetingRecord, String> {
+    validate_meeting_id(&meeting_id)?;
+    coord.rename_meeting_speaker(meeting_id, speaker_id, display_name)
 }
 
 #[tauri::command]
@@ -266,6 +318,7 @@ async fn retranscribe_meeting_audio_in_chunks(
             if !trimmed.is_empty() {
                 segments.push(TranscriptSegment {
                     id: format!("retranscribed-{}", Uuid::new_v4()),
+                    speaker_id: None,
                     speaker_label: "未区分".to_string(),
                     start_ms: offset_ms,
                     end_ms: Some(offset_ms.saturating_add(chunk_duration_ms)),
@@ -374,25 +427,6 @@ fn apply_meeting_audio_missing(record: &mut MeetingRecord) {
     record.audio.retained = false;
     record.audio.path = None;
     record.updated_at = Utc::now().to_rfc3339();
-}
-
-fn delete_meeting_record_with_cleanup<G, D, R>(
-    id: &str,
-    get_record: G,
-    delete_record: D,
-    remove_audio: R,
-) -> Result<(), String>
-where
-    G: FnOnce() -> Result<Option<MeetingRecord>, String>,
-    D: FnOnce(&str) -> Result<(), String>,
-    R: FnOnce(&str) -> Result<(), String>,
-{
-    let Some(record) = get_record()? else {
-        return Ok(());
-    };
-    ensure_meeting_record_is_not_active(&record)?;
-    remove_audio(id)?;
-    delete_record(id)
 }
 
 fn meeting_markdown(record: &MeetingRecord) -> String {
@@ -762,6 +796,7 @@ mod tests {
         };
         record.transcript_segments = vec![TranscriptSegment {
             id: "seg-1".to_string(),
+            speaker_id: None,
             speaker_label: "未区分".to_string(),
             start_ms: 3_723_000,
             end_ms: None,
@@ -920,6 +955,7 @@ mod tests {
         record.summary.overview = "保留总结".to_string();
         let segment = TranscriptSegment {
             id: "retranscribed-1".to_string(),
+            speaker_id: None,
             speaker_label: "未区分".to_string(),
             start_ms: 0,
             end_ms: Some(1_000),
@@ -1018,33 +1054,12 @@ mod tests {
     }
 
     #[test]
-    fn meeting_delete_removes_audio_before_record_so_cleanup_failure_preserves_record() {
-        let record = fixture_record();
-        let mut record_deleted = false;
-
-        let result = delete_meeting_record_with_cleanup(
-            &record.id,
-            || Ok(Some(record.clone())),
-            |_id| {
-                record_deleted = true;
-                Ok(())
-            },
-            |_id| Err("delete meeting audio failed: locked".to_string()),
-        );
-
-        assert_eq!(
-            result,
-            Err("delete meeting audio failed: locked".to_string())
-        );
-        assert!(!record_deleted);
-    }
-
-    #[test]
     fn meeting_list_item_serialization_omits_full_detail() {
         let mut record = fixture_record();
         record.summary.overview = "摘要概览".to_string();
         record.transcript_segments = vec![TranscriptSegment {
             id: "segment-1".to_string(),
+            speaker_id: None,
             speaker_label: "未区分".to_string(),
             start_ms: 0,
             end_ms: Some(1_000),
@@ -1079,6 +1094,13 @@ mod tests {
                 path: None,
             },
             realtime_asr: None,
+            post_processing_config: None,
+            post_processing: None,
+            transcript_revisions: Vec::new(),
+            active_transcript_revision: None,
+            speaker_profiles: Vec::new(),
+            speaker_turns: Vec::new(),
+            processing_hold: None,
             created_at: "2026-07-06T10:00:00Z".to_string(),
             updated_at: "2026-07-06T11:00:00Z".to_string(),
         }

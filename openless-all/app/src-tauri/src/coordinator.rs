@@ -74,6 +74,7 @@ mod capsule_focus;
 mod dictation;
 mod hotkey_loops;
 mod meeting;
+mod meeting_post_processing;
 mod meeting_summary;
 mod polish_flow;
 mod qa;
@@ -91,6 +92,7 @@ pub(crate) use asr_wiring::whisper_request_format;
 use capsule_focus::*;
 use hotkey_loops::*;
 use meeting::*;
+pub(crate) use meeting_post_processing::cancel_post_processing_for_deletion;
 use meeting_summary::*;
 use polish_flow::*;
 use qa_session::*;
@@ -1224,6 +1226,9 @@ impl Coordinator {
 
     pub fn bind_app(&self, handle: AppHandle) {
         *self.inner.app.lock() = Some(handle);
+        if let Err(error) = meeting_post_processing::resume_post_processing_jobs(&self.inner) {
+            log::warn!("[meeting-post-processing] resume jobs failed: {error}");
+        }
         // 聚合模式：启动时 finalize 上次会话遗留的过期桶，并启动后台定时器
         if self.inner.prefs.get().screenshot_app_aggregation_enabled {
             let inner = Arc::clone(&self.inner);
@@ -2022,8 +2027,15 @@ impl Coordinator {
         begin_session(&self.inner).await
     }
 
-    pub async fn start_meeting_recording(&self) -> Result<MeetingRecordingSnapshot, String> {
-        meeting::start_meeting_recording(&self.inner).await
+    pub async fn start_meeting_recording(
+        &self,
+        options: Option<crate::types::StartMeetingRecordingOptions>,
+    ) -> Result<MeetingRecordingSnapshot, String> {
+        meeting::start_meeting_recording(&self.inner, options).await
+    }
+
+    pub fn list_post_meeting_asr_models(&self) -> Vec<crate::types::PostMeetingAsrModelDescriptor> {
+        meeting_post_processing::list_post_meeting_asr_models()
     }
 
     pub async fn pause_meeting_recording(
@@ -2042,6 +2054,39 @@ impl Coordinator {
 
     pub async fn stop_meeting_recording(&self, id: String) -> Result<MeetingRecord, String> {
         meeting::stop_meeting_recording(&self.inner, &id).await
+    }
+
+    pub fn retry_meeting_post_processing(
+        &self,
+        id: String,
+        options: Option<crate::types::RetryMeetingPostProcessingOptions>,
+    ) -> Result<MeetingRecord, String> {
+        meeting_post_processing::retry_meeting_post_processing(&self.inner, &id, options)
+    }
+
+    pub fn cancel_meeting_post_processing(&self, id: String) -> Result<MeetingRecord, String> {
+        meeting_post_processing::cancel_meeting_post_processing(&self.inner, &id)
+    }
+
+    pub fn use_realtime_transcript_and_summarize(
+        &self,
+        id: String,
+    ) -> Result<MeetingRecord, String> {
+        meeting_post_processing::use_realtime_transcript_and_summarize(&self.inner, &id)
+    }
+
+    pub fn rename_meeting_speaker(
+        &self,
+        meeting_id: String,
+        speaker_id: String,
+        display_name: String,
+    ) -> Result<MeetingRecord, String> {
+        meeting_post_processing::rename_meeting_speaker(
+            &self.inner,
+            &meeting_id,
+            &speaker_id,
+            &display_name,
+        )
     }
 
     pub fn active_meeting_recording(&self) -> Result<Option<MeetingRecordingSnapshot>, String> {

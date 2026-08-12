@@ -7,6 +7,7 @@ import { Icon } from '../../components/Icon';
 import { detectOS } from '../../components/WindowChrome';
 import {
   listAsrProviderModels,
+  listPostMeetingAsrModels,
   listProviderModels,
   readAsrProviderCredential,
   readCredential,
@@ -17,7 +18,13 @@ import {
   validateProviderCredentials,
 } from '../../lib/ipc';
 import { listAsrProviderCapabilities } from '../../lib/ipc/settings';
-import type { AsrProviderCapabilities, MeetingAsrMode, MeetingVadSilencePreset } from '../../lib/types';
+import type {
+  AsrProviderCapabilities,
+  MeetingAsrMode,
+  MeetingDiarizationMode,
+  MeetingVadSilencePreset,
+  PostMeetingAsrModelDescriptor,
+} from '../../lib/types';
 import { emitSaved } from '../../lib/savedEvent';
 import { useMobileLayout } from '../../lib/useMobileLayout';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
@@ -253,6 +260,7 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
   const [asrModelRevision, setAsrModelRevision] = useState(0);
   const [meetingAsrModelRevision, setMeetingAsrModelRevision] = useState(0);
   const [asrCapabilities, setAsrCapabilities] = useState<AsrProviderCapabilities[]>([]);
+  const [postMeetingAsrModels, setPostMeetingAsrModels] = useState<PostMeetingAsrModelDescriptor[]>([]);
   const os = detectOS();
   const unifiedBailian = committedAsrProvider === 'bailian';
   const [bailianModel, setBailianModel] = useState('');
@@ -312,6 +320,21 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
       .catch(error => {
         console.warn('[settings] failed to load ASR capabilities', error);
         if (!cancelled) setAsrCapabilities([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    listPostMeetingAsrModels()
+      .then(models => {
+        if (!cancelled) setPostMeetingAsrModels(models);
+      })
+      .catch(error => {
+        console.warn('[settings] failed to load post-meeting ASR models', error);
+        if (!cancelled) setPostMeetingAsrModels([]);
       });
     return () => {
       cancelled = true;
@@ -487,6 +510,42 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
     }));
   };
 
+  const onPostMeetingAsrModelChange = (value: string) => {
+    if (!prefs) return;
+    const model = postMeetingAsrModels.find(
+      item => `${item.providerId}/${item.modelId}` === value,
+    );
+    if (!model) return;
+    void updatePrefs(current => ({
+      ...current,
+      postMeetingAsr: {
+        ...current.postMeetingAsr,
+        providerId: model.providerId,
+        modelId: model.modelId,
+      },
+    })).catch(error => {
+      console.error('[settings] failed to update post-meeting ASR model', error);
+      emitSaved('failed', t('common.operationFailed'));
+    });
+  };
+
+  const onMeetingDiarizationModeChange = (mode: MeetingDiarizationMode) => {
+    if (!prefs) return;
+    void updatePrefs(current => ({
+      ...current,
+      postMeetingAsr: {
+        ...current.postMeetingAsr,
+        diarization: {
+          ...current.postMeetingAsr.diarization,
+          mode,
+        },
+      },
+    })).catch(error => {
+      console.error('[settings] failed to update meeting diarization mode', error);
+      emitSaved('failed', t('common.operationFailed'));
+    });
+  };
+
   // preset 决定 placeholder 与 default —— 必须跟着 committed*Provider 走，
   // 否则受控 <select> 立刻切到新厂商，但凭据字段还在显示旧 entry，placeholder
   // 会先于实际数据切换、视觉上对不上。
@@ -500,6 +559,15 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
     modelProviderId: null,
     silencePreset: 'standard' as MeetingVadSilencePreset,
   };
+  const postMeetingAsr = prefs?.postMeetingAsr ?? {
+    providerId: 'bailian',
+    modelId: 'fun-asr',
+    diarization: {
+      mode: 'off' as MeetingDiarizationMode,
+      localModelId: null,
+    },
+  };
+  const postMeetingModelValue = `${postMeetingAsr.providerId}/${postMeetingAsr.modelId}`;
   const meetingProviderId = (meetingAsr.providerId || prefs?.activeAsrProvider || 'volcengine') as AsrPresetId;
   const inheritedMeetingProviderId = (prefs?.activeAsrProvider || 'volcengine') as AsrPresetId;
   const effectiveMeetingProviderId = (meetingAsr.mode === 'provider_specific'
@@ -1026,6 +1094,52 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
               </SettingRow>
             )}
           </>
+        )}
+      </Card>
+      <Card>
+        <div style={{ marginBottom: 10 }}>
+          <SectionTitle>{t('settings.providers.postMeetingAsrTitle')}</SectionTitle>
+        </div>
+        <SettingRow label={t('settings.providers.postMeetingAsrModelLabel')}>
+          <SelectLite
+            value={postMeetingModelValue}
+            onChange={onPostMeetingAsrModelChange}
+            options={postMeetingAsrModels.map(model => ({
+              value: `${model.providerId}/${model.modelId}`,
+              label: model.isDefault
+                ? t('settings.providers.postMeetingAsrDefaultOption', { model: model.displayName })
+                : model.displayName,
+            }))}
+            disabled={postMeetingAsrModels.length === 0}
+            placeholder={t('common.loading')}
+            ariaLabel={t('settings.providers.postMeetingAsrModelLabel')}
+            style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 240 }}
+          />
+        </SettingRow>
+        <SettingRow label={t('settings.providers.meetingDiarizationLabel')}>
+          <SelectLite
+            value={postMeetingAsr.diarization.mode}
+            onChange={next => onMeetingDiarizationModeChange(next as MeetingDiarizationMode)}
+            options={[
+              { value: 'off', label: t('settings.providers.meetingDiarizationOff') },
+              { value: 'cloud', label: t('settings.providers.meetingDiarizationCloud') },
+              { value: 'local', label: t('settings.providers.meetingDiarizationLocal') },
+            ]}
+            ariaLabel={t('settings.providers.meetingDiarizationLabel')}
+            style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 240 }}
+          />
+        </SettingRow>
+        {postMeetingAsr.diarization.mode === 'cloud' && (
+          <div role="note" style={{ marginTop: 8, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+            {t('settings.providers.meetingDiarizationCloudHint')}
+          </div>
+        )}
+        {postMeetingAsr.diarization.mode === 'local' && (
+          <div role="note" style={{ marginTop: 8, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+            {postMeetingAsr.diarization.localModelId
+              ? t('settings.providers.meetingDiarizationLocalHint')
+              : t('settings.providers.meetingDiarizationLocalModelMissing')}
+          </div>
         )}
       </Card>
       </>

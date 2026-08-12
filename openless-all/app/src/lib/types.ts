@@ -350,6 +350,7 @@ export interface TranscriptSegmentMetadata {
 
 export interface TranscriptSegment {
   id: string;
+  speakerId?: string | null;
   speakerLabel: string;
   startMs: number;
   endMs: number | null;
@@ -387,6 +388,133 @@ export interface MeetingRealtimeAsrSnapshot {
   silencePreset: MeetingVadSilencePreset;
 }
 
+export interface MeetingAsrModelRef {
+  providerId: string;
+  modelId: string;
+}
+
+export type MeetingAsrRuntimeKind = 'cloud' | 'local';
+
+export interface PostMeetingAsrModelDescriptor extends MeetingAsrModelRef {
+  displayName: string;
+  runtimeKind: MeetingAsrRuntimeKind;
+  supportsFileTranscription: boolean;
+  supportsDiarization: boolean;
+  supportsSpeakerCount: boolean;
+  isDefault: boolean;
+}
+
+export type MeetingDiarizationMode = 'off' | 'cloud' | 'local';
+
+export interface DiarizationSettings {
+  mode: MeetingDiarizationMode;
+  localModelId: string | null;
+}
+
+export interface PostMeetingAsrSettings extends MeetingAsrModelRef {
+  diarization: DiarizationSettings;
+}
+
+export interface MeetingPostProcessingConfig {
+  diarizationMode: MeetingDiarizationMode;
+  realtimeProviderId: string;
+  realtimeModelId: string | null;
+  postMeetingAsrModelRef: MeetingAsrModelRef;
+  resolvedAsrRuntimeKind: MeetingAsrRuntimeKind;
+  localDiarizationModelId: string | null;
+  expectedSpeakerCount: number | null;
+  modelVersion: string | null;
+  processingRevision: number;
+}
+
+export type MeetingPostProcessingStatus =
+  | 'pending'
+  | 'preparing_audio'
+  | 'uploading'
+  | 'running'
+  | 'applying'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'realtime_accepted';
+
+export interface MeetingPostProcessingState {
+  status: MeetingPostProcessingStatus;
+  jobId: string;
+  modelRef: MeetingAsrModelRef;
+  resolvedRuntimeKind: MeetingAsrRuntimeKind;
+  diarizationMode: MeetingDiarizationMode;
+  expectedSpeakerCount: number | null;
+  processingRevision: number;
+  providerTaskId: string | null;
+  progress: number | null;
+  attempt: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export type TranscriptRevisionSource =
+  | 'realtime'
+  | 'cloud_postprocess'
+  | 'local_postprocess'
+  | 'imported';
+
+export type TranscriptRevisionStatus = 'staging' | 'active' | 'rejected';
+
+export interface TranscriptRevision {
+  revision: number;
+  source: TranscriptRevisionSource;
+  status: TranscriptRevisionStatus;
+  segments: TranscriptSegment[];
+  createdAt: string;
+}
+
+export interface SpeakerProfile {
+  id: string;
+  providerSpeakerId: string | null;
+  displayName: string;
+  manuallyNamed: boolean;
+}
+
+export interface SpeakerTurn {
+  speakerId: string;
+  startMs: number;
+  endMs: number;
+  confidence: number | null;
+  overlapping: boolean;
+}
+
+export interface ProcessingHold {
+  jobId: string;
+  acquiredAt: string;
+}
+
+export interface StartMeetingRecordingOptions {
+  postMeetingAsrModelRef?: MeetingAsrModelRef | null;
+  diarizationMode?: MeetingDiarizationMode | null;
+  localDiarizationModelId?: string | null;
+  expectedSpeakerCount?: number | null;
+}
+
+export interface RetryMeetingPostProcessingOptions {
+  postMeetingAsrModelRef?: MeetingAsrModelRef | null;
+  diarizationMode?: MeetingDiarizationMode | null;
+  localDiarizationModelId?: string | null;
+  expectedSpeakerCount?:
+    | { mode: 'auto' }
+    | { mode: 'fixed'; count: number };
+}
+
+export interface MeetingPostProcessingEvent {
+  meetingId: string;
+  state: MeetingPostProcessingState;
+  meeting: MeetingRecord;
+}
+
 export interface MeetingRecord {
   id: string;
   title: string;
@@ -398,6 +526,13 @@ export interface MeetingRecord {
   summary: MeetingSummary;
   audio: MeetingAudioMeta;
   realtimeAsr?: MeetingRealtimeAsrSnapshot | null;
+  postProcessingConfig?: MeetingPostProcessingConfig | null;
+  postProcessing?: MeetingPostProcessingState | null;
+  transcriptRevisions?: TranscriptRevision[];
+  activeTranscriptRevision?: number | null;
+  speakerProfiles?: SpeakerProfile[];
+  speakerTurns?: SpeakerTurn[];
+  processingHold?: ProcessingHold | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -740,6 +875,7 @@ export interface UserPreferences {
   microphoneDeviceName: string;
   activeAsrProvider: string;
   meetingAsr: MeetingAsrSettings;
+  postMeetingAsr: PostMeetingAsrSettings;
   activeLlmProvider: string;
   /** LLM 思考模式开关。默认关闭；OpenAI 普通 chat 模型会跳过不支持的字段。详见 issue #402。 */
   llmThinkingEnabled: boolean;

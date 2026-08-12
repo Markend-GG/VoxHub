@@ -667,6 +667,8 @@ pub struct TranscriptSegmentMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptSegment {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
     pub speaker_label: String,
     pub start_ms: u64,
     pub end_ms: Option<u64>,
@@ -713,7 +715,183 @@ pub struct MeetingRealtimeAsrSnapshot {
     pub silence_preset: MeetingVadSilencePreset,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingAsrModelRef {
+    pub provider_id: String,
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingAsrRuntimeKind {
+    Cloud,
+    Local,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PostMeetingAsrModelDescriptor {
+    pub provider_id: String,
+    pub model_id: String,
+    pub display_name: String,
+    pub runtime_kind: MeetingAsrRuntimeKind,
+    pub supports_file_transcription: bool,
+    pub supports_diarization: bool,
+    pub supports_speaker_count: bool,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingDiarizationMode {
+    Off,
+    Cloud,
+    Local,
+}
+
+impl Default for MeetingDiarizationMode {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiarizationSettings {
+    pub mode: MeetingDiarizationMode,
+    pub local_model_id: Option<String>,
+}
+
+impl Default for DiarizationSettings {
+    fn default() -> Self {
+        Self {
+            mode: MeetingDiarizationMode::Off,
+            local_model_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingPostProcessingConfig {
+    pub diarization_mode: MeetingDiarizationMode,
+    pub realtime_provider_id: String,
+    pub realtime_model_id: Option<String>,
+    pub post_meeting_asr_model_ref: MeetingAsrModelRef,
+    pub resolved_asr_runtime_kind: MeetingAsrRuntimeKind,
+    pub local_diarization_model_id: Option<String>,
+    pub expected_speaker_count: Option<u32>,
+    pub model_version: Option<String>,
+    pub processing_revision: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingPostProcessingStatus {
+    Pending,
+    PreparingAudio,
+    Uploading,
+    Running,
+    Applying,
+    Completed,
+    Failed,
+    Cancelled,
+    RealtimeAccepted,
+}
+
+impl MeetingPostProcessingStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Cancelled | Self::RealtimeAccepted
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingPostProcessingState {
+    pub status: MeetingPostProcessingStatus,
+    pub job_id: String,
+    pub model_ref: MeetingAsrModelRef,
+    pub resolved_runtime_kind: MeetingAsrRuntimeKind,
+    pub diarization_mode: MeetingDiarizationMode,
+    pub expected_speaker_count: Option<u32>,
+    pub processing_revision: u32,
+    pub provider_task_id: Option<String>,
+    pub progress: Option<f32>,
+    pub attempt: u32,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingPostProcessingEvent {
+    pub meeting_id: String,
+    pub state: MeetingPostProcessingState,
+    pub meeting: MeetingRecord,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptRevisionSource {
+    Realtime,
+    CloudPostprocess,
+    LocalPostprocess,
+    Imported,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptRevisionStatus {
+    Staging,
+    Active,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptRevision {
+    pub revision: u32,
+    pub source: TranscriptRevisionSource,
+    pub status: TranscriptRevisionStatus,
+    pub segments: Vec<TranscriptSegment>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerProfile {
+    pub id: String,
+    pub provider_speaker_id: Option<String>,
+    pub display_name: String,
+    pub manually_named: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerTurn {
+    pub speaker_id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub confidence: Option<f32>,
+    pub overlapping: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessingHold {
+    pub job_id: String,
+    pub acquired_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingRecord {
     pub id: String,
@@ -727,6 +905,20 @@ pub struct MeetingRecord {
     pub audio: MeetingAudioMeta,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realtime_asr: Option<MeetingRealtimeAsrSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_processing_config: Option<MeetingPostProcessingConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_processing: Option<MeetingPostProcessingState>,
+    #[serde(default)]
+    pub transcript_revisions: Vec<TranscriptRevision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_transcript_revision: Option<u32>,
+    #[serde(default)]
+    pub speaker_profiles: Vec<SpeakerProfile>,
+    #[serde(default)]
+    pub speaker_turns: Vec<SpeakerTurn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processing_hold: Option<ProcessingHold>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -785,7 +977,7 @@ pub enum MeetingRecordingPhase {
     TranscribingInterrupted,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingRecordingSnapshot {
     pub meeting: MeetingRecord,
@@ -832,7 +1024,7 @@ pub struct MeetingErrorEvent {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingSummaryEvent {
     pub meeting_id: String,
@@ -848,7 +1040,7 @@ pub enum MeetingCloseRequestIntent {
     Exit,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingCloseRequestEvent {
     pub snapshot: MeetingRecordingSnapshot,
@@ -1859,6 +2051,8 @@ pub struct UserPreferences {
     pub meeting_audio_retention_count: u32,
     #[serde(default)]
     pub meeting_asr: MeetingAsrSettings,
+    #[serde(default)]
+    pub post_meeting_asr: PostMeetingAsrSettings,
     /// 会议桌宠为可选功能，默认关闭。
     #[serde(default)]
     pub meeting_companion_enabled: bool,
@@ -2060,6 +2254,49 @@ impl Default for MeetingAsrSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PostMeetingAsrSettings {
+    pub provider_id: String,
+    pub model_id: String,
+    pub diarization: DiarizationSettings,
+}
+
+impl Default for PostMeetingAsrSettings {
+    fn default() -> Self {
+        Self {
+            provider_id: "bailian".to_string(),
+            model_id: "fun-asr".to_string(),
+            diarization: DiarizationSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StartMeetingRecordingOptions {
+    pub post_meeting_asr_model_ref: Option<MeetingAsrModelRef>,
+    pub diarization_mode: Option<MeetingDiarizationMode>,
+    pub local_diarization_model_id: Option<String>,
+    pub expected_speaker_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RetryMeetingPostProcessingOptions {
+    pub post_meeting_asr_model_ref: Option<MeetingAsrModelRef>,
+    pub diarization_mode: Option<MeetingDiarizationMode>,
+    pub local_diarization_model_id: Option<String>,
+    pub expected_speaker_count: Option<ExpectedSpeakerCountOverride>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ExpectedSpeakerCountOverride {
+    Auto,
+    Fixed { count: u32 },
+}
+
 fn default_polish_context_window_minutes() -> u32 {
     5
 }
@@ -2252,6 +2489,8 @@ struct UserPreferencesWire {
     #[serde(default)]
     meeting_asr: MeetingAsrSettings,
     #[serde(default)]
+    post_meeting_asr: PostMeetingAsrSettings,
+    #[serde(default)]
     meeting_companion_enabled: bool,
     #[serde(default)]
     meeting_companion_position_locked: bool,
@@ -2410,6 +2649,7 @@ impl Default for UserPreferencesWire {
             history_retention_days: prefs.history_retention_days,
             meeting_audio_retention_count: prefs.meeting_audio_retention_count,
             meeting_asr: prefs.meeting_asr,
+            post_meeting_asr: prefs.post_meeting_asr,
             meeting_companion_enabled: prefs.meeting_companion_enabled,
             meeting_companion_position_locked: prefs.meeting_companion_position_locked,
             meeting_companion_position: prefs.meeting_companion_position,
@@ -2468,9 +2708,8 @@ impl<'de> Deserialize<'de> for UserPreferences {
             //   设置保存都会被热键冲突校验整体拒绝，改动全部丢失（#904）。
             let legacy_default_user = cfg!(target_os = "windows")
                 && is_right_control_modifier_shortcut(&dictation_hotkey);
-            let default_taken_by_dictation = selection_polish_hotkey
-                .as_ref()
-                .is_some_and(|binding| {
+            let default_taken_by_dictation =
+                selection_polish_hotkey.as_ref().is_some_and(|binding| {
                     crate::shortcut_binding::bindings_overlap(binding, &dictation_hotkey)
                 });
             if legacy_default_user || default_taken_by_dictation {
@@ -2609,6 +2848,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
                 wire.meeting_audio_retention_count,
             ),
             meeting_asr: wire.meeting_asr,
+            post_meeting_asr: wire.post_meeting_asr,
             meeting_companion_enabled: wire.meeting_companion_enabled,
             meeting_companion_position_locked: wire.meeting_companion_position_locked,
             meeting_companion_position: wire.meeting_companion_position,
@@ -3508,6 +3748,7 @@ impl Default for UserPreferences {
             history_retention_days: default_history_retention_days(),
             meeting_audio_retention_count: default_meeting_audio_retention_count(),
             meeting_asr: MeetingAsrSettings::default(),
+            post_meeting_asr: PostMeetingAsrSettings::default(),
             meeting_companion_enabled: false,
             meeting_companion_position_locked: false,
             meeting_companion_position: None,
@@ -4363,7 +4604,8 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn new_preferences_keep_the_existing_dictation_default_and_use_right_alt_for_selection_polish() {
+    fn new_preferences_keep_the_existing_dictation_default_and_use_right_alt_for_selection_polish()
+    {
         let prefs = UserPreferences::default();
         assert_eq!(prefs.dictation_hotkey.primary, "RightControl");
         assert_eq!(
@@ -4628,6 +4870,7 @@ mod tests {
     fn transcript_segment_metadata_round_trips_timestamp_fields() {
         let segment = TranscriptSegment {
             id: "seg-000001".to_string(),
+            speaker_id: None,
             speaker_label: "未区分".to_string(),
             start_ms: 2400,
             end_ms: Some(3600),
@@ -4681,6 +4924,13 @@ mod tests {
                 path: None,
             },
             realtime_asr: None,
+            post_processing_config: None,
+            post_processing: None,
+            transcript_revisions: Vec::new(),
+            active_transcript_revision: None,
+            speaker_profiles: Vec::new(),
+            speaker_turns: Vec::new(),
+            processing_hold: None,
             created_at: "2026-07-08T09:00:00Z".to_string(),
             updated_at: "2026-07-08T09:00:00Z".to_string(),
         };

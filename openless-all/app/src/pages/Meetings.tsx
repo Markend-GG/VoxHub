@@ -15,21 +15,26 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import {
   type BinaryPayload,
+  cancelMeetingPostProcessing,
   deleteMeetingRecord,
   exportMeetingMarkdown,
   generateMeetingSummary,
   getActiveMeetingRecording,
   getMeeting,
+  listPostMeetingAsrModels,
   retryMeetingSummary,
   listMeetings,
   pauseMeetingRecording,
   prepareMeetingAudioPlayback,
+  renameMeetingSpeaker,
+  retryMeetingPostProcessing,
   resumeMeetingRecording,
   retranscribeMeeting,
   showMeetingCompanion,
   startMeetingRecording,
   stopMeetingRecording,
   updateMeetingRecord,
+  useRealtimeTranscriptAndSummarize,
   isDesktop,
 } from '../lib/ipc';
 import type {
@@ -37,6 +42,8 @@ import type {
   MeetingAudioState,
   MeetingErrorEvent,
   MeetingListItem,
+  MeetingAsrModelRef,
+  MeetingPostProcessingEvent,
   MeetingRecord,
   MeetingRecordingPhase,
   MeetingRecordingSnapshot,
@@ -46,13 +53,17 @@ import type {
   MeetingTranscriptSegmentEvent,
   TranscriptSegment,
   TranscriptSegmentSource,
+  PostMeetingAsrModelDescriptor,
+  UserPreferences,
 } from '../lib/types';
 import { normalizeMeetingCloseRequest } from '../lib/types';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill, type PillTone } from './_atoms';
+import { Modal } from '../components/ui/Modal';
+import { SelectLite } from '../components/ui/SelectLite';
 
-type ActionLoading = 'start' | 'pause' | 'resume' | 'stop' | 'summary' | 'save' | 'delete' | 'export' | 'retranscribe' | null;
+type ActionLoading = 'start' | 'pause' | 'resume' | 'stop' | 'summary' | 'save' | 'delete' | 'export' | 'retranscribe' | 'postProcessing' | null;
 type ActiveControlMode = 'recording' | 'paused';
 const PLAYBACK_SPEEDS = [0.75, 1, 1.25, 1.5, 2] as const;
 type PlaybackSpeed = typeof PLAYBACK_SPEEDS[number];
@@ -107,6 +118,9 @@ export function Meetings({
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [rewriteConfirmId, setRewriteConfirmId] = useState<string | null>(null);
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  const [startConfigOpen, setStartConfigOpen] = useState(false);
+  const [expectedSpeakerCount, setExpectedSpeakerCount] = useState('auto');
+  const [postMeetingAsrModels, setPostMeetingAsrModels] = useState<PostMeetingAsrModelDescriptor[]>([]);
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const transcriptStickToBottomRef = useRef(true);
   const meetingsRef = useRef<MeetingListItem[]>([]);
@@ -209,11 +223,27 @@ export function Meetings({
 
   useEffect(() => {
     let cancelled = false;
+    void listPostMeetingAsrModels()
+      .then(models => {
+        if (!cancelled) setPostMeetingAsrModels(models);
+      })
+      .catch(error => {
+        console.warn('[meetings] failed to load post-meeting ASR models', error);
+        if (!cancelled) setPostMeetingAsrModels([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     let unlistenState: (() => void) | undefined;
     let unlistenDraft: (() => void) | undefined;
     let unlistenSegment: (() => void) | undefined;
     let unlistenError: (() => void) | undefined;
     let unlistenSummary: (() => void) | undefined;
+    let unlistenPostProcessing: (() => void) | undefined;
     let unlistenClose: (() => void) | undefined;
 
     (async () => {
@@ -309,6 +339,11 @@ export function Meetings({
           }
           if (payload.error) setEventError(payload.error);
         });
+        const postProcessingHandle = await listen<MeetingPostProcessingEvent>('meeting:post-processing-state', event => {
+          if (cancelled) return;
+          cacheMeetingRecord(event.payload.meeting);
+          setSelectedId(prev => prev ?? event.payload.meetingId);
+        });
         const closeHandle = await listen<MeetingCloseRequestEvent | MeetingRecordingSnapshot>('meeting:close-requested', event => {
           if (cancelled) return;
           const { snapshot } = normalizeMeetingCloseRequest(event.payload);
@@ -326,6 +361,7 @@ export function Meetings({
           segmentHandle();
           errorHandle();
           summaryHandle();
+          postProcessingHandle();
           closeHandle();
         } else {
           unlistenState = stateHandle;
@@ -333,6 +369,7 @@ export function Meetings({
           unlistenSegment = segmentHandle;
           unlistenError = errorHandle;
           unlistenSummary = summaryHandle;
+          unlistenPostProcessing = postProcessingHandle;
           unlistenClose = closeHandle;
         }
       } catch (error) {
@@ -347,6 +384,7 @@ export function Meetings({
       unlistenSegment?.();
       unlistenError?.();
       unlistenSummary?.();
+      unlistenPostProcessing?.();
       unlistenClose?.();
     };
   }, [cacheMeetingRecord, mobile, syncActiveSnapshot, t]);
@@ -446,14 +484,93 @@ export function Meetings({
     setActionError(null);
     setEventError(null);
     try {
-      const snapshot = await startMeetingRecording();
+      const postMeetingAsr = prefs?.postMeetingAsr;
+      const snapshot = await startMeetingRecording({
+        postMeetingAsrModelRef: postMeetingAsr
+          ? { providerId: postMeetingAsr.providerId, modelId: postMeetingAsr.modelId }
+          : null,
+        diarizationMode: postMeetingAsr?.diarization.mode ?? null,
+        localDiarizationModelId: postMeetingAsr?.diarization.localModelId ?? null,
+        expectedSpeakerCount: expectedSpeakerCount === 'auto'
+          ? null
+          : Number(expectedSpeakerCount),
+      });
       setActiveSnapshot(snapshot);
       setActiveControlMode({ meetingId: snapshot.meeting.id, mode: 'recording' });
       cacheMeetingRecord(snapshot.meeting);
       setSelectedId(snapshot.meeting.id);
+      setStartConfigOpen(false);
       if (mobile) setMobileDetailOpen(true);
     } catch (error) {
       console.error('[meetings] start failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runRetryPostProcessing = async (
+    record: MeetingRecord,
+    modelRef: MeetingAsrModelRef,
+    speakerCount: string,
+  ) => {
+    setActionLoading('postProcessing');
+    setActionError(null);
+    setEventError(null);
+    try {
+      const updated = await retryMeetingPostProcessing(record.id, {
+        postMeetingAsrModelRef: modelRef,
+        expectedSpeakerCount: speakerCount === 'auto'
+          ? { mode: 'auto' }
+          : { mode: 'fixed', count: Number(speakerCount) },
+      });
+      cacheMeetingRecord(updated);
+      setSelectedId(updated.id);
+    } catch (error) {
+      console.error('[meetings] retry post-processing failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runCancelPostProcessing = async (id: string) => {
+    setActionLoading('postProcessing');
+    setActionError(null);
+    try {
+      const updated = await cancelMeetingPostProcessing(id);
+      cacheMeetingRecord(updated);
+    } catch (error) {
+      console.error('[meetings] cancel post-processing failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runUseRealtimeTranscript = async (id: string) => {
+    setActionLoading('postProcessing');
+    setActionError(null);
+    setEventError(null);
+    try {
+      const updated = await useRealtimeTranscriptAndSummarize(id);
+      cacheMeetingRecord(updated);
+    } catch (error) {
+      console.error('[meetings] use realtime transcript failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runRenameSpeaker = async (meetingId: string, speakerId: string, displayName: string) => {
+    setActionLoading('postProcessing');
+    setActionError(null);
+    try {
+      const updated = await renameMeetingSpeaker(meetingId, speakerId, displayName);
+      cacheMeetingRecord(updated);
+    } catch (error) {
+      console.error('[meetings] rename speaker failed', error);
       setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
     } finally {
       setActionLoading(null);
@@ -683,12 +800,24 @@ export function Meetings({
             <Btn icon="refresh" variant="ghost" size="sm" onClick={() => void refresh()} disabled={loading}>
               {t('common.refresh')}
             </Btn>
-            <Btn icon="mic" variant="blue" size="sm" onClick={() => void runStart()} disabled={Boolean(activeSnapshot) || actionLoading !== null}>
+            <Btn icon="mic" variant="blue" size="sm" onClick={() => setStartConfigOpen(true)} disabled={Boolean(activeSnapshot) || actionLoading !== null}>
               {actionLoading === 'start' ? t('meetings.actions.starting') : t('meetings.actions.start')}
             </Btn>
           </div>
         }
       />
+
+      {startConfigOpen && (
+        <StartMeetingConfigDialog
+          prefs={prefs}
+          models={postMeetingAsrModels}
+          expectedSpeakerCount={expectedSpeakerCount}
+          onExpectedSpeakerCountChange={setExpectedSpeakerCount}
+          loading={actionLoading === 'start'}
+          onClose={() => setStartConfigOpen(false)}
+          onStart={() => void runStart()}
+        />
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '320px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
         {(!mobile || !mobileDetailOpen) && (
@@ -797,6 +926,15 @@ export function Meetings({
                       {t('meetings.audioPlayback.missing')}
                     </ErrorBanner>
                   )}
+                  <PostProcessingSection
+                    record={detailMeeting}
+                    models={postMeetingAsrModels}
+                    actionLoading={actionLoading}
+                    onRetry={(modelRef, speakerCount) => void runRetryPostProcessing(detailMeeting, modelRef, speakerCount)}
+                    onCancel={() => void runCancelPostProcessing(detailMeeting.id)}
+                    onUseRealtime={() => void runUseRealtimeTranscript(detailMeeting.id)}
+                    onRenameSpeaker={(speakerId, displayName) => void runRenameSpeaker(detailMeeting.id, speakerId, displayName)}
+                  />
                   {canPlayMeetingAudio(detailMeeting, activeSnapshot) && (
                     <MeetingAudioPlayer
                       meetingId={detailMeeting.id}
@@ -856,6 +994,274 @@ export function Meetings({
       </div>
     </div>
   );
+}
+
+function StartMeetingConfigDialog({
+  prefs,
+  models,
+  expectedSpeakerCount,
+  onExpectedSpeakerCountChange,
+  loading,
+  onClose,
+  onStart,
+}: {
+  prefs: UserPreferences | null;
+  models: PostMeetingAsrModelDescriptor[];
+  expectedSpeakerCount: string;
+  onExpectedSpeakerCountChange: (value: string) => void;
+  loading: boolean;
+  onClose: () => void;
+  onStart: () => void;
+}) {
+  const { t } = useTranslation();
+  const postMeetingAsr = prefs?.postMeetingAsr;
+  const selectedModel = models.find(model => (
+    model.providerId === postMeetingAsr?.providerId
+    && model.modelId === postMeetingAsr?.modelId
+  ));
+  const localModelMissing = postMeetingAsr?.diarization.mode === 'local'
+    && !postMeetingAsr.diarization.localModelId;
+  const realtimeProvider = prefs?.meetingAsr.mode === 'provider_specific'
+    ? prefs.meetingAsr.providerId || prefs.activeAsrProvider
+    : prefs?.activeAsrProvider;
+  const realtimeModel = prefs?.meetingAsr.modelProviderId === realtimeProvider
+    ? prefs?.meetingAsr.modelOverride
+    : null;
+  const canStart = Boolean(prefs && selectedModel && !localModelMissing && !loading);
+
+  return (
+    <Modal onClose={loading ? () => undefined : onClose} width="min(480px, 100%)">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 17, fontWeight: 650, color: 'var(--ol-ink)' }}>
+          {t('meetings.startConfig.title')}
+        </h2>
+        <Btn icon="x" variant="ghost" size="sm" disabled={loading} onClick={onClose}>
+          {t('common.cancel')}
+        </Btn>
+      </div>
+      <div style={{ display: 'grid', gap: 12 }}>
+        <MeetingConfigRow label={t('meetings.startConfig.realtimeAsr')}>
+          {realtimeProvider || '-'}{realtimeModel ? ` / ${realtimeModel}` : ''}
+        </MeetingConfigRow>
+        <MeetingConfigRow label={t('meetings.startConfig.postMeetingAsr')}>
+          {selectedModel?.displayName ?? t('meetings.startConfig.modelUnavailable')}
+        </MeetingConfigRow>
+        <MeetingConfigRow label={t('meetings.startConfig.diarization')}>
+          {t(`meetings.postProcessing.diarization.${postMeetingAsr?.diarization.mode ?? 'off'}`)}
+        </MeetingConfigRow>
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>
+            {t('meetings.startConfig.expectedSpeakers')}
+          </span>
+          <SelectLite
+            value={expectedSpeakerCount}
+            onChange={onExpectedSpeakerCountChange}
+            options={speakerCountOptions(t)}
+            ariaLabel={t('meetings.startConfig.expectedSpeakers')}
+            style={{ width: '100%' }}
+          />
+        </label>
+        {postMeetingAsr?.diarization.mode === 'local' && (
+          <ErrorBanner tone={localModelMissing ? 'error' : 'warning'}>
+            {localModelMissing
+              ? t('meetings.startConfig.localModelMissing')
+              : t('meetings.startConfig.localDiarizationUploadNotice')}
+          </ErrorBanner>
+        )}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
+        <Btn variant="ghost" size="sm" disabled={loading} onClick={onClose}>
+          {t('common.cancel')}
+        </Btn>
+        <Btn icon="mic" variant="blue" size="sm" disabled={!canStart} onClick={onStart}>
+          {loading ? t('meetings.actions.starting') : t('meetings.actions.start')}
+        </Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function MeetingConfigRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 14, paddingBottom: 10, borderBottom: '0.5px solid var(--ol-line-soft)' }}>
+      <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>{label}</span>
+      <span style={{ minWidth: 0, textAlign: 'right', fontSize: 12.5, color: 'var(--ol-ink)', overflowWrap: 'anywhere' }}>{children}</span>
+    </div>
+  );
+}
+
+function PostProcessingSection({
+  record,
+  models,
+  actionLoading,
+  onRetry,
+  onCancel,
+  onUseRealtime,
+  onRenameSpeaker,
+}: {
+  record: MeetingRecord;
+  models: PostMeetingAsrModelDescriptor[];
+  actionLoading: ActionLoading;
+  onRetry: (modelRef: MeetingAsrModelRef, speakerCount: string) => void;
+  onCancel: () => void;
+  onUseRealtime: () => void;
+  onRenameSpeaker: (speakerId: string, displayName: string) => void;
+}) {
+  const { t } = useTranslation();
+  const state = record.postProcessing;
+  const config = record.postProcessingConfig;
+  const [modelValue, setModelValue] = useState(() => {
+    const modelRef = state?.modelRef ?? config?.postMeetingAsrModelRef;
+    return modelRef ? `${modelRef.providerId}/${modelRef.modelId}` : '';
+  });
+  const [speakerCount, setSpeakerCount] = useState(() => {
+    const count = state?.expectedSpeakerCount ?? config?.expectedSpeakerCount;
+    return count ? String(count) : 'auto';
+  });
+
+  useEffect(() => {
+    const modelRef = state?.modelRef ?? config?.postMeetingAsrModelRef;
+    if (modelRef) setModelValue(`${modelRef.providerId}/${modelRef.modelId}`);
+    const count = state?.expectedSpeakerCount ?? config?.expectedSpeakerCount;
+    setSpeakerCount(count ? String(count) : 'auto');
+  }, [config?.expectedSpeakerCount, config?.postMeetingAsrModelRef, state?.expectedSpeakerCount, state?.modelRef]);
+
+  if (!state || !config) return null;
+
+  const retryable = state.status === 'failed' || state.status === 'cancelled';
+  const cancellable = ['pending', 'preparing_audio', 'uploading', 'running', 'applying', 'failed'].includes(state.status);
+  const selectedModel = models.find(model => `${model.providerId}/${model.modelId}` === modelValue);
+  const busy = actionLoading === 'postProcessing';
+
+  return (
+    <section style={{ padding: '12px 0', borderBottom: '0.5px solid var(--ol-line)', marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
+          {t('meetings.postProcessing.title')}
+        </span>
+        <Pill size="sm" tone={postProcessingTone(state.status)}>
+          {t(`meetings.postProcessing.status.${state.status}`)}
+        </Pill>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, fontSize: 11.5, color: 'var(--ol-ink-4)' }}>
+        <span>{t('meetings.postProcessing.model')}: {state.modelRef.modelId}</span>
+        <span>{t('meetings.postProcessing.attempt')}: {state.attempt}</span>
+        <span>{t('meetings.postProcessing.revision')}: {state.processingRevision}</span>
+        <span>{t('meetings.postProcessing.diarizationLabel')}: {t(`meetings.postProcessing.diarization.${state.diarizationMode}`)}</span>
+      </div>
+      {state.errorMessage && (
+        <div style={{ marginTop: 10 }}>
+          <ErrorBanner tone="error">{state.errorMessage}</ErrorBanner>
+        </div>
+      )}
+      {retryable && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 8, marginTop: 10 }}>
+          <SelectLite
+            value={modelValue}
+            onChange={setModelValue}
+            options={models.map(model => ({
+              value: `${model.providerId}/${model.modelId}`,
+              label: model.displayName,
+            }))}
+            ariaLabel={t('meetings.postProcessing.retryModel')}
+            disabled={busy}
+            style={{ width: '100%' }}
+          />
+          <SelectLite
+            value={speakerCount}
+            onChange={setSpeakerCount}
+            options={speakerCountOptions(t)}
+            ariaLabel={t('meetings.startConfig.expectedSpeakers')}
+            disabled={busy}
+            style={{ width: '100%' }}
+          />
+        </div>
+      )}
+      {(retryable || cancellable) && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+          {retryable && selectedModel && (
+            <Btn icon="refresh" variant="blue" size="sm" disabled={busy} onClick={() => onRetry(selectedModel, speakerCount)}>
+              {t('meetings.postProcessing.retry')}
+            </Btn>
+          )}
+          {cancellable && (
+            <Btn icon="x" variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
+              {t('meetings.postProcessing.cancel')}
+            </Btn>
+          )}
+          {(state.status === 'failed' || state.status === 'cancelled') && (
+            <Btn icon="doc" variant="ghost" size="sm" disabled={busy} onClick={onUseRealtime}>
+              {t('meetings.postProcessing.useRealtime')}
+            </Btn>
+          )}
+        </div>
+      )}
+      {(record.speakerProfiles?.length ?? 0) > 0 && (
+        <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
+          <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>
+            {t('meetings.postProcessing.speakers')}
+          </span>
+          {record.speakerProfiles?.map(profile => (
+            <SpeakerRenameRow
+              key={profile.id}
+              speakerId={profile.id}
+              displayName={profile.displayName}
+              disabled={busy}
+              onRename={onRenameSpeaker}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SpeakerRenameRow({
+  speakerId,
+  displayName,
+  disabled,
+  onRename,
+}: {
+  speakerId: string;
+  displayName: string;
+  disabled: boolean;
+  onRename: (speakerId: string, displayName: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [draft, setDraft] = useState(displayName);
+  useEffect(() => setDraft(displayName), [displayName]);
+  const trimmed = draft.trim();
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <input
+        value={draft}
+        onChange={event => setDraft(event.target.value)}
+        aria-label={t('meetings.postProcessing.speakerName')}
+        disabled={disabled}
+        style={{ ...editorInputStyle, flex: 1, minWidth: 0 }}
+      />
+      <Btn icon="check" variant="ghost" size="sm" disabled={disabled || !trimmed || trimmed === displayName} onClick={() => onRename(speakerId, trimmed)}>
+        {t('common.save')}
+      </Btn>
+    </div>
+  );
+}
+
+function speakerCountOptions(t: ReturnType<typeof useTranslation>['t']) {
+  return [
+    { value: 'auto', label: t('meetings.startConfig.speakerCountAuto') },
+    ...Array.from({ length: 20 }, (_, index) => ({
+      value: String(index + 1),
+      label: t('meetings.startConfig.speakerCountFixed', { count: index + 1 }),
+    })),
+  ];
+}
+
+function postProcessingTone(status: NonNullable<MeetingRecord['postProcessing']>['status']): PillTone {
+  if (status === 'completed' || status === 'realtime_accepted') return 'ok';
+  if (status === 'failed') return 'outline';
+  if (status === 'cancelled') return 'outline';
+  return 'blue';
 }
 
 function MeetingListHeader({

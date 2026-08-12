@@ -20,6 +20,7 @@ use crate::types::{
 
 const MEETINGS_FILE: &str = "meetings.json";
 const WAV_HEADER_BYTES: u64 = 44;
+static MEETING_STORE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveredMeeting {
@@ -35,7 +36,6 @@ struct RecoveredAudio {
 
 pub struct MeetingStore {
     path: PathBuf,
-    lock: Mutex<()>,
 }
 
 impl MeetingStore {
@@ -44,7 +44,6 @@ impl MeetingStore {
         ensure_dir(&dir)?;
         Ok(Self {
             path: dir.join(MEETINGS_FILE),
-            lock: Mutex::new(()),
         })
     }
 
@@ -52,25 +51,21 @@ impl MeetingStore {
     pub(crate) fn new_fallback() -> Self {
         Self {
             path: std::env::temp_dir().join("openless_meetings_fallback.json"),
-            lock: Mutex::new(()),
         }
     }
 
     #[cfg(test)]
     fn new_for_path(path: PathBuf) -> Self {
-        Self {
-            path,
-            lock: Mutex::new(()),
-        }
+        Self { path }
     }
 
     pub fn list(&self) -> Result<Vec<MeetingRecord>> {
-        let _guard = self.lock.lock();
+        let _guard = MEETING_STORE_LOCK.lock();
         self.read_locked()
     }
 
     pub fn get(&self, id: &str) -> Result<Option<MeetingRecord>> {
-        let _guard = self.lock.lock();
+        let _guard = MEETING_STORE_LOCK.lock();
         Ok(self
             .read_locked()?
             .into_iter()
@@ -78,7 +73,7 @@ impl MeetingStore {
     }
 
     pub fn create(&self, record: MeetingRecord) -> Result<MeetingRecord> {
-        let _guard = self.lock.lock();
+        let _guard = MEETING_STORE_LOCK.lock();
         let mut records = self.read_locked()?;
         records.retain(|existing| existing.id != record.id);
         records.insert(0, record.clone());
@@ -87,7 +82,7 @@ impl MeetingStore {
     }
 
     pub fn update(&self, record: MeetingRecord) -> Result<Option<MeetingRecord>> {
-        let _guard = self.lock.lock();
+        let _guard = MEETING_STORE_LOCK.lock();
         let mut records = self.read_locked()?;
         let Some(slot) = records.iter_mut().find(|existing| existing.id == record.id) else {
             return Ok(None);
@@ -97,19 +92,47 @@ impl MeetingStore {
         Ok(Some(record))
     }
 
-    pub fn delete(&self, id: &str) -> Result<Option<MeetingRecord>> {
-        let _guard = self.lock.lock();
+    pub fn update_if<F>(&self, id: &str, update: F) -> Result<Option<MeetingRecord>>
+    where
+        F: FnOnce(&mut MeetingRecord) -> bool,
+    {
+        let _guard = MEETING_STORE_LOCK.lock();
+        let mut records = self.read_locked()?;
+        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
+            return Ok(None);
+        };
+        if !update(record) {
+            return Ok(None);
+        }
+        let updated = record.clone();
+        self.write_locked(&records)?;
+        Ok(Some(updated))
+    }
+
+    pub fn delete_with_cleanup<P, R>(
+        &self,
+        id: &str,
+        prepare: P,
+        remove_audio: R,
+    ) -> Result<Option<MeetingRecord>>
+    where
+        P: FnOnce(&mut MeetingRecord) -> Result<()>,
+        R: FnOnce(&str) -> Result<()>,
+    {
+        let _guard = MEETING_STORE_LOCK.lock();
         let mut records = self.read_locked()?;
         let Some(index) = records.iter().position(|record| record.id == id) else {
             return Ok(None);
         };
+        prepare(&mut records[index])?;
+        remove_audio(id)?;
         let removed = records.remove(index);
         self.write_locked(&records)?;
         Ok(Some(removed))
     }
 
     pub fn prune_audio_retention(&self, retention_count: u32) -> Result<usize> {
-        let _guard = self.lock.lock();
+        let _guard = MEETING_STORE_LOCK.lock();
         let mut records = self.read_locked()?;
         let pruned = prune_meeting_audio(&mut records, retention_count)?;
         if pruned > 0 {
@@ -119,7 +142,7 @@ impl MeetingStore {
     }
 
     pub fn recover_orphaned_runtime_states(&self) -> Result<Vec<RecoveredMeeting>> {
-        let _guard = self.lock.lock();
+        let _guard = MEETING_STORE_LOCK.lock();
         let mut records = self.read_locked()?;
         let recovered_at = Utc::now().to_rfc3339();
         let recovered = recover_orphaned_runtime_records_with_path_resolver(
@@ -353,6 +376,9 @@ where
             if record.audio.state != MeetingAudioState::Retained {
                 return None;
             }
+            if record.processing_hold.is_some() {
+                return None;
+            }
             let path = path_for_id(&record.id).ok()?;
             if !path.exists() {
                 return None;
@@ -421,6 +447,13 @@ mod tests {
                 path: None,
             },
             realtime_asr: None,
+            post_processing_config: None,
+            post_processing: None,
+            transcript_revisions: Vec::new(),
+            active_transcript_revision: None,
+            speaker_profiles: Vec::new(),
+            speaker_turns: Vec::new(),
+            processing_hold: None,
             created_at: created_at.to_string(),
             updated_at: created_at.to_string(),
         }
@@ -480,6 +513,7 @@ mod tests {
     fn segment(id: &str, text: &str) -> TranscriptSegment {
         TranscriptSegment {
             id: id.to_string(),
+            speaker_id: None,
             speaker_label: "Unknown".to_string(),
             start_ms: 0,
             end_ms: Some(500),
@@ -673,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn meeting_store_delete_returns_removed_record() {
+    fn meeting_store_delete_with_cleanup_keeps_record_when_audio_cleanup_fails() {
         let tmp = temp_root("openless-meeting-store");
         let store = MeetingStore::new_for_path(tmp.join("meetings.json"));
         let item = record(
@@ -682,10 +716,49 @@ mod tests {
         );
         store.create(item.clone()).expect("create meeting");
 
-        let removed = store.delete(&item.id).expect("delete meeting");
+        let result = store.delete_with_cleanup(
+            &item.id,
+            |record| {
+                record.title = "prepared for deletion".to_string();
+                Ok(())
+            },
+            |_id| anyhow::bail!("audio is locked"),
+        );
 
-        assert_eq!(removed, Some(item));
-        assert!(store.list().expect("list meetings").is_empty());
+        assert_eq!(result.unwrap_err().to_string(), "audio is locked");
+        assert_eq!(store.get(&item.id).unwrap(), Some(item));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn meeting_store_delete_with_cleanup_prepares_then_removes_record() {
+        let tmp = temp_root("openless-meeting-store");
+        let store = MeetingStore::new_for_path(tmp.join("meetings.json"));
+        let item = record(
+            "00000000-0000-4000-8000-000000000001",
+            "2026-07-04T01:00:00Z",
+        );
+        store.create(item.clone()).expect("create meeting");
+        let prepared = std::cell::Cell::new(false);
+
+        let removed = store
+            .delete_with_cleanup(
+                &item.id,
+                |record| {
+                    prepared.set(true);
+                    record.title = "prepared for deletion".to_string();
+                    Ok(())
+                },
+                |_id| {
+                    assert!(prepared.get());
+                    Ok(())
+                },
+            )
+            .expect("delete meeting")
+            .expect("removed meeting");
+
+        assert_eq!(removed.title, "prepared for deletion");
+        assert!(store.get(&item.id).unwrap().is_none());
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -745,6 +818,36 @@ mod tests {
         assert_eq!(pruned, 2);
         assert!(records.iter().all(|record| !record.audio.retained));
         assert!(records.iter().all(|record| record.audio.path.is_none()));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn prune_meeting_audio_with_zero_skips_processing_hold() {
+        let tmp = temp_root("openless-meeting-audio-hold");
+        let held_id = "00000000-0000-4000-8000-000000000013";
+        let unheld_id = "00000000-0000-4000-8000-000000000014";
+        let _ = create_audio(&tmp, held_id);
+        let _ = create_audio(&tmp, unheld_id);
+        let mut held = retained_record(held_id, "2026-07-04T01:00:00Z", None);
+        held.processing_hold = Some(crate::types::ProcessingHold {
+            job_id: "job-1".to_string(),
+            acquired_at: "2026-07-04T01:30:00Z".to_string(),
+        });
+        let mut records = vec![
+            held,
+            retained_record(unheld_id, "2026-07-04T02:00:00Z", None),
+        ];
+
+        let pruned = prune_meeting_audio_with_path_resolver(&mut records, 0, |id| {
+            Ok(temp_audio_path(&tmp, id))
+        })
+        .expect("prune unheld audio");
+
+        assert_eq!(pruned, 1);
+        assert_eq!(records[0].audio.state, MeetingAudioState::Retained);
+        assert!(temp_audio_path(&tmp, held_id).exists());
+        assert_eq!(records[1].audio.state, MeetingAudioState::Pruned);
+        assert!(!temp_audio_path(&tmp, unheld_id).exists());
         let _ = fs::remove_dir_all(&tmp);
     }
 

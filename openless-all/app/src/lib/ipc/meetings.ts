@@ -1,4 +1,11 @@
-import type { MeetingListItem, MeetingRecord, MeetingRecordingSnapshot } from "../types"
+import type {
+    MeetingListItem,
+    MeetingRecord,
+    MeetingRecordingSnapshot,
+    PostMeetingAsrModelDescriptor,
+    RetryMeetingPostProcessingOptions,
+    StartMeetingRecordingOptions,
+} from "../types"
 import { invokeOrMock } from "./shared"
 import { mockMeetings } from "./mock-data"
 
@@ -49,8 +56,14 @@ function mockMeetingRecordingSnapshot(): MeetingRecordingSnapshot {
     }
 }
 
-export function startMeetingRecording(): Promise<MeetingRecordingSnapshot> {
-    return invokeOrMock("start_meeting_recording", undefined, mockMeetingRecordingSnapshot)
+export function startMeetingRecording(
+    options?: StartMeetingRecordingOptions,
+): Promise<MeetingRecordingSnapshot> {
+    return invokeOrMock(
+        "start_meeting_recording",
+        { options: options ?? null },
+        mockMeetingRecordingSnapshot,
+    )
 }
 
 export function pauseMeetingRecording(id: string): Promise<MeetingRecordingSnapshot> {
@@ -86,6 +99,70 @@ export function stopMeetingRecording(id: string): Promise<MeetingRecord> {
 
 export function getActiveMeetingRecording(): Promise<MeetingRecordingSnapshot | null> {
     return invokeOrMock("get_active_meeting_recording", undefined, () => null)
+}
+
+export function listPostMeetingAsrModels(): Promise<PostMeetingAsrModelDescriptor[]> {
+    return invokeOrMock("list_post_meeting_asr_models", undefined, () => [
+        {
+            providerId: "bailian",
+            modelId: "fun-asr",
+            displayName: "Fun-ASR",
+            runtimeKind: "cloud",
+            supportsFileTranscription: true,
+            supportsDiarization: true,
+            supportsSpeakerCount: true,
+            isDefault: true,
+        },
+        {
+            providerId: "bailian",
+            modelId: "paraformer-v2",
+            displayName: "Paraformer V2",
+            runtimeKind: "cloud",
+            supportsFileTranscription: true,
+            supportsDiarization: true,
+            supportsSpeakerCount: true,
+            isDefault: false,
+        },
+    ])
+}
+
+export function retryMeetingPostProcessing(
+    id: string,
+    options?: RetryMeetingPostProcessingOptions,
+): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "retry_meeting_post_processing",
+        { id, options: options ?? null },
+        () => ({ ...mockMeetings[0], id }),
+    )
+}
+
+export function cancelMeetingPostProcessing(id: string): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "cancel_meeting_post_processing",
+        { id },
+        () => ({ ...mockMeetings[0], id }),
+    )
+}
+
+export function useRealtimeTranscriptAndSummarize(id: string): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "use_realtime_transcript_and_summarize",
+        { id },
+        () => ({ ...mockMeetings[0], id }),
+    )
+}
+
+export function renameMeetingSpeaker(
+    meetingId: string,
+    speakerId: string,
+    displayName: string,
+): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "rename_meeting_speaker",
+        { meetingId, speakerId, displayName },
+        () => ({ ...mockMeetings[0], id: meetingId }),
+    )
 }
 
 export function showMeetingCompanion(): Promise<void> {
