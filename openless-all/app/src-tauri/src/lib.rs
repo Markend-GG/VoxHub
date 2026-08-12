@@ -388,6 +388,14 @@ macro_rules! app_invoke_handler_desktop {
             commands::sherpa_onnx_asr_delete_model,
             #[cfg(target_os = "windows")]
             commands::sherpa_onnx_asr_reveal_model_dir,
+            #[cfg(target_os = "windows")]
+            commands::list_speaker_diarization_models,
+            #[cfg(target_os = "windows")]
+            commands::download_speaker_diarization_model,
+            #[cfg(target_os = "windows")]
+            commands::cancel_speaker_diarization_model_download,
+            #[cfg(target_os = "windows")]
+            commands::delete_speaker_diarization_model,
             commands::export_error_log,
             commands::list_open_window_apps,
             commands::set_screenshot_whitelist_enabled,

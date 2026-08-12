@@ -54,6 +54,14 @@ Phase 0 已按当前基线核查代码与自动测试。除 V2-1 现有代码证
 - 自动验证：`cargo test meeting_audio_source`（4 passed）、`cargo test dashscope_multimodal`（26 passed）、`cargo test meeting_post_processing`（23 passed）、`cargo test meeting`（135 passed）、`cargo test bailian`（39 passed）、`cargo test preferences`（13 passed）、`cargo test credentials`（45 passed）及 MSVC `cargo check` 通过。multipart 集成测试确认两段 WAV 上传体只有一个 RIFF header，且 PCM 顺序完整。
 - 真实百炼凭据下的 `fun-asr` / `paraformer-v2` 端到端、上传中断网、应用真实重启、长会议峰值内存和 30/60/120 分钟验证尚未完成，因此相关条目保持 `partial`。
 
+### Phase 4 本地说话人模型管理进行中证据（2026-08-12）
+
+- 新增独立本地说话人模型 catalog，不混入 ASR 模型下拉；首个固定组合包为 `sherpa-pyannote-3dspeaker-zh-v1`，包含 Pyannote segmentation 与中文 3D-Speaker embedding，两项上游资产、解包后模型和 manifest 均使用固定大小与 SHA-256 校验。
+- 复用现有 `SherpaDownloadManager` 和分块下载器，组合包写入同级 `.partial` 目录，全部资产校验通过后才原子激活；支持下载、取消、重试、invalid 状态、删除以及会议录音中 / 活跃后处理任务的占用保护。
+- catalog 明确来源、Windows x86_64 平台、实验状态、采样率和 clustering threshold；`maxRecommendedDurationMs` 与内存档位在真实 30 / 60 / 120 分钟测试前保持“待验证”，不填虚假能力值。
+- 设置页提供模型选择、进度、取消、重试和删除；浏览器 mock 可完成状态流转。开始会议及重试由后端要求模型真实 `ready`，开始弹窗也读取同一后端 readiness 后才允许开始。
+- 自动验证：`cargo test speaker_diarization`（5 passed）、`cargo test meeting`（135 passed）、`cargo test preferences`（13 passed）、`tsc --noEmit`、`git diff --check` 通过。Windows 真实下载 / 取消 / 损坏恢复 / 占用删除和 Tauri UI 尚未验证；本地推理、时间戳对齐和长会议资源预检尚未实现。
+
 ## V2-1 Realtime ASR
 
 | ID | Requirement（需求） | Source（来源） | Status（状态） | Evidence（证据） | Verification（验证） | Notes（备注） |
@@ -74,7 +82,7 @@ Phase 0 已按当前基线核查代码与自动测试。除 V2-1 现有代码证
 | MR-V2-106 | `fun-asr` 和 `paraformer-v2` 共用任务框架并分别适配请求 / 结果；云端说话人模式解析 sentence time、text、speaker_id。 | V2-2 plan 6.3、7 | partial | 统一完成临时 OSS 上传、异步提交、轮询和结果下载；双模型专属解析入口保留时间戳、sentenceId、speakerId；请求测试覆盖 diarization、合法 speakerCount 和排队任务远端取消 | `cargo test dashscope_multimodal` 26 项及 worker 双模型转换测试通过；仍需两个模型真实百炼任务 | 关闭说话人时设置 `diarization_enabled=false`；1 人不发送非法 speakerCount |
 | MR-V2-107 | 云端结果作为新的整理后原文 revision 原子提交，失败保留实时原文和旧总结。 | V2-2 plan 4、5、7 | partial | worker 将结构化结果写入 staging revision，并在 jobId、status、providerTaskId、modelRef 全部匹配后原子激活；双模型、无效结果和迟到 job 测试保留旧 active revision | 自动状态机测试通过；仍缺持久化故障注入和真实重启恢复 | speakerId 只应用于同一模型返回的文本，不跨模型硬贴 |
 | MR-V2-108 | 总结只在会后 ASR / 说话人处理完成，或用户明确沿用实时原文后启动。 | V2-2 plan 1、5 | partial | 云端结果原子激活并将任务置为 `completed` 后才调用自动总结；`meeting_summary.rs` 仍只接受 `completed` / `realtime_accepted`；失败或取消后可明确沿用实时原文 | meeting 和 meeting_post_processing 自动测试通过；仍缺真实完成顺序和 Tauri 失败 UI 验证 | 关闭说话人也必须先完成会后 ASR |
-| MR-V2-109 | 本地模型包支持下载、取消、校验、重试、选择、占用保护和删除。 | V2-2 plan 2.1、8.4 | missing | - | 模型生命周期测试 + Windows 人工验证 | 缺模型不能开始必然失败任务 |
+| MR-V2-109 | 本地模型包支持下载、取消、校验、重试、选择、占用保护和删除。 | V2-2 plan 2.1、8.4 | partial | 独立组合包 catalog、双资产下载与 SHA-256、`.partial` 原子激活、readiness、设置页生命周期操作、浏览器 mock、后端模型 ID / ready 校验及活跃会议 / 任务占用保护已实现；5 项定向测试及 meeting/preferences 回归通过 | Windows 真实下载、取消、断点续传、损坏恢复、占用删除和 Tauri UI 人工验证 | 缺模型或模型 invalid 时前后端均阻止开始；不会出现在 ASR 下拉 |
 | MR-V2-110 | 本地管线执行 segmentation、embedding、clustering，产生 SpeakerTurn 并对齐所选会后 ASR 生成的整理后原文。 | V2-2 plan 8 | missing | - | 单人 / 多人 / 缺 timestamp / overlap 测试 | 预计人数映射 `num_clusters`；不把说话人标签跨模型硬贴回实时原文 |
 | MR-V2-111 | 本地长会议执行预检并遵循已验证的时长 / 内存上限。 | V2-2 plan 8.3 | missing | - | 30/60/120 分钟基准测试 | 未验证前只能标记 experimental |
 | MR-V2-112 | 发言人使用稳定 speakerId 和会议级重命名映射。 | V2-2 plan 2.3、4、7 | partial | 云端 provider speakerId 按首次出现顺序映射为会议内稳定 `speaker-N`，同时持久化 `SpeakerProfile` / `SpeakerTurn`；提供后端重命名 IPC 和会议详情编辑 UI | 映射测试通过；仍缺真实模型结果、重开、导出和重新处理验证 | 不逐段改模型标签字符串 |

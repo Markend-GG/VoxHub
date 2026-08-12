@@ -1,13 +1,14 @@
 // 服务 → AI 提供商：LLM 润色模型 + ASR 语音转写两张卡片。
 // 自 Settings.tsx 整体迁出，逻辑零改动；i18n key 全部保持 `settings.providers.*`。
 
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../../components/Icon';
 import { detectOS } from '../../components/WindowChrome';
 import {
   listAsrProviderModels,
   listPostMeetingAsrModels,
+  listSpeakerDiarizationModels,
   listProviderModels,
   readAsrProviderCredential,
   readCredential,
@@ -16,6 +17,14 @@ import {
   setAsrProviderCredential,
   setCredential,
   validateProviderCredentials,
+  downloadSpeakerDiarizationModel,
+  cancelSpeakerDiarizationModelDownload,
+  deleteSpeakerDiarizationModel,
+  isTauri,
+} from '../../lib/ipc';
+import type {
+  SpeakerDiarizationDownloadProgress,
+  SpeakerDiarizationModelDescriptor,
 } from '../../lib/ipc';
 import { listAsrProviderCapabilities } from '../../lib/ipc/settings';
 import type {
@@ -545,6 +554,19 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
       emitSaved('failed', t('common.operationFailed'));
     });
   };
+
+  const onMeetingDiarizationModelChange = useCallback((modelId: string | null) => (
+    updatePrefs(current => ({
+      ...current,
+      postMeetingAsr: {
+        ...current.postMeetingAsr,
+        diarization: {
+          ...current.postMeetingAsr.diarization,
+          localModelId: modelId,
+        },
+      },
+    }))
+  ), [updatePrefs]);
 
   // preset 决定 placeholder 与 default —— 必须跟着 committed*Provider 走，
   // 否则受控 <select> 立刻切到新厂商，但凭据字段还在显示旧 entry，placeholder
@@ -1135,17 +1157,257 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
           </div>
         )}
         {postMeetingAsr.diarization.mode === 'local' && (
-          <div role="note" style={{ marginTop: 8, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
-            {postMeetingAsr.diarization.localModelId
-              ? t('settings.providers.meetingDiarizationLocalHint')
-              : t('settings.providers.meetingDiarizationLocalModelMissing')}
-          </div>
+          <>
+            <SpeakerDiarizationModelControl
+              platform={os}
+              selectedModelId={postMeetingAsr.diarization.localModelId}
+              onSelect={onMeetingDiarizationModelChange}
+            />
+            <div role="note" style={{ marginTop: 8, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+              {postMeetingAsr.diarization.localModelId
+                ? t('settings.providers.meetingDiarizationLocalHint')
+                : t('settings.providers.meetingDiarizationLocalModelMissing')}
+            </div>
+          </>
         )}
       </Card>
       </>
       )}
     </>
   );
+}
+
+function SpeakerDiarizationModelControl({
+  platform,
+  selectedModelId,
+  onSelect,
+}: {
+  platform: ReturnType<typeof detectOS>;
+  selectedModelId: string | null;
+  onSelect: (modelId: string | null) => Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const mobile = useMobileLayout();
+  const [models, setModels] = useState<SpeakerDiarizationModelDescriptor[]>([]);
+  const [progress, setProgress] = useState<SpeakerDiarizationDownloadProgress | null>(null);
+  const [busy, setBusy] = useState<'download' | 'delete' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const supported = platform === 'win';
+
+  const refresh = useCallback(async () => {
+    if (!supported) {
+      setModels([]);
+      return;
+    }
+    try {
+      setModels(await listSpeakerDiarizationModels());
+      setError(null);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError));
+    }
+  }, [supported]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!supported || !isTauri) return;
+    let disposed = false;
+    let unlisten: undefined | (() => void);
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) => listen<SpeakerDiarizationDownloadProgress>(
+        'speaker-diarization-model-download-progress',
+        event => {
+          if (disposed) return;
+          const payload = event.payload;
+          setProgress(payload);
+          if (payload.phase === 'failed') {
+            setBusy(null);
+            setError(payload.error || t('common.operationFailed'));
+          }
+          if (payload.phase === 'cancelled') {
+            setBusy(null);
+          }
+          if (payload.phase === 'finished') {
+            setBusy(null);
+            setError(null);
+            if (!selectedModelId) {
+              void onSelect(payload.modelId).catch(selectError => {
+                setError(selectError instanceof Error ? selectError.message : String(selectError));
+              });
+            }
+          }
+          if (payload.phase === 'finished' || payload.phase === 'cancelled' || payload.phase === 'failed') {
+            window.setTimeout(() => void refresh(), 150);
+          }
+        },
+      ))
+      .then(off => {
+        if (disposed) off();
+        else unlisten = off;
+      })
+      .catch(subscribeError => {
+        if (!disposed) console.warn('[settings] speaker model progress subscribe failed', subscribeError);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [onSelect, refresh, selectedModelId, supported, t]);
+
+  const selected = models.find(model => model.id === selectedModelId) ?? models[0] ?? null;
+  const activeProgress = progress?.modelId === selected?.id ? progress : null;
+  const downloading = busy === 'download'
+    || selected?.readiness === 'downloading'
+    || activeProgress?.phase === 'started'
+    || activeProgress?.phase === 'progress';
+  const downloadedBytes = activeProgress?.bytesDownloaded ?? selected?.downloadedBytes ?? 0;
+  const totalBytes = activeProgress?.bytesTotal || selected?.totalBytes || 0;
+  const percent = totalBytes > 0 ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100)) : 0;
+
+  const download = async () => {
+    if (!selected) return;
+    setBusy('download');
+    setError(null);
+    setProgress({
+      modelId: selected.id,
+      file: '',
+      fileIndex: 0,
+      fileCount: 2,
+      bytesDownloaded: selected.downloadedBytes,
+      bytesTotal: selected.totalBytes,
+      phase: 'started',
+      error: null,
+    });
+    try {
+      await downloadSpeakerDiarizationModel(selected.id);
+      if (!isTauri) {
+        setBusy(null);
+        setProgress({
+          modelId: selected.id,
+          file: '',
+          fileIndex: 2,
+          fileCount: 2,
+          bytesDownloaded: selected.totalBytes,
+          bytesTotal: selected.totalBytes,
+          phase: 'finished',
+          error: null,
+        });
+        if (!selectedModelId) await onSelect(selected.id);
+        await refresh();
+      }
+    } catch (downloadError) {
+      setBusy(null);
+      setError(downloadError instanceof Error ? downloadError.message : String(downloadError));
+    }
+  };
+
+  const cancel = async () => {
+    if (!selected) return;
+    try {
+      await cancelSpeakerDiarizationModelDownload(selected.id);
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : String(cancelError));
+    }
+  };
+
+  const remove = async () => {
+    if (!selected || !window.confirm(t('settings.providers.meetingDiarizationModelDeleteConfirm'))) return;
+    setBusy('delete');
+    setError(null);
+    try {
+      await deleteSpeakerDiarizationModel(selected.id);
+      setProgress(null);
+      if (selectedModelId === selected.id) await onSelect(null);
+      await refresh();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : String(deleteError));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!supported) {
+    return (
+      <SettingRow label={t('settings.providers.meetingDiarizationModelLabel')}>
+        <span style={{ fontSize: 11.5, color: 'var(--ol-warn)' }}>
+          {t('settings.providers.meetingDiarizationModelUnsupported')}
+        </span>
+      </SettingRow>
+    );
+  }
+
+  const readiness = downloading ? 'downloading' : selected?.readiness ?? 'missing';
+  return (
+    <SettingRow label={t('settings.providers.meetingDiarizationModelLabel')}>
+      <div style={{ display: 'grid', gap: 7, width: '100%', maxWidth: mobile ? '100%' : 420 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%', flexWrap: mobile ? 'wrap' : 'nowrap' }}>
+          <SelectLite
+            value={selectedModelId ?? ''}
+            onChange={value => void onSelect(value || null)}
+            options={models.map(model => ({ value: model.id, label: model.displayName }))}
+            disabled={models.length === 0 || downloading || busy === 'delete'}
+            placeholder={models.length === 0 ? t('common.loading') : t('settings.providers.meetingDiarizationModelChoose')}
+            ariaLabel={t('settings.providers.meetingDiarizationModelLabel')}
+            style={{ ...inputStyle, flex: 1, minWidth: mobile ? '100%' : 220, maxWidth: '100%' }}
+          />
+          {downloading ? (
+            <button type="button" onClick={() => void cancel()} title={t('common.cancel')} style={iconBtnStyle}>
+              <Icon name="x" size={14} />
+            </button>
+          ) : readiness === 'ready' ? (
+            <button type="button" onClick={() => void remove()} title={t('common.delete')} style={iconBtnStyle} disabled={busy === 'delete'}>
+              <Icon name="trash" size={14} />
+            </button>
+          ) : (
+            <button type="button" onClick={() => void download()} title={t('settings.providers.meetingDiarizationModelDownload')} style={iconBtnStyle} disabled={!selected}>
+              <Icon name={readiness === 'invalid' ? 'refresh' : 'download'} size={14} />
+            </button>
+          )}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11, color: readiness === 'invalid' ? 'var(--ol-warn)' : 'var(--ol-ink-4)' }}>
+          <span>{t(`settings.providers.meetingDiarizationModelStatus.${readiness}`)}</span>
+          <span>{formatDiarizationBytes(downloadedBytes)} / {formatDiarizationBytes(totalBytes)}</span>
+        </div>
+        {downloading && (
+          <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} style={{ height: 4, borderRadius: 2, overflow: 'hidden', background: 'var(--ol-line)' }}>
+            <div style={{ width: `${percent}%`, height: '100%', background: 'var(--ol-blue)', transition: 'width .15s linear' }} />
+          </div>
+        )}
+        {selected?.experimental && (
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.45 }}>
+            {t('settings.providers.meetingDiarizationModelExperimental')}
+          </span>
+        )}
+        {selected && (
+          <div style={{ display: 'grid', gap: 2, fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.45 }}>
+            <span>{t('settings.providers.meetingDiarizationModelSource')}: {selected.source}</span>
+            <span>{t('settings.providers.meetingDiarizationModelPlatform')}: {selected.supportedPlatforms.join(', ')}</span>
+            <span>
+              {t('settings.providers.meetingDiarizationModelDuration')}: {selected.maxRecommendedDurationMs == null
+                ? t('settings.providers.meetingDiarizationModelPendingValidation')
+                : formatDiarizationDuration(selected.maxRecommendedDurationMs)}
+            </span>
+            <span>
+              {t('settings.providers.meetingDiarizationModelMemory')}: {selected.memoryTier
+                ?? t('settings.providers.meetingDiarizationModelPendingValidation')}
+            </span>
+          </div>
+        )}
+        {error && <span role="alert" style={{ fontSize: 11, color: 'var(--ol-warn)', lineHeight: 1.45 }}>{error}</span>}
+      </div>
+    </SettingRow>
+  );
+}
+
+function formatDiarizationBytes(bytes: number): string {
+  if (bytes <= 0) return '0 MB';
+  return `${(bytes / 1024 / 1024).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+function formatDiarizationDuration(durationMs: number): string {
+  return `${Math.round(durationMs / 60_000)} min`;
 }
 
 // ASR 高级选项：openai-compatible 与 zenmux 两个预设显示。

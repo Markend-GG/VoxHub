@@ -111,6 +111,54 @@ impl SherpaDownloadManager {
     pub fn is_active(&self, model_alias: &str) -> bool {
         self.cancel_flags.lock().contains_key(model_alias)
     }
+
+    pub fn start_speaker_diarization(self: &Arc<Self>, app: AppHandle, package_id: String) {
+        let key = speaker_download_key(&package_id);
+        let flag = {
+            let mut flags = self.cancel_flags.lock();
+            if flags.contains_key(&key) {
+                log::info!("[speaker-diarization] 模型下载已在进行中: {package_id}");
+                return;
+            }
+            let flag = Arc::new(AtomicBool::new(false));
+            flags.insert(key.clone(), Arc::clone(&flag));
+            flag
+        };
+        let manager = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            let result = super::speaker_diarization::run_package_download(
+                &app,
+                &package_id,
+                Arc::clone(&flag),
+            )
+            .await;
+            manager.cancel_flags.lock().remove(&key);
+            match result {
+                Ok(()) => log::info!("[speaker-diarization] 模型下载完成: {package_id}"),
+                Err(error) => {
+                    super::speaker_diarization::emit_failed(&app, &package_id, &error);
+                    log::error!("[speaker-diarization] 模型下载失败: {package_id}: {error:#}");
+                }
+            }
+        });
+    }
+
+    pub fn cancel_speaker_diarization(&self, package_id: &str) {
+        let key = speaker_download_key(package_id);
+        if let Some(flag) = self.cancel_flags.lock().get(&key) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub fn speaker_diarization_is_active(&self, package_id: &str) -> bool {
+        self.cancel_flags
+            .lock()
+            .contains_key(&speaker_download_key(package_id))
+    }
+}
+
+fn speaker_download_key(package_id: &str) -> String {
+    format!("speaker-diarization:{package_id}")
 }
 
 pub async fn fetch_remote_info(model_alias: &str, mirror: Mirror) -> Result<SherpaRemoteInfo> {

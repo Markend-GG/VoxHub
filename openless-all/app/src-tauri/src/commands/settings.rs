@@ -298,6 +298,10 @@ pub(crate) fn persist_settings_with_keyboard_apply<T: SettingsWriter>(
     let mut previous = coord.read_settings();
     sync_dictation_hotkey_legacy_fields(&mut previous);
     sync_dictation_hotkey_legacy_fields(&mut prefs);
+    if let Some(model_id) = prefs.post_meeting_asr.diarization.local_model_id.as_deref() {
+        crate::asr::local::speaker_diarization::validate_package_id(model_id)
+            .map_err(|error| format!("{error:#}"))?;
+    }
     if let Err(collision_error) = reject_hotkey_collisions(&prefs) {
         // 兜底（#904）：热键冲突（含历史遗留的重复键）不能拒绝整份设置保存。
         // 自动把冲突/非法的非核心热键恢复旧值或停用，其余设置照常落盘。

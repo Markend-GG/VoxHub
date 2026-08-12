@@ -103,8 +103,12 @@ pub(super) fn resolve_initial_post_processing_config(
             .and_then(|options| options.local_diarization_model_id.clone())
             .or_else(|| prefs.post_meeting_asr.diarization.local_model_id.clone()),
     );
-    if diarization_mode == MeetingDiarizationMode::Local && local_diarization_model_id.is_none() {
-        return Err("local diarization model is required".to_string());
+    if diarization_mode == MeetingDiarizationMode::Local {
+        let model_id = local_diarization_model_id
+            .as_deref()
+            .ok_or_else(|| "local diarization model is required".to_string())?;
+        crate::asr::local::speaker_diarization::ensure_package_ready(model_id)
+            .map_err(|error| format!("localDiarizationModelNotReady: {error:#}"))?;
     }
     let expected_speaker_count = normalize_expected_speaker_count(
         options.and_then(|options| options.expected_speaker_count),
@@ -908,8 +912,12 @@ pub(super) fn retry_meeting_post_processing(
             .local_diarization_model_id
             .or(old_config.local_diarization_model_id),
     );
-    if diarization_mode == MeetingDiarizationMode::Local && local_model_id.is_none() {
-        return Err("local diarization model is required".to_string());
+    if diarization_mode == MeetingDiarizationMode::Local {
+        let model_id = local_model_id
+            .as_deref()
+            .ok_or_else(|| "local diarization model is required".to_string())?;
+        crate::asr::local::speaker_diarization::ensure_package_ready(model_id)
+            .map_err(|error| format!("localDiarizationModelNotReady: {error:#}"))?;
     }
     let expected_speaker_count = match options.expected_speaker_count {
         None => old_config.expected_speaker_count,

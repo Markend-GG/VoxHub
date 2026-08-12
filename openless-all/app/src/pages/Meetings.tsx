@@ -22,6 +22,7 @@ import {
   getActiveMeetingRecording,
   getMeeting,
   listPostMeetingAsrModels,
+  listSpeakerDiarizationModels,
   retryMeetingSummary,
   listMeetings,
   pauseMeetingRecording,
@@ -1015,19 +1016,55 @@ function StartMeetingConfigDialog({
 }) {
   const { t } = useTranslation();
   const postMeetingAsr = prefs?.postMeetingAsr;
+  const localModelId = postMeetingAsr?.diarization.localModelId ?? null;
+  const localDiarizationEnabled = postMeetingAsr?.diarization.mode === 'local';
+  const [localModelReady, setLocalModelReady] = useState(!localDiarizationEnabled);
+  const [localModelChecking, setLocalModelChecking] = useState(localDiarizationEnabled);
+
+  useEffect(() => {
+    if (!localDiarizationEnabled || !localModelId) {
+      setLocalModelReady(!localDiarizationEnabled);
+      setLocalModelChecking(false);
+      return;
+    }
+    let cancelled = false;
+    setLocalModelReady(false);
+    setLocalModelChecking(true);
+    void listSpeakerDiarizationModels()
+      .then(localModels => {
+        if (cancelled) return;
+        const selectedLocalModel = localModels.find(model => model.id === localModelId);
+        setLocalModelReady(selectedLocalModel?.readiness === 'ready');
+      })
+      .catch(error => {
+        if (!cancelled) console.warn('[meetings] failed to check local speaker model readiness', error);
+      })
+      .finally(() => {
+        if (!cancelled) setLocalModelChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [localDiarizationEnabled, localModelId]);
   const selectedModel = models.find(model => (
     model.providerId === postMeetingAsr?.providerId
     && model.modelId === postMeetingAsr?.modelId
   ));
-  const localModelMissing = postMeetingAsr?.diarization.mode === 'local'
-    && !postMeetingAsr.diarization.localModelId;
+  const localModelUnavailable = localDiarizationEnabled
+    && (!localModelId || !localModelReady);
   const realtimeProvider = prefs?.meetingAsr.mode === 'provider_specific'
     ? prefs.meetingAsr.providerId || prefs.activeAsrProvider
     : prefs?.activeAsrProvider;
   const realtimeModel = prefs?.meetingAsr.modelProviderId === realtimeProvider
     ? prefs?.meetingAsr.modelOverride
     : null;
-  const canStart = Boolean(prefs && selectedModel && !localModelMissing && !loading);
+  const canStart = Boolean(
+    prefs
+    && selectedModel
+    && !localModelUnavailable
+    && !localModelChecking
+    && !loading,
+  );
 
   return (
     <Modal onClose={loading ? () => undefined : onClose} width="min(480px, 100%)">
@@ -1061,9 +1098,9 @@ function StartMeetingConfigDialog({
             style={{ width: '100%' }}
           />
         </label>
-        {postMeetingAsr?.diarization.mode === 'local' && (
-          <ErrorBanner tone={localModelMissing ? 'error' : 'warning'}>
-            {localModelMissing
+        {localDiarizationEnabled && (
+          <ErrorBanner tone={localModelUnavailable || localModelChecking ? 'error' : 'warning'}>
+            {localModelUnavailable || localModelChecking
               ? t('meetings.startConfig.localModelMissing')
               : t('meetings.startConfig.localDiarizationUploadNotice')}
           </ErrorBanner>

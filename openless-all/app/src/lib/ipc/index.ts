@@ -81,6 +81,19 @@ export {
     exitAppAfterMeetingGuard,
 } from "./meetings"
 
+export type {
+    SpeakerDiarizationDownloadPhase,
+    SpeakerDiarizationDownloadProgress,
+    SpeakerDiarizationModelDescriptor,
+    SpeakerDiarizationModelReadiness,
+} from "./speaker-diarization"
+export {
+    listSpeakerDiarizationModels,
+    downloadSpeakerDiarizationModel,
+    cancelSpeakerDiarizationModelDownload,
+    deleteSpeakerDiarizationModel,
+} from "./speaker-diarization"
+
 // vocab
 export {
     listVocab,
