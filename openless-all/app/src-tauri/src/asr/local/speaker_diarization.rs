@@ -41,6 +41,8 @@ pub const MANIFEST_NAME: &str = "model-manifest.json";
 pub const TOTAL_DOWNLOAD_BYTES: u64 = SEGMENTATION_ARCHIVE_SIZE + EMBEDDING_SOURCE_SIZE;
 pub const SAMPLE_RATE: u32 = 16_000;
 pub const CLUSTERING_THRESHOLD: f32 = 0.90;
+pub const MAX_RECOMMENDED_DURATION_MS: u64 = 120 * 60 * 1_000;
+pub const MEMORY_TIER: &str = "~1.5 GiB / >= 4 GiB";
 pub const SUPPORTED_PLATFORMS: &[&str] = &["windows-x86_64"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,8 +183,8 @@ pub fn package_descriptor(id: &str, downloading: bool) -> Result<SpeakerDiarizat
         total_bytes: TOTAL_DOWNLOAD_BYTES,
         sample_rate: SAMPLE_RATE,
         clustering_threshold: CLUSTERING_THRESHOLD,
-        max_recommended_duration_ms: None,
-        memory_tier: None,
+        max_recommended_duration_ms: Some(MAX_RECOMMENDED_DURATION_MS),
+        memory_tier: Some(MEMORY_TIER.to_string()),
         experimental: true,
         error,
     })
@@ -597,6 +599,17 @@ mod tests {
         assert_eq!(CLUSTERING_THRESHOLD, 0.90);
         assert!(EMBEDDING_SOURCE_NAME.ends_with(".onnx"));
         assert_eq!(SUPPORTED_PLATFORMS, ["windows-x86_64"]);
+    }
+
+    #[test]
+    fn catalog_reports_benchmarked_duration_and_memory_tier() {
+        let descriptor = package_descriptor(DEFAULT_PACKAGE_ID, false).unwrap();
+        assert_eq!(
+            descriptor.max_recommended_duration_ms,
+            Some(120 * 60 * 1_000)
+        );
+        assert_eq!(descriptor.memory_tier.as_deref(), Some(MEMORY_TIER));
+        assert!(descriptor.experimental);
     }
 
     #[test]

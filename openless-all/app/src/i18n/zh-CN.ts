@@ -1213,7 +1213,7 @@ export const zhCN = {
       meetingDiarizationModelDownload: '下载模型',
       meetingDiarizationModelDeleteConfirm: '删除本地说话人模型？正在使用该模型的会议不会允许删除。',
       meetingDiarizationModelUnsupported: '本地说话人处理当前仅支持 Windows。',
-      meetingDiarizationModelExperimental: '实验功能。完成 30 / 60 / 120 分钟真实会议测试前不会作为稳定默认。',
+      meetingDiarizationModelExperimental: '实验功能。已完成 30 / 60 / 120 分钟合成音频资源验证；真实会议质量与更多设备仍待验证。',
       meetingDiarizationModelSource: '来源',
       meetingDiarizationModelPlatform: '支持平台',
       meetingDiarizationModelDuration: '建议最长音频',

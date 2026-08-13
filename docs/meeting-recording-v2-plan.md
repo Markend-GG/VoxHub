@@ -29,8 +29,8 @@
 ## 0. 最新进展同步（2026-08-13）
 
 - V2-1：会议独立 ASR 设置、draft/final（临时 / 最终识别）、原文 metadata（元数据）、provider session（服务商会话）防污染和本场实际 realtime ASR 配置快照已进入代码，并通过 TypeScript、前端 build、MSVC `cargo check` 及相关 Rust 自动测试；真实百炼会议和 Tauri 人工验收尚未完成，因此仍标记为 `partial`（部分完成）。
-- V2-2：会后 ASR 模型选择、会议音频文件流式上传、云端 `fun-asr` / `paraformer-v2` 任务框架、revision（原文修订版本）、任务恢复和音频生命周期已进入代码；本机百炼凭据已用无隐私短音频分别完成两个模型的真实临时 OSS 上传、异步任务、时间轴和 `speakerId` 解析。本地说话人组合包也已完成真实 segmentation、embedding、clustering 短链路推理；它仍缺 30 / 60 / 120 分钟的长音频资源基准和产品时长上限，因此继续保持 experimental（实验性）。完整会议状态机、真实人声质量、Tauri UI 和真正应用重启验证尚未完成，因此相关验收项仍为 `partial`。
-- V2-3：音频文件导入、受管 WAV、可信 selection token（选择令牌）、按模型能力注册表动态路由云端 / 本地 ASR、取消 / 重试 / 恢复、兼容组合校验和会议详情复用已经进入代码并完成自动测试；Windows 已用系统离线 TTS 生成的无隐私中文音频，完成百炼双模型云端文件 ASR、本地 diarization-first + SenseVoice 短链路，以及本地 SenseVoice 关闭说话人处理的 30 / 60 / 120 分钟真实多窗口导入基准。本地基准已证明有界分块下 120 分钟输入可完成，但仍未覆盖云端长音频、本地说话人分离长音频、真实人声质量、完整导入 IPC、应用重启、磁盘不足和 Tauri UI 全流程，因此 MR-V2-201～212 仍不能整体标记为 `done`。
+- V2-2：会后 ASR 模型选择、会议音频文件流式上传、云端 `fun-asr` / `paraformer-v2` 任务框架、revision（原文修订版本）、任务恢复和音频生命周期已进入代码；本机百炼凭据已用无隐私短音频分别完成两个模型的真实临时 OSS 上传、异步任务、时间轴和 `speakerId` 解析。本地说话人组合包已完成真实 segmentation、embedding、clustering 短链路推理及 30 / 60 / 120 分钟合成双声线资源基准；catalog（模型目录）声明建议最长 120 分钟、峰值约 1.5 GiB 且建议至少 4 GiB 可用内存，后端在读取整段 waveform（波形）前强制拒绝超过 120 分钟的任务并提示改用云端。该模型因真实会议质量和更多设备仍未验证而继续保持 experimental（实验性）；完整会议状态机、Tauri UI 和真正应用重启验证尚未完成，因此相关验收项仍为 `partial`。
+- V2-3：音频文件导入、受管 WAV、可信 selection token（选择令牌）、按模型能力注册表动态路由云端 / 本地 ASR、取消 / 重试 / 恢复、兼容组合校验和会议详情复用已经进入代码并完成自动测试；Windows 已用系统离线 TTS 生成的无隐私中文音频，完成百炼双模型云端文件 ASR、本地 diarization-first + SenseVoice 的 30 / 60 / 120 分钟资源基准，以及本地 SenseVoice 关闭说话人处理的 30 / 60 / 120 分钟真实多窗口导入基准。本地两条路径已证明 120 分钟合成输入可完成，但仍未覆盖云端长音频、真实人声质量、完整导入 IPC、应用重启、磁盘不足和 Tauri UI 全流程，因此 MR-V2-201～212 仍不能整体标记为 `done`。
 - 状态权威统一放在 `docs/meeting-recording-v2-acceptance-checklist.md`；阶段计划写完不等于功能已经实现。
 
 ## 1. 背景
@@ -107,6 +107,7 @@ V2 的核心问题不是继续扩展总结模板，也不是一次性做完整�
 - 关闭区分发言人时仍执行所选会后 ASR，只关闭 `diarization_enabled`；不能把“关闭说话人分离”解释成“跳过会后 ASR”。
 - 云端从会议录音分片构造只读 `MeetingAudioSource`（会议音频源），通过文件流上传临时对象，禁止把完整 PCM / WAV 复制进内存。
 - 本地说话人处理下载并选择 speaker diarization model package（说话人分离模型包），使用本地 segmentation（分割）、speaker embedding（说话人特征）和 clustering（聚类）得到 speaker turns（说话人时间段），再对齐所选会后 ASR 的时间戳；当前仍会为会后 ASR 上传完整音频。
+- 本地说话人处理首版以 120 分钟为后端硬上限；模型目录展示峰值约 1.5 GiB、建议至少 4 GiB 可用内存，超过上限时在加载整段 waveform 前拒绝并提示改用云端，不自动切换或上传。
 - 预计发言人数支持“自动”或明确数字；云端首期只用于结果校验，本地映射为 clustering 的 `num_clusters`。
 - 处理结果先写入新的 transcript revision（原文修订版本），完整校验后再原子切换为当前版本；失败时保留实时原文和旧总结。
 - 会后处理完成后才自动生成 summary（总结）；用户可以在失败时按原模型重试、改选模型后重试，或明确选择“沿用实时原文并生成总结”。
@@ -308,7 +309,7 @@ cmd /c "call C:\BuildTools\Common7\Tools\VsDevCmd.bat -arch=x64 >nul && set RUST
 - 所选 `fun-asr` 或 `paraformer-v2` 返回的结构化句子是本次整理后原文的权威来源，不把 `speaker_id` 强行贴回 realtime ASR 的旧文本，避免跨模型文本和时间戳错配。
 - 动态路由必须以后端模型注册表为权威，不能信任前端传入的 `runtimeKind`；否则可能把本地模型意外路由到云端并上传音频。
 - 如果 V2-2 本地 diarization 对齐依赖的 word timestamp（词级时间戳）不可用，必须降级到 sentence timestamp（句级时间戳）或保持“未确认”，不能静默调用云端补救。
-- sherpa-onnx `OfflineSpeakerDiarization::process(&[f32])` 接收完整 waveform（波形）；本地首版必须在真实机器基准测试后写入明确的时长 / 内存能力上限，超过上限时在开始前阻止执行并提示改用云端，不能运行到内存耗尽。
+- sherpa-onnx `OfflineSpeakerDiarization::process(&[f32])` 接收完整 waveform（波形）；当前本机合成音频基准支持到 120 分钟，产品据此设置 120 分钟后端硬上限、峰值约 1.5 GiB 和建议至少 4 GiB 可用内存。该结论仍需真实会议与更多设备验证，不能把 experimental 状态误写为稳定默认。
 - system audio capture、悬浮入口和字幕级流式体验都需要独立产品与平台验证，提前塞进 V2 会拖慢 ASR/diarization 主线。
 
 ## 9. 阶段推进建议

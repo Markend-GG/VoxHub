@@ -10,7 +10,7 @@ use crate::types::SpeakerTurn;
 
 use super::speaker_diarization::{
     embedding_model_path, ensure_package_ready, segmentation_model_path, CLUSTERING_THRESHOLD,
-    SAMPLE_RATE,
+    MAX_RECOMMENDED_DURATION_MS, SAMPLE_RATE,
 };
 
 const LOCAL_DIARIZATION_RUNTIME_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
@@ -62,7 +62,7 @@ pub fn run_local_diarization(
     let _slot = LocalDiarizationSlot::acquire(model_id)?;
     ensure_package_ready(model_id)?;
     let info = source.inspect()?;
-    preflight_waveform_allocation(info.pcm_bytes)?;
+    preflight_local_diarization(info.duration_ms, info.pcm_bytes)?;
     if cancelled.load(Ordering::Acquire) {
         anyhow::bail!("local diarization cancelled");
     }
@@ -91,9 +91,26 @@ pub fn run_local_diarization(
     }
 }
 
-fn preflight_waveform_allocation(pcm_bytes: u64) -> Result<()> {
+fn preflight_local_diarization(duration_ms: u64, pcm_bytes: u64) -> Result<()> {
+    preflight_local_diarization_with_available_memory(
+        duration_ms,
+        pcm_bytes,
+        available_physical_memory_bytes(),
+    )
+}
+
+fn preflight_local_diarization_with_available_memory(
+    duration_ms: u64,
+    pcm_bytes: u64,
+    available_memory_bytes: Option<u64>,
+) -> Result<()> {
+    if duration_ms > MAX_RECOMMENDED_DURATION_MS {
+        anyhow::bail!(
+            "localDiarizationDurationExceeded: 本地说话人处理最多支持 120 分钟音频，请改用云端说话人处理"
+        );
+    }
     let required = required_waveform_memory_bytes(pcm_bytes)?;
-    if let Some(available) = available_physical_memory_bytes() {
+    if let Some(available) = available_memory_bytes {
         if available < required {
             anyhow::bail!(
                 "insufficient memory for local diarization: available={available} required={required}"
@@ -286,7 +303,31 @@ mod tests {
     #[test]
     fn preflight_rejects_sample_counts_that_sherpa_cannot_address() {
         let pcm_bytes = (i32::MAX as u64 + 1) * 2;
-        assert!(preflight_waveform_allocation(pcm_bytes).is_err());
+        assert!(preflight_local_diarization_with_available_memory(1_000, pcm_bytes, None).is_err());
+    }
+
+    #[test]
+    fn preflight_allows_the_benchmarked_two_hour_limit() {
+        let pcm_bytes = SAMPLE_RATE as u64 * 2 * 120 * 60;
+        assert!(preflight_local_diarization_with_available_memory(
+            MAX_RECOMMENDED_DURATION_MS,
+            pcm_bytes,
+            Some(u64::MAX),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn preflight_rejects_audio_over_two_hours_before_waveform_loading() {
+        let error = preflight_local_diarization_with_available_memory(
+            MAX_RECOMMENDED_DURATION_MS + 1,
+            0,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("localDiarizationDurationExceeded"));
+        assert!(error.contains("云端说话人处理"));
     }
 
     #[test]

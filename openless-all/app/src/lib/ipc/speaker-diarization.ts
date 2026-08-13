@@ -57,8 +57,8 @@ export function listSpeakerDiarizationModels(): Promise<SpeakerDiarizationModelD
     totalBytes: MOCK_TOTAL_BYTES,
     sampleRate: 16_000,
     clusteringThreshold: 0.9,
-    maxRecommendedDurationMs: null,
-    memoryTier: null,
+    maxRecommendedDurationMs: 120 * 60 * 1_000,
+    memoryTier: '~1.5 GiB / >= 4 GiB',
     experimental: true,
     error: null,
   }])

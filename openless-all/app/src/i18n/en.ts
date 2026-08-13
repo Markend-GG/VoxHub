@@ -1205,7 +1205,7 @@ export const en: typeof zhCN = {
       meetingDiarizationModelDownload: 'Download model',
       meetingDiarizationModelDeleteConfirm: 'Delete the local speaker model? Meetings actively using it will block deletion.',
       meetingDiarizationModelUnsupported: 'Local speaker processing currently supports Windows only.',
-      meetingDiarizationModelExperimental: 'Experimental. It will not become a stable default until real 30, 60, and 120 minute meeting tests pass.',
+      meetingDiarizationModelExperimental: 'Experimental. Synthetic-audio resource tests passed at 30, 60, and 120 minutes; real-meeting quality and more devices still need validation.',
       meetingDiarizationModelSource: 'Source',
       meetingDiarizationModelPlatform: 'Supported platform',
       meetingDiarizationModelDuration: 'Recommended maximum audio',
