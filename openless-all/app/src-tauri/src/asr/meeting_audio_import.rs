@@ -141,10 +141,40 @@ pub fn normalize_pcm_wav<F>(
     partial_path: &Path,
     final_path: &Path,
     cancelled: &AtomicBool,
-    mut on_progress: F,
+    on_progress: F,
 ) -> Result<NormalizedWavInfo>
 where
     F: FnMut(f32),
+{
+    normalize_pcm_wav_with_output_factory(
+        probe,
+        partial_path,
+        final_path,
+        cancelled,
+        on_progress,
+        |path| {
+            OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .open(path)
+                .with_context(|| format!("create audio staging file failed: {}", path.display()))
+        },
+    )
+}
+
+fn normalize_pcm_wav_with_output_factory<F, O, W>(
+    probe: &PcmWavProbe,
+    partial_path: &Path,
+    final_path: &Path,
+    cancelled: &AtomicBool,
+    mut on_progress: F,
+    create_output: O,
+) -> Result<NormalizedWavInfo>
+where
+    F: FnMut(f32),
+    O: FnOnce(&Path) -> Result<W>,
+    W: StagingWavOutput,
 {
     if cancelled.load(Ordering::Acquire) {
         anyhow::bail!("meeting audio import cancelled");
@@ -177,48 +207,50 @@ where
         })?;
     }
 
-    let result = normalize_pcm_wav_inner(probe, partial_path, cancelled, &mut on_progress)
-        .and_then(|info| {
-            std::fs::rename(partial_path, final_path).with_context(|| {
-                format!(
-                    "commit managed meeting audio failed: {} -> {}",
-                    partial_path.display(),
-                    final_path.display()
-                )
-            })?;
-            Ok(info)
-        });
+    let result = (|| {
+        let mut output = create_output(partial_path)?;
+        let info = normalize_pcm_wav_inner(probe, &mut output, cancelled, &mut on_progress)?;
+        drop(output);
+        std::fs::rename(partial_path, final_path).with_context(|| {
+            format!(
+                "commit managed meeting audio failed: {} -> {}",
+                partial_path.display(),
+                final_path.display()
+            )
+        })?;
+        Ok(info)
+    })();
     if result.is_err() {
         let _ = std::fs::remove_file(partial_path);
     }
     result
 }
 
-fn normalize_pcm_wav_inner<F>(
+trait StagingWavOutput: Write + Seek {
+    fn sync_all(&self) -> std::io::Result<()>;
+}
+
+impl StagingWavOutput for File {
+    fn sync_all(&self) -> std::io::Result<()> {
+        File::sync_all(self)
+    }
+}
+
+fn normalize_pcm_wav_inner<F, W>(
     probe: &PcmWavProbe,
-    partial_path: &Path,
+    output: &mut W,
     cancelled: &AtomicBool,
     on_progress: &mut F,
 ) -> Result<NormalizedWavInfo>
 where
     F: FnMut(f32),
+    W: StagingWavOutput,
 {
     let mut input = File::open(&probe.path)
         .with_context(|| format!("open source audio failed: {}", probe.path.display()))?;
     input
         .seek(SeekFrom::Start(probe.data_offset))
         .context("seek source WAV data failed")?;
-    let mut output = OpenOptions::new()
-        .create_new(true)
-        .read(true)
-        .write(true)
-        .open(partial_path)
-        .with_context(|| {
-            format!(
-                "create audio staging file failed: {}",
-                partial_path.display()
-            )
-        })?;
     output
         .write_all(&canonical_wav_header(0))
         .context("write staging WAV header failed")?;
@@ -247,7 +279,7 @@ where
                 output_buffer.push(sample);
                 output_samples += 1;
                 if output_buffer.len() >= OUTPUT_BUFFER_SAMPLES {
-                    write_samples(&mut output, &mut output_buffer)?;
+                    write_samples(output, &mut output_buffer)?;
                 }
                 Ok(())
             })?;
@@ -260,11 +292,11 @@ where
         output_buffer.push(sample);
         output_samples += 1;
         if output_buffer.len() >= OUTPUT_BUFFER_SAMPLES {
-            write_samples(&mut output, &mut output_buffer)?;
+            write_samples(output, &mut output_buffer)?;
         }
         Ok(())
     })?;
-    write_samples(&mut output, &mut output_buffer)?;
+    write_samples(output, &mut output_buffer)?;
 
     let pcm_bytes = output_samples
         .checked_mul(u64::from(TARGET_BLOCK_ALIGN))
@@ -335,7 +367,7 @@ fn downmix_frame(frame: &[u8], channels: u16) -> Result<i16> {
     Ok(rounded.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
 }
 
-fn write_samples(output: &mut File, samples: &mut Vec<i16>) -> Result<()> {
+fn write_samples<W: Write>(output: &mut W, samples: &mut Vec<i16>) -> Result<()> {
     if samples.is_empty() {
         return Ok(());
     }
@@ -452,6 +484,39 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use uuid::Uuid;
+
+    struct DiskFullWriter {
+        file: File,
+        bytes_before_failure: usize,
+    }
+
+    impl Write for DiskFullWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            if self.bytes_before_failure == 0 {
+                return Err(std::io::Error::from_raw_os_error(112));
+            }
+            let allowed = buffer.len().min(self.bytes_before_failure);
+            let written = self.file.write(&buffer[..allowed])?;
+            self.bytes_before_failure -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    impl Seek for DiskFullWriter {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.file.seek(position)
+        }
+    }
+
+    impl StagingWavOutput for DiskFullWriter {
+        fn sync_all(&self) -> std::io::Result<()> {
+            self.file.sync_all()
+        }
+    }
 
     fn temp_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!("meeting-audio-import-{}", Uuid::new_v4()));
@@ -625,6 +690,57 @@ mod tests {
             b"occupied"
         );
         assert_eq!(std::fs::read(&source).unwrap(), original);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn normalize_disk_full_during_pcm_write_removes_partial_and_preserves_source() {
+        let dir = temp_dir();
+        let source = dir.join("source.wav");
+        let partial = dir.join("job.partial");
+        let final_path = dir.join("managed.wav");
+        let frames = vec![[1234, 0]; OUTPUT_BUFFER_SAMPLES + 1];
+        std::fs::write(&source, wav(1, 16_000, &frames)).unwrap();
+        let original = std::fs::read(&source).unwrap();
+        let original_hash = Sha256::digest(&original);
+        let original_modified = std::fs::metadata(&source).unwrap().modified().unwrap();
+        let probe = probe_pcm_wav(&source).unwrap();
+
+        let error = normalize_pcm_wav_with_output_factory(
+            &probe,
+            &partial,
+            &final_path,
+            &AtomicBool::new(false),
+            |_| {},
+            |path| {
+                let file = OpenOptions::new()
+                    .create_new(true)
+                    .read(true)
+                    .write(true)
+                    .open(path)?;
+                Ok(DiskFullWriter {
+                    file,
+                    bytes_before_failure: WAV_HEADER_BYTES as usize + 128,
+                })
+            },
+        )
+        .unwrap_err();
+
+        let disk_full = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .and_then(std::io::Error::raw_os_error);
+        assert_eq!(disk_full, Some(112));
+        assert!(!partial.exists());
+        assert!(!final_path.exists());
+        assert_eq!(
+            Sha256::digest(std::fs::read(&source).unwrap()),
+            original_hash
+        );
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().modified().unwrap(),
+            original_modified
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

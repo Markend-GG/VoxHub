@@ -838,7 +838,7 @@ fn spawn_audio_normalization_job(
         })
         .await
         .map_err(|error| format!("meetingAudioImportFailed: worker join failed: {error}"))
-        .and_then(|result| result.map_err(|error| format!("meetingAudioImportFailed: {error:#}")));
+        .and_then(|result| result.map_err(|error| classify_audio_normalization_error(&error)));
 
         match result {
             Ok(info) => {
@@ -1161,6 +1161,19 @@ fn managed_audio_is_valid(meeting_id: &str) -> bool {
 
 fn is_import_cancellation_error(error: &str) -> bool {
     error.starts_with("meetingAudioImportCancelled:")
+}
+
+fn classify_audio_normalization_error(error: &anyhow::Error) -> String {
+    let disk_full = error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|io_error| matches!(io_error.raw_os_error(), Some(39 | 112)));
+    if disk_full {
+        "meetingAudioImportDiskFull: 存储空间不足，未完成音频已清理；请释放空间后重新选择音频重试"
+            .to_string()
+    } else {
+        format!("meetingAudioImportFailed: {error:#}")
+    }
 }
 
 fn path_is_within(path: &std::path::Path, parent: &std::path::Path) -> bool {
@@ -2789,6 +2802,24 @@ mod tests {
         assert!(!is_import_cancellation_error(
             "meetingAudioImportFailed: rename failed"
         ));
+    }
+
+    #[test]
+    fn audio_normalization_disk_full_error_has_actionable_code_and_message() {
+        for raw_os_error in [39, 112] {
+            let error = anyhow::Error::new(std::io::Error::from_raw_os_error(raw_os_error))
+                .context("write normalized WAV samples failed");
+
+            assert_eq!(
+                classify_audio_normalization_error(&error),
+                "meetingAudioImportDiskFull: 存储空间不足，未完成音频已清理；请释放空间后重新选择音频重试"
+            );
+        }
+
+        let generic = anyhow::anyhow!("source WAV ended before declared data length");
+        assert!(
+            classify_audio_normalization_error(&generic).starts_with("meetingAudioImportFailed:")
+        );
     }
 
     #[test]
