@@ -1047,6 +1047,21 @@ pub struct MeetingRecord {
     pub updated_at: String,
 }
 
+impl MeetingRecord {
+    pub fn speaker_display_name<'a>(&'a self, segment: &'a TranscriptSegment) -> &'a str {
+        segment
+            .speaker_id
+            .as_deref()
+            .and_then(|speaker_id| {
+                self.speaker_profiles
+                    .iter()
+                    .find(|profile| profile.id == speaker_id)
+            })
+            .map(|profile| profile.display_name.as_str())
+            .unwrap_or(segment.speaker_label.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingListItem {

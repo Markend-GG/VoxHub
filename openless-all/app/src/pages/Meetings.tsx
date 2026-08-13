@@ -2224,6 +2224,10 @@ function TranscriptList({
           <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
             {virtualRows.map(virtualRow => {
               const segment = record.transcriptSegments[virtualRow.index];
+              const speakerLabel = segment?.speakerId
+                ? record.speakerProfiles?.find(profile => profile.id === segment.speakerId)?.displayName
+                  ?? segment.speakerLabel
+                : segment?.speakerLabel;
               return (
                 <div
                   key={virtualRow.key}
@@ -2238,7 +2242,7 @@ function TranscriptList({
                     paddingBottom: 8,
                   }}
                 >
-                  {segment ? <TranscriptRow segment={segment} /> : draft ? <TranscriptDraftRow draft={draft} /> : null}
+                  {segment ? <TranscriptRow segment={segment} speakerLabel={speakerLabel} /> : draft ? <TranscriptDraftRow draft={draft} /> : null}
                 </div>
               );
             })}
@@ -2546,7 +2550,7 @@ function TodoList({ todos }: { todos: MeetingRecord['summary']['todos'] }) {
   );
 }
 
-function TranscriptRow({ segment }: { segment: TranscriptSegment }) {
+function TranscriptRow({ segment, speakerLabel }: { segment: TranscriptSegment; speakerLabel?: string }) {
   const { t } = useTranslation();
   return (
     <div style={{
@@ -2556,7 +2560,7 @@ function TranscriptRow({ segment }: { segment: TranscriptSegment }) {
       background: 'var(--ol-surface-2)',
     }}>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 7 }}>
-        <Pill size="sm" tone="outline">{segment.speakerLabel || t('meetings.unknownSpeaker')}</Pill>
+        <Pill size="sm" tone="outline">{speakerLabel || t('meetings.unknownSpeaker')}</Pill>
         <Pill size="sm" tone="default">{formatTimestamp(segment.startMs)}</Pill>
         <Pill size="sm" tone="outline">{sourceLabel(segment.source, t)}</Pill>
         {segment.metadata?.needsReview && (

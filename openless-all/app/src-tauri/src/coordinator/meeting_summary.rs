@@ -447,7 +447,7 @@ fn format_transcript_segments(record: &MeetingRecord) -> String {
             format!(
                 "[{}][{}][{}] {}",
                 segment.id,
-                segment.speaker_label,
+                record.speaker_display_name(segment),
                 format_segment_timestamp(segment.start_ms),
                 segment.text.trim()
             )
@@ -474,7 +474,7 @@ pub(super) fn transcript_chunks(record: &MeetingRecord) -> Vec<String> {
         let line = format!(
             "[{}][{}][{}] {}\n",
             segment.id,
-            segment.speaker_label,
+            record.speaker_display_name(segment),
             format_segment_timestamp(segment.start_ms),
             segment.text.trim()
         );
@@ -799,6 +799,25 @@ mod tests {
     }
 
     #[test]
+    fn meeting_summary_uses_renamed_speaker_profile_in_full_prompt() {
+        let mut renamed_segment = segment("seg-000001", "确认下一步");
+        renamed_segment.speaker_id = Some("speaker-0".to_string());
+        renamed_segment.speaker_label = "发言人 1".to_string();
+        let mut record = record_with_segments(vec![renamed_segment]);
+        record.speaker_profiles = vec![crate::types::SpeakerProfile {
+            id: "speaker-0".to_string(),
+            provider_speaker_id: Some("0".to_string()),
+            display_name: "张三".to_string(),
+            manually_named: true,
+        }];
+
+        let prompt = build_meeting_summary_prompt(&record, &[], "auto");
+
+        assert!(prompt.user.contains("[seg-000001][张三][00:00:12]"));
+        assert!(!prompt.user.contains("[seg-000001][发言人 1]"));
+    }
+
+    #[test]
     fn meeting_summary_formats_segment_timestamp_as_hh_mm_ss() {
         assert_eq!(format_segment_timestamp(3_723_000), "01:02:03");
     }
@@ -1007,6 +1026,26 @@ mod tests {
         assert!(chunks.len() > 1);
         assert!(chunks[0].contains("seg-000001"));
         assert!(chunks[1].contains("seg-000002"));
+    }
+
+    #[test]
+    fn meeting_summary_uses_renamed_speaker_profile_in_rolling_chunks() {
+        let mut renamed_segment = segment("seg-000001", "确认下一步");
+        renamed_segment.speaker_id = Some("speaker-0".to_string());
+        renamed_segment.speaker_label = "发言人 1".to_string();
+        let mut record = record_with_segments(vec![renamed_segment]);
+        record.speaker_profiles = vec![crate::types::SpeakerProfile {
+            id: "speaker-0".to_string(),
+            provider_speaker_id: Some("0".to_string()),
+            display_name: "张三".to_string(),
+            manually_named: true,
+        }];
+
+        let chunks = transcript_chunks(&record);
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].contains("[seg-000001][张三][00:00:12]"));
+        assert!(!chunks[0].contains("[seg-000001][发言人 1]"));
     }
 
     #[test]

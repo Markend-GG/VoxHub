@@ -575,7 +575,7 @@ fn meeting_markdown(record: &MeetingRecord) -> String {
         for segment in &record.transcript_segments {
             out.push_str(&format!(
                 "- 发言人: {} | 时间: {} | 内容: {}\n\n",
-                segment.speaker_label,
+                record.speaker_display_name(segment),
                 format_duration_hms(segment.start_ms),
                 segment.text.trim()
             ));
@@ -904,6 +904,53 @@ mod tests {
         assert!(
             markdown.find("## 会议总结").unwrap() < markdown.find("## 转写后的会议原文").unwrap()
         );
+    }
+
+    #[test]
+    fn meeting_markdown_uses_renamed_speaker_profile() {
+        let mut record = fixture_record();
+        record.speaker_profiles = vec![crate::types::SpeakerProfile {
+            id: "speaker-0".to_string(),
+            provider_speaker_id: Some("0".to_string()),
+            display_name: "张三".to_string(),
+            manually_named: true,
+        }];
+        record.transcript_segments = vec![TranscriptSegment {
+            id: "seg-1".to_string(),
+            speaker_id: Some("speaker-0".to_string()),
+            speaker_label: "发言人 1".to_string(),
+            start_ms: 61_000,
+            end_ms: Some(62_000),
+            text: "确认下一步".to_string(),
+            source: TranscriptSegmentSource::RetranscribedAsr,
+            metadata: None,
+        }];
+
+        let persisted = serde_json::to_string(&record).expect("serialize meeting");
+        let reopened: MeetingRecord = serde_json::from_str(&persisted).expect("reopen meeting");
+        let markdown = meeting_markdown(&reopened);
+
+        assert!(markdown.contains("- 发言人: 张三 | 时间: 00:01:01 | 内容: 确认下一步"));
+        assert!(!markdown.contains("- 发言人: 发言人 1"));
+    }
+
+    #[test]
+    fn meeting_markdown_falls_back_to_segment_label_for_unknown_speaker_id() {
+        let mut record = fixture_record();
+        record.transcript_segments = vec![TranscriptSegment {
+            id: "seg-1".to_string(),
+            speaker_id: Some("speaker-missing".to_string()),
+            speaker_label: "发言人 1".to_string(),
+            start_ms: 61_000,
+            end_ms: Some(62_000),
+            text: "确认下一步".to_string(),
+            source: TranscriptSegmentSource::RetranscribedAsr,
+            metadata: None,
+        }];
+
+        let markdown = meeting_markdown(&record);
+
+        assert!(markdown.contains("- 发言人: 发言人 1 | 时间: 00:01:01 | 内容: 确认下一步"));
     }
 
     #[test]
