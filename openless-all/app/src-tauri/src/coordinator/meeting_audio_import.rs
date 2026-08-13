@@ -367,6 +367,22 @@ pub(crate) fn cleanup_import_after_deletion(import_job_id: &str) {
 
 pub(super) fn recover_meeting_audio_imports(inner: &Arc<Inner>) -> Result<usize, String> {
     let store = MeetingStore::new().map_err(|error| error.to_string())?;
+    recover_meeting_audio_imports_with_store(
+        &store,
+        |import_job_id| meeting_import_partial_path(import_job_id).map_err(|error| error.to_string()),
+        |record| emit_import_event(inner, record),
+    )
+}
+
+fn recover_meeting_audio_imports_with_store<P, E>(
+    store: &MeetingStore,
+    partial_path_for_job: P,
+    mut on_recovered: E,
+) -> Result<usize, String>
+where
+    P: Fn(&str) -> Result<PathBuf, String>,
+    E: FnMut(&MeetingRecord),
+{
     let records = store.list().map_err(|error| error.to_string())?;
     let mut recovered = 0usize;
     for record in records {
@@ -382,7 +398,7 @@ pub(super) fn recover_meeting_audio_imports(inner: &Arc<Inner>) -> Result<usize,
                 | MeetingImportStatus::Cancelling
         ) {
             let import_job_id = import_state.import_job_id.clone();
-            if let Ok(partial_path) = meeting_import_partial_path(&import_job_id) {
+            if let Ok(partial_path) = partial_path_for_job(&import_job_id) {
                 remove_partial_staging_file(&partial_path);
             }
             let now = Utc::now().to_rfc3339();
@@ -392,7 +408,7 @@ pub(super) fn recover_meeting_audio_imports(inner: &Arc<Inner>) -> Result<usize,
                 })
                 .map_err(|error| error.to_string())?;
             if let Some(updated) = updated {
-                emit_import_event(inner, &updated);
+                on_recovered(&updated);
                 recovered += 1;
             }
         } else if import_state.status == MeetingImportStatus::Summarizing
@@ -406,7 +422,7 @@ pub(super) fn recover_meeting_audio_imports(inner: &Arc<Inner>) -> Result<usize,
                 })
                 .map_err(|error| error.to_string())?;
             if let Some(updated) = updated {
-                emit_import_event(inner, &updated);
+                on_recovered(&updated);
                 recovered += 1;
             }
         }
@@ -3015,6 +3031,116 @@ mod tests {
             Some("meetingAudioReselectionRequired")
         );
         assert!(record.processing_hold.is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn force_killed_import_process_recovers_persisted_state() {
+        const FIXTURE_ENV: &str = "OPENLESS_IMPORT_CRASH_FIXTURE";
+        const FIXTURE_DIR_ENV: &str = "OPENLESS_IMPORT_CRASH_FIXTURE_DIR";
+        const TEST_NAME: &str =
+            "coordinator::meeting_audio_import::tests::force_killed_import_process_recovers_persisted_state";
+
+        if std::env::var_os(FIXTURE_ENV).is_some() {
+            let dir = PathBuf::from(
+                std::env::var_os(FIXTURE_DIR_ENV).expect("crash fixture directory is missing"),
+            );
+            let store = MeetingStore::new_for_path(dir.join("meetings.json"));
+            let job_id = "force-killed-import";
+            store.create(import_record_for_test(job_id)).unwrap();
+
+            let partial_path = dir.join(format!("{job_id}.partial"));
+            let mut partial = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&partial_path)
+                .unwrap();
+            std::io::Write::write_all(&mut partial, b"incomplete managed audio").unwrap();
+            std::io::Write::flush(&mut partial).unwrap();
+            std::fs::write(dir.join("ready"), b"ready").unwrap();
+
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        struct ChildGuard(std::process::Child);
+
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if self.0.try_wait().ok().flatten().is_none() {
+                    let _ = self.0.kill();
+                }
+                let _ = self.0.wait();
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "meeting-import-force-kill-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .arg("--nocapture")
+            .env(FIXTURE_ENV, "1")
+            .env(FIXTURE_DIR_ENV, &dir)
+            .creation_flags(CREATE_NO_WINDOW);
+        let mut child = ChildGuard(command.spawn().unwrap());
+
+        let ready_path = dir.join("ready");
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        while !ready_path.exists() {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                panic!("crash fixture exited before it was ready: {status}");
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "crash fixture did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        child.0.kill().unwrap();
+        let status = child.0.wait().unwrap();
+        assert!(!status.success());
+
+        let store = MeetingStore::new_for_path(dir.join("meetings.json"));
+        let recovered = recover_meeting_audio_imports_with_store(
+            &store,
+            |job_id| Ok(dir.join(format!("{job_id}.partial"))),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(recovered, 1);
+        assert!(!dir.join("force-killed-import.partial").exists());
+
+        let record = store.get("meeting-import-test").unwrap().unwrap();
+        let state = record.import_state.as_ref().unwrap();
+        assert_eq!(state.status, MeetingImportStatus::Failed);
+        assert_eq!(
+            state.error_code.as_deref(),
+            Some("meetingAudioReselectionRequired")
+        );
+        assert!(state.completed_at.is_none());
+        assert!(record.processing_hold.is_none());
+        assert_eq!(record.status, MeetingStatus::Draft);
+
+        assert_eq!(
+            recover_meeting_audio_imports_with_store(
+                &store,
+                |job_id| Ok(dir.join(format!("{job_id}.partial"))),
+                |_| {},
+            )
+            .unwrap(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
