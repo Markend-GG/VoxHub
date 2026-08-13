@@ -607,6 +607,28 @@ async fn run_post_processing_job_with_context(
     Ok(())
 }
 
+#[cfg(test)]
+pub(super) async fn run_post_processing_job_for_test(
+    store: &MeetingStore,
+    meeting_id: &str,
+    job_id: &str,
+    audio_path: PathBuf,
+) -> Result<(), String> {
+    let audio_path_for_id = |_id: &str| Ok(audio_path.clone());
+    let context = PostProcessingJobContext {
+        inner: None,
+        store,
+        audio_path_for_id: &audio_path_for_id,
+    };
+    run_post_processing_job_with_context(
+        &context,
+        meeting_id,
+        job_id,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+}
+
 fn validate_import_post_processing_route(
     state: &MeetingPostProcessingState,
     import_config: &MeetingImportConfig,

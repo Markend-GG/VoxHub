@@ -54,6 +54,13 @@ struct SelectionRegistry {
     entries: HashMap<String, AudioSelectionEntry>,
 }
 
+struct PreparedMeetingAudioImport {
+    record: MeetingRecord,
+    probe: PcmWavProbe,
+    partial_path: PathBuf,
+    managed_path: PathBuf,
+}
+
 impl SelectionRegistry {
     fn insert(&mut self, probe: PcmWavProbe, now: Instant) -> MeetingAudioSelection {
         self.retain_fresh(now);
@@ -133,6 +140,47 @@ pub(super) fn start_meeting_audio_import(
     if inner.meeting_session.lock().is_some() {
         return Err("meetingAudioImportConflict: 请先结束当前会议录音".to_string());
     }
+    let prepared = persist_meeting_audio_import(
+        options,
+        |token| AUDIO_SELECTIONS.lock().consume(token, Instant::now()),
+        |import_job_id| meeting_import_partial_path(import_job_id),
+        |meeting_id| meeting_recording_part_path_for_id(meeting_id, 1),
+        |record| {
+            MeetingStore::new()
+                .map_err(|error| error.to_string())?
+                .create(record)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        },
+        &Utc::now().to_rfc3339(),
+    )?;
+    let record = prepared.record.clone();
+    emit_import_event(inner, &record);
+    spawn_audio_normalization_job(
+        inner,
+        record.id.clone(),
+        record.import_state.as_ref().unwrap().import_job_id.clone(),
+        prepared.probe,
+        prepared.partial_path,
+        prepared.managed_path,
+    );
+    Ok(record)
+}
+
+fn persist_meeting_audio_import<C, P, M, S>(
+    options: StartMeetingAudioImportOptions,
+    consume_selection: C,
+    partial_path_for_job: P,
+    managed_path_for_meeting: M,
+    persist_record: S,
+    now: &str,
+) -> Result<PreparedMeetingAudioImport, String>
+where
+    C: FnOnce(&str) -> Result<PcmWavProbe, String>,
+    P: FnOnce(&str) -> anyhow::Result<PathBuf>,
+    M: FnOnce(&str) -> anyhow::Result<PathBuf>,
+    S: FnOnce(MeetingRecord) -> Result<(), String>,
+{
     let descriptor = resolve_meeting_asr_model(&options.asr_model_ref)?;
     let local_diarization_model_id = normalized_optional_string(options.local_diarization_model_id);
     validate_meeting_asr_combination(
@@ -141,15 +189,12 @@ pub(super) fn start_meeting_audio_import(
         local_diarization_model_id.as_deref(),
     )?;
     let expected_speaker_count = normalize_expected_speaker_count(options.expected_speaker_count)?;
-    let probe = AUDIO_SELECTIONS
-        .lock()
-        .consume(&options.selection_token, Instant::now())?;
-    let now = Utc::now().to_rfc3339();
+    let probe = consume_selection(&options.selection_token)?;
     let meeting_id = Uuid::new_v4().to_string();
     let import_job_id = Uuid::new_v4().to_string();
-    let partial_path = meeting_import_partial_path(&import_job_id)
+    let partial_path = partial_path_for_job(&import_job_id)
         .map_err(|error| format!("meetingAudioStagingFailed: {error:#}"))?;
-    let managed_path = meeting_recording_part_path_for_id(&meeting_id, 1)
+    let managed_path = managed_path_for_meeting(&meeting_id)
         .map_err(|error| format!("meetingAudioStagingFailed: {error:#}"))?;
     create_staging_marker(&partial_path)?;
 
@@ -179,16 +224,16 @@ pub(super) fn start_meeting_audio_import(
         attempt: 1,
         error_code: None,
         error_message: None,
-        created_at: now.clone(),
-        updated_at: now.clone(),
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
         completed_at: None,
     };
     let record = MeetingRecord {
         id: meeting_id.clone(),
         title,
         status: MeetingStatus::Draft,
-        started_at: now.clone(),
-        ended_at: Some(now.clone()),
+        started_at: now.to_string(),
+        ended_at: Some(now.to_string()),
         duration_ms: Some(probe.duration_ms),
         transcript_segments: Vec::new(),
         summary: MeetingSummary::default(),
@@ -208,27 +253,22 @@ pub(super) fn start_meeting_audio_import(
         speaker_turns: Vec::new(),
         processing_hold: Some(ProcessingHold {
             job_id: import_job_id.clone(),
-            acquired_at: now.clone(),
+            acquired_at: now.to_string(),
         }),
-        created_at: now.clone(),
-        updated_at: now,
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
     };
-    let store = MeetingStore::new().map_err(|error| error.to_string())?;
-    if let Err(error) = store.create(record.clone()) {
+    if let Err(error) = persist_record(record.clone()) {
         let _ = std::fs::remove_file(&partial_path);
         let _ = managed_path.parent().map(remove_meeting_audio_path);
-        return Err(error.to_string());
+        return Err(error);
     }
-    emit_import_event(inner, &record);
-    spawn_audio_normalization_job(
-        inner,
-        meeting_id,
-        import_job_id,
+    Ok(PreparedMeetingAudioImport {
+        record,
         probe,
         partial_path,
         managed_path,
-    );
-    Ok(record)
+    })
 }
 
 pub(super) fn cancel_meeting_audio_import(
@@ -872,6 +912,36 @@ fn transition_import_to_post_processing(
     let store = MeetingStore::new().map_err(|error| error.to_string())?;
     let now = Utc::now().to_rfc3339();
     let post_job_id = Uuid::new_v4().to_string();
+    let updated = transition_import_to_post_processing_with_store(
+        &store,
+        meeting_id,
+        import_job_id,
+        duration_ms,
+        cancelled,
+        &post_job_id,
+        &now,
+    )?;
+    emit_import_event(inner, &updated);
+    super::meeting_post_processing::spawn_post_processing_job(
+        inner,
+        meeting_id.to_string(),
+        post_job_id,
+    );
+    Ok(updated)
+}
+
+fn transition_import_to_post_processing_with_store(
+    store: &MeetingStore,
+    meeting_id: &str,
+    import_job_id: &str,
+    duration_ms: u64,
+    cancelled: &AtomicBool,
+    post_job_id: &str,
+    now: &str,
+) -> Result<MeetingRecord, String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err("meetingAudioImportCancelled: 音频导入已取消".to_string());
+    }
     let updated = store
         .update_if(meeting_id, |record| {
             let Some(import_state) = record.import_state.as_ref() else {
@@ -905,7 +975,7 @@ fn transition_import_to_post_processing(
             });
             record.post_processing = Some(MeetingPostProcessingState {
                 status: MeetingPostProcessingStatus::Pending,
-                job_id: post_job_id.clone(),
+                job_id: post_job_id.to_string(),
                 model_ref: import_config.asr_model_ref,
                 resolved_runtime_kind: import_config.resolved_asr_runtime_kind,
                 diarization_mode: import_config.diarization_mode,
@@ -916,30 +986,24 @@ fn transition_import_to_post_processing(
                 attempt: import_state.attempt,
                 error_code: None,
                 error_message: None,
-                created_at: now.clone(),
-                updated_at: now.clone(),
+                created_at: now.to_string(),
+                updated_at: now.to_string(),
                 started_at: None,
                 completed_at: None,
             });
             let import_state = record.import_state.as_mut().unwrap();
             import_state.status = MeetingImportStatus::Transcribing;
             import_state.progress = Some(IMPORT_ASR_PROGRESS_START);
-            import_state.updated_at = now.clone();
+            import_state.updated_at = now.to_string();
             record.processing_hold = Some(ProcessingHold {
-                job_id: post_job_id.clone(),
-                acquired_at: now.clone(),
+                job_id: post_job_id.to_string(),
+                acquired_at: now.to_string(),
             });
-            record.updated_at = now.clone();
+            record.updated_at = now.to_string();
             true
         })
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "meetingAudioImportCancelled: 音频导入任务已取消或被替换".to_string())?;
-    emit_import_event(inner, &updated);
-    super::meeting_post_processing::spawn_post_processing_job(
-        inner,
-        meeting_id.to_string(),
-        post_job_id,
-    );
     Ok(updated)
 }
 
@@ -1678,6 +1742,7 @@ fn speaker_display_name(speaker_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::types::{TranscriptRevision, TranscriptRevisionSource};
+    use sha2::{Digest, Sha256};
 
     fn import_record_for_test(job_id: &str) -> MeetingRecord {
         MeetingRecord {
@@ -1728,6 +1793,191 @@ mod tests {
         let path = dir.join("会议录音.wav");
         std::fs::write(&path, crate::asr::wav::encode_wav_16k_mono(&[0; 16_000])).unwrap();
         (probe_pcm_wav(&path).unwrap(), dir)
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires configured Bailian credentials and OPENLESS_MEETING_CLOUD_ASR_TEST_WAV"]
+    async fn configured_fun_asr_import_persists_end_to_end_cloud_route() {
+        let source_path = std::env::var_os("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV")
+            .map(PathBuf::from)
+            .expect("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV must point to a PCM WAV");
+        let source_before = std::fs::read(&source_path).expect("import source WAV must be readable");
+        let source_hash = Sha256::digest(&source_before);
+        let source_modified = std::fs::metadata(&source_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("import source WAV modification time must be readable");
+        let probe = probe_pcm_wav(&source_path).expect("import source WAV must be valid");
+        let managed_dir = std::env::temp_dir().join(format!(
+            "meeting-audio-import-cloud-integration-{}",
+            Uuid::new_v4()
+        ));
+        let store_path = managed_dir.join("meetings.json");
+        let staging_dir = managed_dir.join("staging");
+        let audio_dir = managed_dir.join("audio");
+        let result = async {
+            let mut registry = SelectionRegistry::default();
+            let selection = registry.insert(probe, Instant::now());
+            let options = StartMeetingAudioImportOptions {
+                selection_token: selection.selection_token.clone(),
+                title: "云端导入闭环".to_string(),
+                asr_model_ref: MeetingAsrModelRef {
+                    provider_id: CLOUD_PROVIDER_ID.to_string(),
+                    model_id: "fun-asr".to_string(),
+                },
+                diarization_mode: MeetingDiarizationMode::Off,
+                local_diarization_model_id: None,
+                expected_speaker_count: None,
+                generate_summary: false,
+            };
+            let store = MeetingStore::new_for_path(store_path.clone());
+            let prepared = persist_meeting_audio_import(
+                options,
+                |token| registry.consume(token, Instant::now()),
+                |import_job_id| Ok(staging_dir.join(format!("{import_job_id}.wav.partial"))),
+                |meeting_id| Ok(audio_dir.join(meeting_id).join("part-0001.wav")),
+                |record| {
+                    store
+                        .create(record)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                },
+                "2026-08-13T00:00:00Z",
+            )
+            .map_err(|_| "audio import persistence setup failed")?;
+            if registry
+                .consume(&selection.selection_token, Instant::now())
+                .is_ok()
+            {
+                return Err("audio import selection token was reusable");
+            }
+            let meeting_id = prepared.record.id.clone();
+            let import_job_id = prepared
+                .record
+                .import_state
+                .as_ref()
+                .ok_or("audio import state is missing")?
+                .import_job_id
+                .clone();
+            if prepared
+                .record
+                .import_config
+                .as_ref()
+                .is_none_or(|config| {
+                    config.asr_model_ref.provider_id != CLOUD_PROVIDER_ID
+                        || config.asr_model_ref.model_id != "fun-asr"
+                        || config.resolved_asr_runtime_kind != MeetingAsrRuntimeKind::Cloud
+                        || config.diarization_mode != MeetingDiarizationMode::Off
+                })
+            {
+                return Err("audio import did not persist the backend-resolved cloud route");
+            }
+
+            let normalized = normalize_pcm_wav(
+                &prepared.probe,
+                &prepared.partial_path,
+                &prepared.managed_path,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .map_err(|_| "audio import normalization failed")?;
+            if prepared.partial_path.exists() || !prepared.managed_path.exists() {
+                return Err("audio import managed WAV was not committed atomically");
+            }
+            MeetingAudioSource::from_path(&prepared.managed_path)
+                .and_then(|source| source.inspect())
+                .map_err(|_| "audio import managed WAV is invalid")?;
+
+            let post_job_id = Uuid::new_v4().to_string();
+            let transitioned = transition_import_to_post_processing_with_store(
+                &store,
+                &meeting_id,
+                &import_job_id,
+                normalized.duration_ms,
+                &AtomicBool::new(false),
+                &post_job_id,
+                "2026-08-13T00:00:01Z",
+            )
+            .map_err(|_| "audio import post-processing transition failed")?;
+            if transitioned
+                .post_processing
+                .as_ref()
+                .is_none_or(|state| {
+                    state.status != MeetingPostProcessingStatus::Pending
+                        || state.job_id != post_job_id
+                        || state.model_ref.model_id != "fun-asr"
+                        || state.resolved_runtime_kind != MeetingAsrRuntimeKind::Cloud
+                })
+                || transitioned
+                    .processing_hold
+                    .as_ref()
+                    .is_none_or(|hold| hold.job_id != post_job_id)
+            {
+                return Err("audio import did not transition to the resolved cloud worker");
+            }
+            super::super::meeting_post_processing::run_post_processing_job_for_test(
+                &store,
+                &meeting_id,
+                &post_job_id,
+                prepared.managed_path.clone(),
+            )
+            .await
+            .map_err(|_| "audio import cloud worker execution failed")?;
+
+            let persisted = MeetingStore::new_for_path(store_path)
+                .get(&meeting_id)
+                .map_err(|_| "audio import result reload failed")?
+                .ok_or("audio import result was not persisted")?;
+            let import_state = persisted
+                .import_state
+                .as_ref()
+                .ok_or("audio import final state is missing")?;
+            let post_state = persisted
+                .post_processing
+                .as_ref()
+                .ok_or("audio import final post-processing state is missing")?;
+            let provider_task_id = post_state
+                .provider_task_id
+                .as_deref()
+                .ok_or("audio import provider task id is missing")?;
+            let active_revision = persisted
+                .transcript_revisions
+                .iter()
+                .find(|revision| revision.revision == 1)
+                .ok_or("audio import revision is missing")?;
+            if persisted.status != MeetingStatus::Completed
+                || persisted.audio.state != MeetingAudioState::Retained
+                || !persisted.audio.retained
+                || import_state.status != MeetingImportStatus::Completed
+                || post_state.status != MeetingPostProcessingStatus::Completed
+                || persisted.active_transcript_revision != Some(1)
+                || persisted.processing_hold.is_some()
+                || active_revision.source != TranscriptRevisionSource::Imported
+                || active_revision.status != TranscriptRevisionStatus::Active
+                || active_revision.segments != persisted.transcript_segments
+                || persisted.transcript_segments.is_empty()
+                || !persisted.transcript_segments.iter().all(|segment| {
+                    segment.speaker_id.is_none()
+                        && segment.metadata.as_ref().is_some_and(|metadata| {
+                            metadata.provider_id.as_deref() == Some("bailian/fun-asr")
+                                && metadata.provider_session_id.as_deref()
+                                    == Some(provider_task_id)
+                        })
+                })
+            {
+                return Err("audio import persisted result is inconsistent");
+            }
+            Ok::<(), &str>(())
+        }
+        .await;
+        let source_after = std::fs::read(&source_path).expect("import source WAV must remain readable");
+        let source_modified_after = std::fs::metadata(&source_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("import source WAV modification time must remain readable");
+        let _ = std::fs::remove_dir_all(managed_dir);
+        assert_eq!(Sha256::digest(source_after), source_hash);
+        assert_eq!(source_modified_after, source_modified);
+        result.unwrap();
     }
 
     #[cfg(target_os = "windows")]
