@@ -421,7 +421,9 @@ pub fn remove_meeting_audio_path(path: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::types::{
-        MeetingAudioMeta, MeetingStatus, MeetingSummary, TranscriptSegment, TranscriptSegmentSource,
+        MeetingAudioMeta, MeetingStatus, MeetingSummary, TranscriptRevision,
+        TranscriptRevisionSource, TranscriptRevisionStatus, TranscriptSegment,
+        TranscriptSegmentSource,
     };
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -523,6 +525,70 @@ mod tests {
             source: TranscriptSegmentSource::RealtimeAsr,
             metadata: None,
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_atomic_update_keeps_persisted_active_transcript_revision() {
+        let tmp = temp_root("openless-meeting-revision-persist-failure");
+        let path = tmp.join("meetings.json");
+        let store = MeetingStore::new_for_path(path.clone());
+        let mut original = record(
+            "00000000-0000-4000-8000-000000000151",
+            "2026-08-13T01:00:00Z",
+        );
+        let original_segments = vec![segment("realtime-1", "旧的实时原文")];
+        original.transcript_segments = original_segments.clone();
+        original.transcript_revisions = vec![TranscriptRevision {
+            revision: 0,
+            source: TranscriptRevisionSource::Realtime,
+            status: TranscriptRevisionStatus::Active,
+            segments: original_segments.clone(),
+            created_at: "2026-08-13T01:00:00Z".to_string(),
+        }];
+        original.active_transcript_revision = Some(0);
+        original.summary.overview = "旧总结".to_string();
+        store.create(original.clone()).unwrap();
+
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        let update = store.update_if(&original.id, |record| {
+            let new_segments = vec![segment("post-1", "新的会后原文")];
+            record.transcript_revisions[0].status = TranscriptRevisionStatus::Rejected;
+            record.transcript_revisions.push(TranscriptRevision {
+                revision: 1,
+                source: TranscriptRevisionSource::CloudPostprocess,
+                status: TranscriptRevisionStatus::Active,
+                segments: new_segments.clone(),
+                created_at: "2026-08-13T01:05:00Z".to_string(),
+            });
+            record.active_transcript_revision = Some(1);
+            record.transcript_segments = new_segments;
+            record.summary.overview = "不应持久化的新总结".to_string();
+            true
+        });
+        assert!(update.is_err(), "read-only destination must reject replacement");
+
+        let persisted = store.get(&original.id).unwrap().unwrap();
+        assert_eq!(persisted.active_transcript_revision, Some(0));
+        assert_eq!(persisted.transcript_segments, original_segments);
+        assert_eq!(persisted.transcript_revisions, original.transcript_revisions);
+        assert_eq!(persisted.summary.overview, "旧总结");
+        assert_eq!(
+            fs::read_dir(&tmp)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+                .count(),
+            0
+        );
+
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions).unwrap();
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

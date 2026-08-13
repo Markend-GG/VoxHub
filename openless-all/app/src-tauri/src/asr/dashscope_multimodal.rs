@@ -1193,6 +1193,58 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn polling_exhausts_transient_http_retries_with_clear_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_hits = Arc::clone(&hits);
+        let server = tokio::spawn(async move {
+            for _ in 0..=ASYNC_HTTP_RETRY_ATTEMPTS {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 2048];
+                let read = stream.read(&mut request).await.unwrap();
+                assert!(String::from_utf8_lossy(&request[..read])
+                    .starts_with("GET /api/v1/tasks/task-retry-exhausted HTTP/1.1"));
+                server_hits.fetch_add(1, Ordering::SeqCst);
+                let body = "retry exhausted";
+                let response = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let asr = DashScopeMultimodalASR::new(
+            "sk-test".to_string(),
+            format!("http://{addr}/api/v1/services/audio/asr/transcription"),
+            "fun-asr".to_string(),
+        );
+        let error = asr
+            .poll_async_task(
+                "task-retry-exhausted",
+                Duration::from_secs(15),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("poll DashScope async ASR task error 503"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            (ASYNC_HTTP_RETRY_ATTEMPTS + 1) as usize
+        );
+        server.await.unwrap();
+    }
+
     #[test]
     fn extract_text_prefers_output_text() {
         let json = serde_json::json!({ "output": { "text": "  你好世界  " } });
@@ -1502,6 +1554,67 @@ mod tests {
         assert_eq!(upload_attempts.load(Ordering::SeqCst), 1);
         assert_eq!(std::fs::read(&part_path).unwrap(), source_before);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn async_submission_connection_drop_is_not_retried() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let submit_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_attempts = Arc::clone(&submit_attempts);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with(
+                "POST /api/v1/services/audio/asr/transcription HTTP/1.1"
+            ));
+            assert!(request_text.contains(r#""file_urls":["oss://bucket/meeting.wav"]"#));
+            server_attempts.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((retry_stream, _)) => {
+                        server_attempts.fetch_add(1, Ordering::SeqCst);
+                        drop(retry_stream);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept retry request failed: {error}"),
+                }
+            }
+        });
+
+        let asr = DashScopeMultimodalASR::new(
+            "sk-test".to_string(),
+            format!("http://{addr}/api/v1/services/audio/asr/transcription"),
+            "fun-asr".to_string(),
+        );
+        let error = asr
+            .submit_async_task(
+                "oss://bucket/meeting.wav",
+                DashScopeAsyncRequestOptions {
+                    diarization_enabled: false,
+                    speaker_count: None,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("DashScope async ASR submission"),
+            "unexpected error: {error}"
+        );
+        server.join().unwrap();
+        assert_eq!(submit_attempts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

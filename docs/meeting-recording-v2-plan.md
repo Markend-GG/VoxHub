@@ -12,8 +12,8 @@
 
 状态：revised for V2-2 / V2-3 implementation planning
 日期：2026-07-08  
-最新修订：2026-08-12
-基线分支：`codex/meeting-recording-v2`  
+最新修订：2026-08-13
+基线分支：`codex/voxhub-main`（独立功能分支：`codex/meeting-post-asr-routing-20260812`）
 关联文档：
 
 - `docs/meeting-recording-v1-spec.md`
@@ -26,11 +26,11 @@
 - `docs/meeting-recording-v2-3-audio-import-plan.md`
 - `docs/meeting-recording-v2-acceptance-checklist.md`
 
-## 0. 最新进展同步（2026-08-12）
+## 0. 最新进展同步（2026-08-13）
 
 - V2-1：会议独立 ASR 设置、draft/final（临时 / 最终识别）、原文 metadata（元数据）、provider session（服务商会话）防污染和本场实际 realtime ASR 配置快照已进入代码，并通过 TypeScript、前端 build、MSVC `cargo check` 及相关 Rust 自动测试；真实百炼会议和 Tauri 人工验收尚未完成，因此仍标记为 `partial`（部分完成）。
 - V2-2：会后 ASR 模型选择、会议音频文件流式上传、云端 `fun-asr` / `paraformer-v2` 任务框架、revision（原文修订版本）、任务恢复和音频生命周期已进入代码；本地说话人模型管理、sherpa-onnx 推理、SpeakerTurn（说话人时间段）生成和句子级时间戳对齐也已完成自动测试。真实百炼、本地模型下载与推理、Tauri UI、应用重启及 30 / 60 / 120 分钟资源验证尚未完成，因此相关验收项仍为 `partial`。
-- V2-3：音频文件导入、受管 WAV、按模型类型动态路由云端 / 本地 ASR、取消 / 重试 / 恢复已经完成实施计划，功能代码尚未开始，验收项为 `missing`。
+- V2-3：音频文件导入、受管 WAV、可信 selection token（选择令牌）、按模型能力注册表动态路由云端 / 本地 ASR、取消 / 重试 / 恢复、兼容组合校验和会议详情复用已经进入代码并完成自动测试。真实云端 / 本地模型调用、应用重启、磁盘不足、Tauri UI 全流程和长音频资源测试尚未完成，因此 MR-V2-201～212 均为 `partial`，不能标记为 `done`。
 - 状态权威统一放在 `docs/meeting-recording-v2-acceptance-checklist.md`；阶段计划写完不等于功能已经实现。
 
 ## 1. 背景
