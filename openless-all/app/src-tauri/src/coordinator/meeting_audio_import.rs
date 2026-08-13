@@ -1773,6 +1773,22 @@ mod tests {
     }
 
     #[test]
+    fn selection_token_is_invalid_after_registry_restart() {
+        let (probe, dir) = probe_for_test();
+        let mut before_restart = SelectionRegistry::default();
+        let selection = before_restart.insert(probe, Instant::now());
+
+        let mut after_restart = SelectionRegistry::default();
+        let error = after_restart
+            .consume(&selection.selection_token, Instant::now())
+            .unwrap_err();
+
+        assert!(error.contains("已失效"));
+        assert!(dir.join("会议录音.wav").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn managed_audio_source_conflict_is_detected_without_deleting_source() {
         let (probe, dir) = probe_for_test();
         assert!(path_is_within(&probe.path, &dir));

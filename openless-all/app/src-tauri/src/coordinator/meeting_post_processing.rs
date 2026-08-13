@@ -1925,6 +1925,35 @@ mod tests {
     }
 
     #[test]
+    fn initial_config_is_an_owned_snapshot_of_the_selected_meeting_options() {
+        let mut prefs = UserPreferences::default();
+        let options = StartMeetingRecordingOptions {
+            post_meeting_asr_model_ref: Some(MeetingAsrModelRef {
+                provider_id: "bailian".to_string(),
+                model_id: "paraformer-v2".to_string(),
+            }),
+            diarization_mode: Some(MeetingDiarizationMode::Cloud),
+            expected_speaker_count: Some(6),
+            ..StartMeetingRecordingOptions::default()
+        };
+        let config = resolve_initial_post_processing_config(
+            &prefs,
+            Some(&options),
+            "bailian",
+            Some("fun-asr-realtime".to_string()),
+        )
+        .unwrap();
+
+        prefs.post_meeting_asr.model_id = "fun-asr".to_string();
+        prefs.post_meeting_asr.diarization.mode = MeetingDiarizationMode::Off;
+
+        assert_eq!(config.post_meeting_asr_model_ref.model_id, "paraformer-v2");
+        assert_eq!(config.diarization_mode, MeetingDiarizationMode::Cloud);
+        assert_eq!(config.expected_speaker_count, Some(6));
+        assert_eq!(config.realtime_model_id.as_deref(), Some("fun-asr-realtime"));
+    }
+
+    #[test]
     fn prepare_job_creates_realtime_revision_and_processing_hold() {
         let mut record = record();
         assert!(prepare_post_processing_after_stop(&mut record, "2026-08-12T10:00:01Z").unwrap());
@@ -2467,6 +2496,23 @@ mod tests {
         prepare_post_processing_after_stop(&mut candidate, "2026-08-12T10:00:01Z").unwrap();
         let original_job_id = candidate.post_processing.as_ref().unwrap().job_id.clone();
         candidate.post_processing.as_mut().unwrap().status = MeetingPostProcessingStatus::Failed;
+        stage_transcript_revision(
+            &mut candidate,
+            1,
+            TranscriptRevisionSource::CloudPostprocess,
+            vec![TranscriptSegment {
+                id: "stale-retry-segment".to_string(),
+                speaker_id: None,
+                speaker_label: "未区分".to_string(),
+                start_ms: 0,
+                end_ms: Some(1_000),
+                text: "旧任务暂存结果".to_string(),
+                source: TranscriptSegmentSource::RetranscribedAsr,
+                metadata: None,
+            }],
+            "2026-08-12T10:00:02Z",
+        )
+        .unwrap();
         let mut next_config = candidate.post_processing_config.clone().unwrap();
         next_config.post_meeting_asr_model_ref.model_id = "paraformer-v2".to_string();
         next_config.processing_revision = 2;
@@ -2507,8 +2553,33 @@ mod tests {
         ));
         let state = candidate.post_processing.as_ref().unwrap();
         assert_eq!(state.job_id, "job-new");
+        assert_eq!(state.model_ref.model_id, "paraformer-v2");
         assert_eq!(state.attempt, 2);
         assert_eq!(state.processing_revision, 2);
+        assert_eq!(candidate.active_transcript_revision, Some(0));
+        assert_eq!(candidate.post_processing_config.as_ref().unwrap().processing_revision, 2);
+        assert_eq!(
+            candidate
+                .post_processing_config
+                .as_ref()
+                .unwrap()
+                .post_meeting_asr_model_ref
+                .model_id,
+            "paraformer-v2"
+        );
+        assert_eq!(
+            candidate
+                .transcript_revisions
+                .iter()
+                .find(|revision| revision.revision == 1)
+                .unwrap()
+                .status,
+            TranscriptRevisionStatus::Rejected
+        );
+        assert_eq!(
+            candidate.processing_hold.as_ref().unwrap().job_id,
+            "job-new"
+        );
     }
 
     #[test]
