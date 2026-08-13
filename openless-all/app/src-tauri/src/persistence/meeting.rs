@@ -55,7 +55,7 @@ impl MeetingStore {
     }
 
     #[cfg(test)]
-    fn new_for_path(path: PathBuf) -> Self {
+    pub(crate) fn new_for_path(path: PathBuf) -> Self {
         Self { path }
     }
 

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -43,6 +44,14 @@ const POST_MEETING_POLL_MAX_SECS: u64 = 8 * 60 * 60;
 const POST_PROCESSING_WORKER_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 static POST_PROCESSING_CANCEL_FLAGS: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+type MeetingAudioPathResolver<'a> = dyn Fn(&str) -> anyhow::Result<PathBuf> + Sync + 'a;
+
+struct PostProcessingJobContext<'a> {
+    inner: Option<&'a Arc<Inner>>,
+    store: &'a MeetingStore,
+    audio_path_for_id: &'a MeetingAudioPathResolver<'a>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct PostProcessingCancellationRequest {
@@ -411,7 +420,23 @@ async fn run_post_processing_job(
     cancelled: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let store = MeetingStore::new().map_err(|error| error.to_string())?;
-    let record = current_post_processing_record(&store, meeting_id, job_id)?;
+    let audio_path_for_id = |id: &str| meeting_recording_existing_path_for_id(id);
+    let context = PostProcessingJobContext {
+        inner: Some(inner),
+        store: &store,
+        audio_path_for_id: &audio_path_for_id,
+    };
+    run_post_processing_job_with_context(&context, meeting_id, job_id, cancelled).await
+}
+
+async fn run_post_processing_job_with_context(
+    context: &PostProcessingJobContext<'_>,
+    meeting_id: &str,
+    job_id: &str,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let store = context.store;
+    let record = current_post_processing_record(store, meeting_id, job_id)?;
     let state = record.post_processing.as_ref().unwrap().clone();
     let model_id = if let Some(import_config) = record.import_config.as_ref() {
         validate_import_post_processing_route(&state, import_config)?
@@ -423,8 +448,11 @@ async fn run_post_processing_job(
     };
 
     if state.resolved_runtime_kind == MeetingAsrRuntimeKind::Local {
+        let inner = context.inner.ok_or_else(|| {
+            "postMeetingAsrRuntimeUnsupported: 本地会后 ASR 缺少运行时上下文".to_string()
+        })?;
         return run_local_import_post_processing_job(
-            inner, &store, record, state, meeting_id, job_id, cancelled,
+            context, inner, record, state, meeting_id, job_id, cancelled,
         )
         .await;
     }
@@ -432,9 +460,8 @@ async fn run_post_processing_job(
     let request_options = cloud_diarization_options(&state)?;
 
     let provider_task_id = if let Some(task_id) = resume_provider_task_id(&state)? {
-        update_post_processing_progress(
-            inner,
-            &store,
+        update_post_processing_job_progress(
+            context,
             meeting_id,
             job_id,
             MeetingPostProcessingStatus::Running,
@@ -443,26 +470,24 @@ async fn run_post_processing_job(
         )?;
         task_id
     } else {
-        update_post_processing_progress(
-            inner,
-            &store,
+        update_post_processing_job_progress(
+            context,
             meeting_id,
             job_id,
             MeetingPostProcessingStatus::PreparingAudio,
             Some(0.05),
             None,
         )?;
-        let path = meeting_recording_existing_path_for_id(meeting_id)
+        let path = (context.audio_path_for_id)(meeting_id)
             .map_err(|error| format!("meetingAudioUnavailable: {error}"))?;
         let source = MeetingAudioSource::from_path(&path)
             .map_err(|error| format!("meetingAudioInvalid: {error}"))?;
         source
             .inspect()
             .map_err(|error| format!("meetingAudioInvalid: {error}"))?;
-        ensure_job_not_cancelled(&store, meeting_id, job_id, &cancelled)?;
-        update_post_processing_progress(
-            inner,
-            &store,
+        ensure_job_not_cancelled(store, meeting_id, job_id, &cancelled)?;
+        update_post_processing_job_progress(
+            context,
             meeting_id,
             job_id,
             MeetingPostProcessingStatus::Uploading,
@@ -473,10 +498,9 @@ async fn run_post_processing_job(
             .upload_meeting_audio(source, Arc::clone(&cancelled))
             .await
             .map_err(|error| format!("postMeetingAsrUploadFailed: {error}"))?;
-        ensure_job_not_cancelled(&store, meeting_id, job_id, &cancelled)?;
-        update_post_processing_progress(
-            inner,
-            &store,
+        ensure_job_not_cancelled(store, meeting_id, job_id, &cancelled)?;
+        update_post_processing_job_progress(
+            context,
             meeting_id,
             job_id,
             MeetingPostProcessingStatus::Running,
@@ -487,9 +511,8 @@ async fn run_post_processing_job(
             .submit_async_task(&file_url, request_options)
             .await
             .map_err(|error| format!("postMeetingAsrSubmitFailed: {error}"))?;
-        update_post_processing_progress(
-            inner,
-            &store,
+        update_post_processing_job_progress(
+            context,
             meeting_id,
             job_id,
             MeetingPostProcessingStatus::Running,
@@ -499,18 +522,17 @@ async fn run_post_processing_job(
         task_id
     };
 
-    ensure_job_not_cancelled(&store, meeting_id, job_id, &cancelled)?;
+    ensure_job_not_cancelled(store, meeting_id, job_id, &cancelled)?;
     let poll_timeout = post_meeting_poll_timeout(record.duration_ms);
     let transcript = client
         .poll_async_task(&provider_task_id, poll_timeout, Arc::clone(&cancelled))
         .await
         .map_err(|error| format!("postMeetingAsrTaskFailed: {error}"))?;
-    ensure_job_not_cancelled(&store, meeting_id, job_id, &cancelled)?;
+    ensure_job_not_cancelled(store, meeting_id, job_id, &cancelled)?;
 
     let mut completed = if state.diarization_mode == MeetingDiarizationMode::Local {
-        update_post_processing_progress(
-            inner,
-            &store,
+        update_post_processing_job_progress(
+            context,
             meeting_id,
             job_id,
             MeetingPostProcessingStatus::LocalAnalyzing,
@@ -526,7 +548,7 @@ async fn run_post_processing_job(
             })?;
         crate::asr::local::speaker_diarization::ensure_package_ready(&local_model_id)
             .map_err(|error| format!("localDiarizationModelNotReady: {error:#}"))?;
-        let path = meeting_recording_existing_path_for_id(meeting_id)
+        let path = (context.audio_path_for_id)(meeting_id)
             .map_err(|error| format!("meetingAudioUnavailable: {error}"))?;
         let source = MeetingAudioSource::from_path(&path)
             .map_err(|error| format!("meetingAudioInvalid: {error}"))?;
@@ -544,10 +566,9 @@ async fn run_post_processing_job(
         .await
         .map_err(|error| format!("localDiarizationRuntimeFailed: worker join failed: {error}"))?
         .map_err(|error| format!("localDiarizationRuntimeFailed: {error:#}"))?;
-        ensure_job_not_cancelled(&store, meeting_id, job_id, &cancelled)?;
-        update_post_processing_progress(
-            inner,
-            &store,
+        ensure_job_not_cancelled(store, meeting_id, job_id, &cancelled)?;
+        update_post_processing_job_progress(
+            context,
             meeting_id,
             job_id,
             MeetingPostProcessingStatus::Applying,
@@ -555,7 +576,7 @@ async fn run_post_processing_job(
             Some(provider_task_id.clone()),
         )?;
         apply_local_post_processing_result(
-            &store,
+            store,
             meeting_id,
             job_id,
             &model_id,
@@ -565,9 +586,8 @@ async fn run_post_processing_job(
             local_output,
         )?
     } else {
-        update_post_processing_progress(
-            inner,
-            &store,
+        update_post_processing_job_progress(
+            context,
             meeting_id,
             job_id,
             MeetingPostProcessingStatus::Applying,
@@ -575,7 +595,7 @@ async fn run_post_processing_job(
             Some(provider_task_id.clone()),
         )?;
         apply_cloud_post_processing_result(
-            &store,
+            store,
             meeting_id,
             job_id,
             &model_id,
@@ -583,12 +603,7 @@ async fn run_post_processing_job(
             transcript,
         )?
     };
-    emit_post_processing_event(inner, &completed);
-    finish_post_processing_success(inner, &store, &mut completed)?;
-    let retention_count = inner.prefs.get().meeting_audio_retention_count;
-    store
-        .prune_audio_retention(retention_count)
-        .map_err(|error| error.to_string())?;
+    finish_post_processing_job(context, &mut completed)?;
     Ok(())
 }
 
@@ -615,28 +630,28 @@ fn validate_import_post_processing_route(
 }
 
 async fn run_local_import_post_processing_job(
+    context: &PostProcessingJobContext<'_>,
     inner: &Arc<Inner>,
-    store: &MeetingStore,
     record: MeetingRecord,
     state: MeetingPostProcessingState,
     meeting_id: &str,
     job_id: &str,
     cancelled: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    let store = context.store;
     let import_config = record.import_config.as_ref().ok_or_else(|| {
         "postMeetingAsrRuntimeUnsupported: 现场会议不支持本地会后 ASR".to_string()
     })?;
     ensure_job_not_cancelled(store, meeting_id, job_id, &cancelled)?;
-    update_post_processing_progress(
-        inner,
-        store,
+    update_post_processing_job_progress(
+        context,
         meeting_id,
         job_id,
         MeetingPostProcessingStatus::LocalAnalyzing,
         Some(0.1),
         None,
     )?;
-    let path = meeting_recording_existing_path_for_id(meeting_id)
+    let path = (context.audio_path_for_id)(meeting_id)
         .map_err(|error| format!("meetingAudioUnavailable: {error}"))?;
     let source = MeetingAudioSource::from_path(&path)
         .map_err(|error| format!("meetingAudioInvalid: {error}"))?;
@@ -652,9 +667,8 @@ async fn run_local_import_post_processing_job(
     )
     .await?;
     ensure_job_not_cancelled(store, meeting_id, job_id, &cancelled)?;
-    update_post_processing_progress(
-        inner,
-        store,
+    update_post_processing_job_progress(
+        context,
         meeting_id,
         job_id,
         MeetingPostProcessingStatus::Applying,
@@ -663,13 +677,46 @@ async fn run_local_import_post_processing_job(
     )?;
     let mut completed =
         apply_import_local_asr_result(store, meeting_id, job_id, segments, profiles, turns)?;
-    emit_post_processing_event(inner, &completed);
-    finish_post_processing_success(inner, store, &mut completed)?;
-    let retention_count = inner.prefs.get().meeting_audio_retention_count;
-    store
-        .prune_audio_retention(retention_count)
+    finish_post_processing_job(context, &mut completed)?;
+    Ok(())
+}
+
+fn finish_post_processing_job(
+    context: &PostProcessingJobContext<'_>,
+    completed: &mut MeetingRecord,
+) -> Result<(), String> {
+    let Some(inner) = context.inner else {
+        return Ok(());
+    };
+    emit_post_processing_event(inner, completed);
+    finish_post_processing_success(inner, context.store, completed)?;
+    context
+        .store
+        .prune_audio_retention(inner.prefs.get().meeting_audio_retention_count)
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn update_post_processing_job_progress(
+    context: &PostProcessingJobContext<'_>,
+    meeting_id: &str,
+    job_id: &str,
+    status: MeetingPostProcessingStatus,
+    progress: Option<f32>,
+    provider_task_id: Option<String>,
+) -> Result<MeetingRecord, String> {
+    let updated = persist_post_processing_progress(
+        context.store,
+        meeting_id,
+        job_id,
+        status,
+        progress,
+        provider_task_id,
+    )?;
+    if let Some(inner) = context.inner {
+        emit_post_processing_event(inner, &updated);
+    }
+    Ok(updated)
 }
 
 fn finish_post_processing_success(
@@ -805,8 +852,7 @@ fn ensure_job_not_cancelled(
     current_post_processing_record(store, meeting_id, job_id).map(|_| ())
 }
 
-fn update_post_processing_progress(
-    inner: &Arc<Inner>,
+fn persist_post_processing_progress(
     store: &MeetingStore,
     meeting_id: &str,
     job_id: &str,
@@ -846,7 +892,6 @@ fn update_post_processing_progress(
         })
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "postMeetingAsrJobCancelled: 后处理任务已取消或被替换".to_string())?;
-    emit_post_processing_event(inner, &updated);
     Ok(updated)
 }
 
@@ -1822,6 +1867,7 @@ mod tests {
         ));
         let partial_path = managed_dir.join("part-0001.wav.partial");
         let final_path = managed_dir.join("part-0001.wav");
+        let store_path = managed_dir.join("meetings.json");
         let result = async {
             crate::asr::meeting_audio_import::normalize_pcm_wav(
                 &probe,
@@ -1838,124 +1884,94 @@ mod tests {
                 .map_err(|_| "cloud post-meeting test WAV must be valid")?;
 
             for model_id in ["fun-asr", "paraformer-v2"] {
-                let client = build_post_meeting_dashscope_client(model_id)
-                    .map_err(|_| "cloud test credentials are unavailable")?;
-                let cancelled = Arc::new(AtomicBool::new(false));
-                let file_url = client
-                    .upload_meeting_audio(source.clone(), Arc::clone(&cancelled))
-                    .await
-                    .map_err(|_| "cloud test upload failed")?;
-                let task_id = client
-                    .submit_async_task(
-                        &file_url,
-                        DashScopeAsyncRequestOptions {
-                            diarization_enabled: true,
-                            speaker_count: Some(2),
-                        },
-                    )
-                    .await
-                    .map_err(|_| "cloud test submission failed")?;
-                let transcript = match client
-                    .poll_async_task(
-                        &task_id,
-                        Duration::from_secs(10 * 60),
-                        Arc::clone(&cancelled),
-                    )
-                    .await
-                {
-                    Ok(transcript) => transcript,
-                    Err(_) => {
-                        let _ = client.cancel_async_task(&task_id).await;
-                        return Err("cloud test polling or result parsing failed");
-                    }
-                };
-
-                if transcript.sentences.is_empty() {
-                    return Err("cloud test returned no sentences");
-                }
-                if !transcript.sentences.iter().all(|sentence| {
-                    !sentence.text.trim().is_empty()
-                        && sentence.begin_time_ms <= sentence.end_time_ms
-                        && sentence.end_time_ms <= info.duration_ms.saturating_add(5_000)
-                }) {
-                    return Err("cloud test returned an invalid sentence timeline");
-                }
-                let speaker_ids = transcript
-                    .sentences
-                    .iter()
-                    .filter_map(|sentence| sentence.speaker_id.as_deref())
-                    .filter(|speaker_id| !speaker_id.trim().is_empty())
-                    .collect::<std::collections::HashSet<_>>();
-                if speaker_ids.is_empty() {
-                    return Err(match model_id {
-                        "fun-asr" => "fun-asr cloud diarization returned no speakerId",
-                        "paraformer-v2" => {
-                            "paraformer-v2 cloud diarization returned no speakerId"
-                        }
-                        _ => "cloud diarization returned no speakerId",
-                    });
-                }
-
                 let mut candidate = record();
+                candidate.id = format!("meeting-cloud-worker-{model_id}");
+                candidate.duration_ms = Some(info.duration_ms);
                 let config = candidate.post_processing_config.as_mut().unwrap();
                 config.post_meeting_asr_model_ref.model_id = model_id.to_string();
                 config.diarization_mode = MeetingDiarizationMode::Cloud;
                 config.expected_speaker_count = Some(2);
                 prepare_post_processing_after_stop(&mut candidate, "2026-08-13T00:00:00Z")
-                    .map_err(|_| "cloud result revision setup failed")?;
-                let state = candidate.post_processing.as_mut().unwrap();
-                state.status = MeetingPostProcessingStatus::Applying;
-                state.provider_task_id = Some(task_id.clone());
-                state.model_ref.model_id = model_id.to_string();
-                let job_id = state.job_id.clone();
-                apply_cloud_result_transition(
-                    &mut candidate,
+                    .map_err(|_| "cloud worker revision setup failed")?;
+                let meeting_id = candidate.id.clone();
+                let job_id = candidate.post_processing.as_ref().unwrap().job_id.clone();
+                let store = MeetingStore::new_for_path(store_path.clone());
+                store
+                    .create(candidate)
+                    .map_err(|_| "cloud worker fixture persistence failed")?;
+                let audio_path_for_id = |_id: &str| Ok(final_path.clone());
+                let context = PostProcessingJobContext {
+                    inner: None,
+                    store: &store,
+                    audio_path_for_id: &audio_path_for_id,
+                };
+                run_post_processing_job_with_context(
+                    &context,
+                    &meeting_id,
                     &job_id,
-                    model_id,
-                    &task_id,
-                    &transcript,
-                    "2026-08-13T00:01:00Z",
+                    Arc::new(AtomicBool::new(false)),
                 )
-                .map_err(|_| "cloud result revision application failed")?;
+                .await
+                .map_err(|_| "cloud worker execution failed")?;
 
-                if candidate.active_transcript_revision != Some(1)
-                    || candidate
-                        .post_processing
-                        .as_ref()
-                        .map_or(true, |state| {
-                            state.status != MeetingPostProcessingStatus::Completed
-                        })
-                    || candidate.processing_hold.is_some()
+                let reopened = MeetingStore::new_for_path(store_path.clone());
+                let persisted = reopened
+                    .get(&meeting_id)
+                    .map_err(|_| "cloud worker result reload failed")?
+                    .ok_or("cloud worker result was not persisted")?;
+                let state = persisted
+                    .post_processing
+                    .as_ref()
+                    .ok_or("cloud worker post-processing state is missing")?;
+                let task_id = state
+                    .provider_task_id
+                    .as_deref()
+                    .ok_or("cloud worker provider task id is missing")?;
+                if state.status != MeetingPostProcessingStatus::Completed
+                    || state.model_ref.model_id != model_id
+                    || persisted.active_transcript_revision != Some(1)
+                    || persisted.processing_hold.is_some()
                 {
-                    return Err("cloud result revision did not activate atomically");
+                    return Err("cloud worker result did not complete atomically");
                 }
-                let active_revision = candidate
+                let active_revision = persisted
                     .transcript_revisions
                     .iter()
                     .find(|revision| revision.revision == 1)
-                    .ok_or("cloud result revision is missing")?;
+                    .ok_or("cloud worker revision is missing")?;
                 if active_revision.source != TranscriptRevisionSource::CloudPostprocess
                     || active_revision.status != TranscriptRevisionStatus::Active
-                    || active_revision.segments != candidate.transcript_segments
+                    || active_revision.segments != persisted.transcript_segments
                 {
-                    return Err("cloud result active revision is inconsistent");
+                    return Err("cloud worker active revision is inconsistent");
                 }
-                if candidate.speaker_profiles.len() != speaker_ids.len()
-                    || candidate.speaker_turns.len() != candidate.transcript_segments.len()
-                    || !candidate.transcript_segments.iter().all(|segment| {
-                        segment.speaker_id.is_some()
+                let speaker_ids = persisted
+                    .transcript_segments
+                    .iter()
+                    .filter_map(|segment| segment.speaker_id.as_deref())
+                    .collect::<std::collections::HashSet<_>>();
+                if speaker_ids.is_empty()
+                    || persisted.speaker_profiles.len() != speaker_ids.len()
+                    || persisted.speaker_turns.len() != persisted.transcript_segments.len()
+                    || !persisted.transcript_segments.iter().all(|segment| {
+                        !segment.text.trim().is_empty()
                             && segment.start_ms < segment.end_ms.unwrap_or_default()
+                            && segment.end_ms.unwrap_or_default()
+                                <= info.duration_ms.saturating_add(5_000)
                             && segment.metadata.as_ref().is_some_and(|metadata| {
                                 metadata.provider_id.as_deref()
                                     == Some(format!("bailian/{model_id}").as_str())
-                                    && metadata.provider_session_id.as_deref()
-                                        == Some(task_id.as_str())
+                                    && metadata.provider_session_id.as_deref() == Some(task_id)
                                     && metadata.provider_start_ms == Some(segment.start_ms)
                                     && metadata.provider_end_ms == segment.end_ms
                             })
                     })
                 {
-                    return Err("cloud result speaker or timeline mapping is inconsistent");
+                    return Err(match model_id {
+                        "fun-asr" => "fun-asr cloud worker result is inconsistent",
+                        "paraformer-v2" => "paraformer-v2 cloud worker result is inconsistent",
+                        _ => "cloud worker result is inconsistent",
+                    });
                 }
             }
             Ok::<(), &str>(())
