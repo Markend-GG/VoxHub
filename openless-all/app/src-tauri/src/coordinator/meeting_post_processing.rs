@@ -1895,6 +1895,68 @@ mod tests {
                         _ => "cloud diarization returned no speakerId",
                     });
                 }
+
+                let mut candidate = record();
+                let config = candidate.post_processing_config.as_mut().unwrap();
+                config.post_meeting_asr_model_ref.model_id = model_id.to_string();
+                config.diarization_mode = MeetingDiarizationMode::Cloud;
+                config.expected_speaker_count = Some(2);
+                prepare_post_processing_after_stop(&mut candidate, "2026-08-13T00:00:00Z")
+                    .map_err(|_| "cloud result revision setup failed")?;
+                let state = candidate.post_processing.as_mut().unwrap();
+                state.status = MeetingPostProcessingStatus::Applying;
+                state.provider_task_id = Some(task_id.clone());
+                state.model_ref.model_id = model_id.to_string();
+                let job_id = state.job_id.clone();
+                apply_cloud_result_transition(
+                    &mut candidate,
+                    &job_id,
+                    model_id,
+                    &task_id,
+                    &transcript,
+                    "2026-08-13T00:01:00Z",
+                )
+                .map_err(|_| "cloud result revision application failed")?;
+
+                if candidate.active_transcript_revision != Some(1)
+                    || candidate
+                        .post_processing
+                        .as_ref()
+                        .map_or(true, |state| {
+                            state.status != MeetingPostProcessingStatus::Completed
+                        })
+                    || candidate.processing_hold.is_some()
+                {
+                    return Err("cloud result revision did not activate atomically");
+                }
+                let active_revision = candidate
+                    .transcript_revisions
+                    .iter()
+                    .find(|revision| revision.revision == 1)
+                    .ok_or("cloud result revision is missing")?;
+                if active_revision.source != TranscriptRevisionSource::CloudPostprocess
+                    || active_revision.status != TranscriptRevisionStatus::Active
+                    || active_revision.segments != candidate.transcript_segments
+                {
+                    return Err("cloud result active revision is inconsistent");
+                }
+                if candidate.speaker_profiles.len() != speaker_ids.len()
+                    || candidate.speaker_turns.len() != candidate.transcript_segments.len()
+                    || !candidate.transcript_segments.iter().all(|segment| {
+                        segment.speaker_id.is_some()
+                            && segment.start_ms < segment.end_ms.unwrap_or_default()
+                            && segment.metadata.as_ref().is_some_and(|metadata| {
+                                metadata.provider_id.as_deref()
+                                    == Some(format!("bailian/{model_id}").as_str())
+                                    && metadata.provider_session_id.as_deref()
+                                        == Some(task_id.as_str())
+                                    && metadata.provider_start_ms == Some(segment.start_ms)
+                                    && metadata.provider_end_ms == segment.end_ms
+                            })
+                    })
+                {
+                    return Err("cloud result speaker or timeline mapping is inconsistent");
+                }
             }
             Ok::<(), &str>(())
         }
