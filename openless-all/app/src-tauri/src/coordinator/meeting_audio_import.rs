@@ -1980,12 +1980,10 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
-    #[tokio::test]
-    #[ignore = "requires configured Bailian credentials and OPENLESS_MEETING_CLOUD_ASR_TEST_WAV"]
-    async fn configured_fun_asr_import_persists_end_to_end_cloud_route() {
-        let source_path = std::env::var_os("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV")
-            .map(PathBuf::from)
-            .expect("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV must point to a PCM WAV");
+    async fn run_configured_cloud_import_fixture(
+        source_path: &std::path::Path,
+        model_id: &str,
+    ) -> Result<MeetingRecord, String> {
         let source_before = std::fs::read(&source_path).expect("import source WAV must be readable");
         let source_hash = Sha256::digest(&source_before);
         let source_modified = std::fs::metadata(&source_path)
@@ -2007,7 +2005,7 @@ mod tests {
                 title: "云端导入闭环".to_string(),
                 asr_model_ref: MeetingAsrModelRef {
                     provider_id: CLOUD_PROVIDER_ID.to_string(),
-                    model_id: "fun-asr".to_string(),
+                    model_id: model_id.to_string(),
                 },
                 diarization_mode: MeetingDiarizationMode::Off,
                 local_diarization_model_id: None,
@@ -2049,7 +2047,7 @@ mod tests {
                 .as_ref()
                 .is_none_or(|config| {
                     config.asr_model_ref.provider_id != CLOUD_PROVIDER_ID
-                        || config.asr_model_ref.model_id != "fun-asr"
+                        || config.asr_model_ref.model_id != model_id
                         || config.resolved_asr_runtime_kind != MeetingAsrRuntimeKind::Cloud
                         || config.diarization_mode != MeetingDiarizationMode::Off
                 })
@@ -2089,7 +2087,7 @@ mod tests {
                 .is_none_or(|state| {
                     state.status != MeetingPostProcessingStatus::Pending
                         || state.job_id != post_job_id
-                        || state.model_ref.model_id != "fun-asr"
+                        || state.model_ref.model_id != model_id
                         || state.resolved_runtime_kind != MeetingAsrRuntimeKind::Cloud
                 })
                 || transitioned
@@ -2129,6 +2127,7 @@ mod tests {
                 .iter()
                 .find(|revision| revision.revision == 1)
                 .ok_or("audio import revision is missing")?;
+            let expected_provider_id = format!("bailian/{model_id}");
             if persisted.status != MeetingStatus::Completed
                 || persisted.audio.state != MeetingAudioState::Retained
                 || !persisted.audio.retained
@@ -2143,7 +2142,7 @@ mod tests {
                 || !persisted.transcript_segments.iter().all(|segment| {
                     segment.speaker_id.is_none()
                         && segment.metadata.as_ref().is_some_and(|metadata| {
-                            metadata.provider_id.as_deref() == Some("bailian/fun-asr")
+                            metadata.provider_id.as_deref() == Some(expected_provider_id.as_str())
                                 && metadata.provider_session_id.as_deref()
                                     == Some(provider_task_id)
                         })
@@ -2151,7 +2150,7 @@ mod tests {
             {
                 return Err("audio import persisted result is inconsistent");
             }
-            Ok::<(), &str>(())
+            Ok::<MeetingRecord, &str>(persisted)
         }
         .await;
         let source_after = std::fs::read(&source_path).expect("import source WAV must remain readable");
@@ -2159,9 +2158,28 @@ mod tests {
             .and_then(|metadata| metadata.modified())
             .expect("import source WAV modification time must remain readable");
         let _ = std::fs::remove_dir_all(managed_dir);
-        assert_eq!(Sha256::digest(source_after), source_hash);
-        assert_eq!(source_modified_after, source_modified);
-        result.unwrap();
+        if Sha256::digest(source_after) != source_hash || source_modified_after != source_modified {
+            return Err("audio import modified the user source file".to_string());
+        }
+        result.map_err(str::to_string)
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires configured Bailian credentials and OPENLESS_MEETING_CLOUD_ASR_TEST_WAV"]
+    async fn configured_bailian_imports_persist_both_cloud_routes() {
+        let source_path = std::env::var_os("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV")
+            .map(PathBuf::from)
+            .expect("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV must point to a PCM WAV");
+        for model_id in ["fun-asr", "paraformer-v2"] {
+            let persisted = run_configured_cloud_import_fixture(&source_path, model_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                persisted.post_processing.as_ref().unwrap().model_ref.model_id,
+                model_id
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]
