@@ -277,7 +277,22 @@ export function renameMeetingSpeaker(
     return invokeOrMock(
         "rename_meeting_speaker",
         { meetingId, speakerId, displayName },
-        () => ({ ...mockMeetings[0], id: meetingId }),
+        () => {
+            const index = mockMeetings.findIndex(meeting => meeting.id === meetingId)
+            const meeting = index >= 0 ? mockMeetings[index] : mockMeetings[0]
+            const updated = {
+                ...meeting,
+                id: meetingId,
+                speakerProfiles: meeting.speakerProfiles?.map(profile => (
+                    profile.id === speakerId
+                        ? { ...profile, displayName, manuallyNamed: true }
+                        : profile
+                )),
+                updatedAt: new Date().toISOString(),
+            }
+            if (index >= 0) mockMeetings[index] = updated
+            return updated
+        },
     )
 }
 
