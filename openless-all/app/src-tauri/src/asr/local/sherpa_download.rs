@@ -1106,6 +1106,25 @@ mod tests {
     }
 
     #[test]
+    fn speaker_diarization_cancel_only_sets_namespaced_active_flag() {
+        let manager = SherpaDownloadManager::new();
+        let package_id = crate::asr::local::speaker_diarization::DEFAULT_PACKAGE_ID;
+        let asr_flag = Arc::new(AtomicBool::new(false));
+        let speaker_flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut flags = manager.cancel_flags.lock();
+            flags.insert(package_id.to_string(), Arc::clone(&asr_flag));
+            flags.insert(speaker_download_key(package_id), Arc::clone(&speaker_flag));
+        }
+
+        assert!(manager.speaker_diarization_is_active(package_id));
+        manager.cancel_speaker_diarization(package_id);
+
+        assert!(speaker_flag.load(Ordering::SeqCst));
+        assert!(!asr_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn release_archive_downloaded_bytes_uses_extracted_assets_after_archive_removed() {
         let alias = "qwen3-asr-0.6b-int8";
         let archive = sherpa::release_archive_for_alias(alias).expect("release archive");

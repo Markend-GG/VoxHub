@@ -17,6 +17,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use parking_lot::Mutex;
+use reqwest::header::{HeaderMap, CONTENT_RANGE};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -827,11 +828,20 @@ async fn try_download_range_append(
     if status.as_u16() != 200 && status.as_u16() != 206 {
         anyhow::bail!("HTTP {status} for {url}");
     }
+    if status.as_u16() == 206 {
+        validate_content_range(resp.headers(), range_start, range_end)?;
+    } else if range_start != 0 {
+        anyhow::bail!("server ignored non-zero range request for {url}");
+    }
     let effective_start = if status.as_u16() == 200 {
         0
     } else {
         range_start
     };
+    let expected_bytes = range_end
+        .checked_sub(effective_start)
+        .and_then(|length| length.checked_add(1))
+        .ok_or_else(|| anyhow::anyhow!("invalid response range {effective_start}-{range_end}"))?;
 
     // 截断 partial 到本次 attempt 的起点，再 seek 写入。
     // 老 append 实现的 bug：若上一次 attempt 已写了部分字节后失败，retry 拿到的还是
@@ -858,11 +868,19 @@ async fn try_download_range_append(
             anyhow::bail!("cancelled");
         }
         let bytes = chunk.context("read stream chunk failed")?;
+        if written.saturating_add(bytes.len() as u64) > expected_bytes {
+            anyhow::bail!(
+                "range response exceeded requested length: actual>{expected_bytes} expected={expected_bytes}"
+            );
+        }
         file.write_all(&bytes).await.context("write chunk failed")?;
         written += bytes.len() as u64;
         on_progress(effective_start + written);
     }
     file.flush().await.ok();
+    if written != expected_bytes {
+        anyhow::bail!("range response length mismatch: actual={written} expected={expected_bytes}");
+    }
     Ok(())
 }
 
@@ -941,6 +959,7 @@ async fn try_download_range_seek(
     if status.as_u16() != 206 {
         anyhow::bail!("expected HTTP 206 Partial Content for ranged GET, got {status}");
     }
+    validate_content_range(resp.headers(), range_start, range_end)?;
 
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -952,19 +971,73 @@ async fn try_download_range_seek(
         .await
         .with_context(|| format!("seek to {range_start} failed"))?;
 
+    let expected_bytes = range_end
+        .checked_sub(range_start)
+        .and_then(|length| length.checked_add(1))
+        .ok_or_else(|| anyhow::anyhow!("invalid response range {range_start}-{range_end}"))?;
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        if cancel.load(Ordering::SeqCst) {
-            file.flush().await.ok();
-            anyhow::bail!("cancelled");
+    let mut written = 0u64;
+    let result: Result<()> = async {
+        while let Some(chunk) = stream.next().await {
+            if cancel.load(Ordering::SeqCst) {
+                file.flush().await.ok();
+                anyhow::bail!("cancelled");
+            }
+            let bytes = chunk.context("read stream chunk failed")?;
+            if written.saturating_add(bytes.len() as u64) > expected_bytes {
+                anyhow::bail!(
+                    "range response exceeded requested length: actual>{expected_bytes} expected={expected_bytes}"
+                );
+            }
+            file.write_all(&bytes).await.context("write chunk failed")?;
+            written += bytes.len() as u64;
+            let new_total = bytes_in_file.fetch_add(bytes.len() as u64, Ordering::Relaxed)
+                + bytes.len() as u64;
+            on_progress(new_total);
         }
-        let bytes = chunk.context("read stream chunk failed")?;
-        file.write_all(&bytes).await.context("write chunk failed")?;
-        let new_total =
-            bytes_in_file.fetch_add(bytes.len() as u64, Ordering::Relaxed) + bytes.len() as u64;
-        on_progress(new_total);
+        file.flush().await.ok();
+        if written != expected_bytes {
+            anyhow::bail!(
+                "range response length mismatch: actual={written} expected={expected_bytes}"
+            );
+        }
+        Ok(())
     }
-    file.flush().await.ok();
+    .await;
+    if result.is_err() && written > 0 {
+        bytes_in_file.fetch_sub(written, Ordering::Relaxed);
+    }
+    result
+}
+
+fn validate_content_range(
+    headers: &HeaderMap,
+    expected_start: u64,
+    expected_end: u64,
+) -> Result<()> {
+    let raw = headers
+        .get(CONTENT_RANGE)
+        .context("HTTP 206 response is missing Content-Range")?
+        .to_str()
+        .context("HTTP 206 Content-Range is not valid ASCII")?;
+    let range = raw
+        .strip_prefix("bytes ")
+        .and_then(|value| value.split_once('/').map(|(range, _)| range))
+        .context("HTTP 206 Content-Range has invalid format")?;
+    let (start, end) = range
+        .split_once('-')
+        .context("HTTP 206 Content-Range has invalid byte range")?;
+    let actual_start = start
+        .parse::<u64>()
+        .context("HTTP 206 Content-Range start is invalid")?;
+    let actual_end = end
+        .parse::<u64>()
+        .context("HTTP 206 Content-Range end is invalid")?;
+    if actual_start != expected_start || actual_end != expected_end {
+        anyhow::bail!(
+            "HTTP 206 Content-Range mismatch: actual={actual_start}-{actual_end} expected={expected_start}-{expected_end}"
+        );
+    }
     Ok(())
 }
 
@@ -1037,7 +1110,58 @@ fn emit_cancelled(
 
 #[cfg(test)]
 mod tests {
-    use super::existing_file_is_complete;
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::{
+        download_one, existing_file_is_complete, try_download_range_append,
+        try_download_range_seek, CHUNK_SIZE,
+    };
+
+    async fn single_response_server(
+        body: &'static [u8],
+        content_range: String,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let headers = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: {}\r\nConnection: close\r\n\r\n",
+                body.len(), content_range
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+            socket.shutdown().await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}/model"), handle)
+    }
+
+    fn temp_download_path(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "openless-download-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root.join("model.onnx")
+    }
 
     #[test]
     fn complete_when_size_matches() {
@@ -1059,5 +1183,123 @@ mod tests {
         // HF 未给大小（size == 0）时退回「存在即信任」，避免反复重下。
         assert!(existing_file_is_complete(0, 0));
         assert!(existing_file_is_complete(999, 0));
+    }
+
+    #[tokio::test]
+    async fn truncated_range_response_is_not_accepted_as_complete() {
+        let destination = temp_download_path("truncated-range");
+        let partial = destination.with_extension("partial");
+        let (url, server) = single_response_server(b"abc", "bytes 0-3/4".to_string()).await;
+        let client = reqwest::Client::new();
+        let cancel = AtomicBool::new(false);
+        let progress: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(|_| {});
+
+        let error = try_download_range_append(&client, &url, &partial, 0, 3, &cancel, &progress)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("range response length mismatch"));
+        assert_eq!(std::fs::metadata(&partial).unwrap().len(), 3);
+        server.await.unwrap();
+        std::fs::remove_dir_all(destination.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mismatched_content_range_is_rejected_before_write() {
+        let destination = temp_download_path("wrong-content-range");
+        let partial = destination.with_extension("partial");
+        let (url, server) = single_response_server(b"abcd", "bytes 1-4/5".to_string()).await;
+        let client = reqwest::Client::new();
+        let cancel = AtomicBool::new(false);
+        let progress: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(|_| {});
+
+        let error = try_download_range_append(&client, &url, &partial, 0, 3, &cancel, &progress)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("Content-Range mismatch"));
+        assert!(!partial.exists());
+        server.await.unwrap();
+        std::fs::remove_dir_all(destination.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn truncated_parallel_range_rolls_back_temporary_progress() {
+        let destination = temp_download_path("truncated-parallel-range");
+        let partial = destination.with_extension("partial");
+        std::fs::File::create(&partial)
+            .unwrap()
+            .set_len(16)
+            .unwrap();
+        let (url, server) = single_response_server(b"ab", "bytes 8-10/16".to_string()).await;
+        let client = reqwest::Client::new();
+        let cancel = AtomicBool::new(false);
+        let downloaded = Arc::new(AtomicU64::new(11));
+        let progress: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(|_| {});
+
+        let error = try_download_range_seek(
+            &client,
+            &url,
+            &partial,
+            8,
+            10,
+            &cancel,
+            &downloaded,
+            &progress,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("range response length mismatch"));
+        assert_eq!(downloaded.load(Ordering::Relaxed), 11);
+        server.await.unwrap();
+        std::fs::remove_dir_all(destination.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn chunked_download_resumes_only_missing_range() {
+        let destination = temp_download_path("resume-range");
+        let partial = destination.with_extension("partial");
+        let index = partial.with_extension("partial.idx");
+        let total_size = CHUNK_SIZE + 3;
+        let mut partial_file = std::fs::File::create(&partial).unwrap();
+        partial_file.set_len(total_size).unwrap();
+        partial_file.write_all(b"abc").unwrap();
+        drop(partial_file);
+        std::fs::write(&index, b"0\n").unwrap();
+        let (url, server) = single_response_server(
+            b"xyz",
+            format!("bytes {CHUNK_SIZE}-{}/{}", total_size - 1, total_size),
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let progress: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(|_| {});
+
+        download_one(
+            &client,
+            &url,
+            &destination,
+            total_size,
+            Arc::new(AtomicBool::new(false)),
+            progress,
+        )
+        .await
+        .unwrap();
+
+        let request = server.await.unwrap();
+        let request = request.to_ascii_lowercase();
+        assert!(request.contains(&format!("range: bytes={CHUNK_SIZE}-{}", total_size - 1)));
+        assert!(!request.contains("range: bytes=0-"));
+        assert!(!partial.exists());
+        assert!(!index.exists());
+        let mut downloaded = std::fs::File::open(&destination).unwrap();
+        let mut prefix = [0u8; 3];
+        downloaded.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"abc");
+        downloaded.seek(SeekFrom::Start(CHUNK_SIZE)).unwrap();
+        let mut suffix = [0u8; 3];
+        downloaded.read_exact(&mut suffix).unwrap();
+        assert_eq!(&suffix, b"xyz");
+        std::fs::remove_dir_all(destination.parent().unwrap()).unwrap();
     }
 }
