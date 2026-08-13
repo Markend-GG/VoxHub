@@ -496,36 +496,16 @@ fn retry_from_managed_audio(
     let attempt = current_state.attempt.saturating_add(1);
     let updated = store
         .update_if(meeting_id, |record| {
-            if !current_import_state_matches(record, &expected_import_job_id, expected_status) {
-                return false;
-            }
-            reject_staging_revisions(record);
-            record.import_config = Some(next_config.clone());
-            record.post_processing_config = Some(post_processing_config_from_import(&next_config));
-            record.post_processing = Some(post_processing_state_from_import(
+            apply_managed_audio_retry_transition(
+                record,
+                &expected_import_job_id,
+                expected_status,
                 &next_config,
                 &post_job_id,
                 attempt,
+                &current_state.created_at,
                 &now,
-            ));
-            record.import_state = Some(MeetingImportState {
-                status: MeetingImportStatus::Transcribing,
-                import_job_id: expected_import_job_id.clone(),
-                progress: Some(IMPORT_ASR_PROGRESS_START),
-                attempt,
-                error_code: None,
-                error_message: None,
-                created_at: current_state.created_at.clone(),
-                updated_at: now.clone(),
-                completed_at: None,
-            });
-            record.processing_hold = Some(ProcessingHold {
-                job_id: post_job_id.clone(),
-                acquired_at: now.clone(),
-            });
-            record.status = MeetingStatus::Draft;
-            record.updated_at = now.clone();
-            true
+            )
         })
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "meeting audio import changed; refresh and retry".to_string())?;
@@ -536,6 +516,48 @@ fn retry_from_managed_audio(
         post_job_id,
     );
     Ok(updated)
+}
+
+fn apply_managed_audio_retry_transition(
+    record: &mut MeetingRecord,
+    expected_import_job_id: &str,
+    expected_status: MeetingImportStatus,
+    next_config: &MeetingImportConfig,
+    post_job_id: &str,
+    attempt: u32,
+    created_at: &str,
+    now: &str,
+) -> bool {
+    if !current_import_state_matches(record, expected_import_job_id, expected_status) {
+        return false;
+    }
+    reject_staging_revisions(record);
+    record.import_config = Some(next_config.clone());
+    record.post_processing_config = Some(post_processing_config_from_import(next_config));
+    record.post_processing = Some(post_processing_state_from_import(
+        next_config,
+        post_job_id,
+        attempt,
+        now,
+    ));
+    record.import_state = Some(MeetingImportState {
+        status: MeetingImportStatus::Transcribing,
+        import_job_id: expected_import_job_id.to_string(),
+        progress: Some(IMPORT_ASR_PROGRESS_START),
+        attempt,
+        error_code: None,
+        error_message: None,
+        created_at: created_at.to_string(),
+        updated_at: now.to_string(),
+        completed_at: None,
+    });
+    record.processing_hold = Some(ProcessingHold {
+        job_id: post_job_id.to_string(),
+        acquired_at: now.to_string(),
+    });
+    record.status = MeetingStatus::Draft;
+    record.updated_at = now.to_string();
+    true
 }
 
 fn retry_from_source_selection(
@@ -1655,6 +1677,7 @@ fn speaker_display_name(speaker_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{TranscriptRevision, TranscriptRevisionSource};
 
     fn import_record_for_test(job_id: &str) -> MeetingRecord {
         MeetingRecord {
@@ -1786,6 +1809,99 @@ mod tests {
         assert!(error.contains("已失效"));
         assert!(dir.join("会议录音.wav").exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn managed_audio_retry_changes_model_attempt_and_revision_atomically() {
+        let mut record = import_record_for_test("import-job-old");
+        record.import_state.as_mut().unwrap().status = MeetingImportStatus::Failed;
+        record.import_config = Some(MeetingImportConfig {
+            source_file_name: "meeting.wav".to_string(),
+            source_format: "wav".to_string(),
+            asr_model_ref: MeetingAsrModelRef {
+                provider_id: CLOUD_PROVIDER_ID.to_string(),
+                model_id: "fun-asr".to_string(),
+            },
+            resolved_asr_runtime_kind: MeetingAsrRuntimeKind::Cloud,
+            diarization_mode: MeetingDiarizationMode::Off,
+            local_diarization_model_id: None,
+            expected_speaker_count: None,
+            generate_summary: false,
+            processing_revision: 1,
+        });
+        record.transcript_revisions.push(TranscriptRevision {
+            revision: 1,
+            source: TranscriptRevisionSource::Imported,
+            status: TranscriptRevisionStatus::Staging,
+            segments: Vec::new(),
+            created_at: "2026-08-13T00:00:01Z".to_string(),
+        });
+        let next_config = MeetingImportConfig {
+            source_file_name: "meeting.wav".to_string(),
+            source_format: "wav".to_string(),
+            asr_model_ref: MeetingAsrModelRef {
+                provider_id: CLOUD_PROVIDER_ID.to_string(),
+                model_id: "paraformer-v2".to_string(),
+            },
+            resolved_asr_runtime_kind: MeetingAsrRuntimeKind::Cloud,
+            diarization_mode: MeetingDiarizationMode::Off,
+            local_diarization_model_id: None,
+            expected_speaker_count: None,
+            generate_summary: false,
+            processing_revision: 2,
+        };
+
+        assert!(apply_managed_audio_retry_transition(
+            &mut record,
+            "import-job-old",
+            MeetingImportStatus::Failed,
+            &next_config,
+            "post-job-new",
+            2,
+            "2026-08-13T00:00:00Z",
+            "2026-08-13T00:01:00Z",
+        ));
+        assert!(!apply_managed_audio_retry_transition(
+            &mut record,
+            "import-job-old",
+            MeetingImportStatus::Failed,
+            &next_config,
+            "post-job-duplicate",
+            3,
+            "2026-08-13T00:00:00Z",
+            "2026-08-13T00:02:00Z",
+        ));
+
+        let import_config = record.import_config.as_ref().unwrap();
+        assert_eq!(import_config.asr_model_ref.model_id, "paraformer-v2");
+        assert_eq!(import_config.processing_revision, 2);
+        let import_state = record.import_state.as_ref().unwrap();
+        assert_eq!(import_state.status, MeetingImportStatus::Transcribing);
+        assert_eq!(import_state.import_job_id, "import-job-old");
+        assert_eq!(import_state.attempt, 2);
+        assert_eq!(import_state.error_code, None);
+        assert_eq!(import_state.error_message, None);
+        let post_state = record.post_processing.as_ref().unwrap();
+        assert_eq!(post_state.job_id, "post-job-new");
+        assert_eq!(post_state.model_ref.model_id, "paraformer-v2");
+        assert_eq!(post_state.attempt, 2);
+        assert_eq!(post_state.processing_revision, 2);
+        assert_eq!(
+            record
+                .post_processing_config
+                .as_ref()
+                .unwrap()
+                .processing_revision,
+            2
+        );
+        assert_eq!(
+            record.transcript_revisions[0].status,
+            TranscriptRevisionStatus::Rejected
+        );
+        assert_eq!(
+            record.processing_hold.as_ref().unwrap().job_id,
+            "post-job-new"
+        );
     }
 
     #[test]
