@@ -589,4 +589,42 @@ mod tests {
         assert_eq!(std::fs::read(&source).unwrap(), original);
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn normalize_atomic_commit_failure_removes_partial_and_preserves_source() {
+        let dir = temp_dir();
+        let source = dir.join("source.wav");
+        let partial = dir.join("job.partial");
+        let final_path = dir.join("managed.wav");
+        std::fs::write(&source, wav(1, 16_000, &[[1, 0], [2, 0]])).unwrap();
+        let original = std::fs::read(&source).unwrap();
+        let probe = probe_pcm_wav(&source).unwrap();
+        let mut final_path_occupied = false;
+
+        let error = normalize_pcm_wav(
+            &probe,
+            &partial,
+            &final_path,
+            &AtomicBool::new(false),
+            |progress| {
+                if progress == 1.0 && !final_path_occupied {
+                    std::fs::create_dir(&final_path).unwrap();
+                    std::fs::write(final_path.join("occupied"), b"occupied").unwrap();
+                    final_path_occupied = true;
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("commit managed meeting audio failed"));
+        assert!(!partial.exists());
+        assert_eq!(
+            std::fs::read(final_path.join("occupied")).unwrap(),
+            b"occupied"
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
