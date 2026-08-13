@@ -1800,6 +1800,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(managed_dir);
     }
 
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires OPENLESS_MEETING_DIARIZATION_TEST_WAV and installed local ASR/diarization models"]
+    async fn installed_local_diarization_and_batch_asr_keep_speaker_timeline() {
+        let path = std::env::var_os("OPENLESS_MEETING_DIARIZATION_TEST_WAV")
+            .map(PathBuf::from)
+            .expect("OPENLESS_MEETING_DIARIZATION_TEST_WAV must point to a two-speaker PCM WAV");
+        let probe = probe_pcm_wav(&path).unwrap();
+        let managed_dir = std::env::temp_dir().join(format!(
+            "meeting-local-diarization-integration-{}",
+            Uuid::new_v4()
+        ));
+        let partial_path = managed_dir.join("part-0001.wav.partial");
+        let final_path = managed_dir.join("part-0001.wav");
+        normalize_pcm_wav(
+            &probe,
+            &partial_path,
+            &final_path,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        let source = MeetingAudioSource::from_path(&final_path).unwrap();
+        let info = source.inspect().unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let diarization = crate::asr::local::speaker_diarization_runtime::run_local_diarization(
+            source.clone(),
+            crate::asr::local::speaker_diarization::DEFAULT_PACKAGE_ID,
+            Some(2),
+            Arc::clone(&cancelled),
+        )
+        .unwrap();
+
+        assert_eq!(diarization.detected_speaker_count, 2);
+        assert!(diarization.turns.iter().all(|turn| {
+            turn.start_ms < turn.end_ms
+                && turn.end_ms <= info.duration_ms
+                && matches!(turn.speaker_id.as_str(), "speaker-0" | "speaker-1")
+        }));
+        let windows = build_speaker_windows(&diarization.turns, info.duration_ms, |_, _| Ok(None))
+            .unwrap();
+        assert!(windows.iter().all(|window| {
+            window.start_ms < window.end_ms
+                && window.end_ms <= info.duration_ms
+                && window.speaker_id.is_some()
+        }));
+
+        let model_ref = MeetingAsrModelRef {
+            provider_id: LOCAL_PROVIDER_ID.to_string(),
+            model_id: crate::asr::local::sherpa::DEFAULT_MODEL_ALIAS.to_string(),
+        };
+        let runtime = Arc::new(crate::asr::local::SherpaOnnxRuntime::new());
+        let transcriber = MeetingBatchTranscriber {
+            runtime: Arc::clone(&runtime),
+            source,
+            model_ref: &model_ref,
+            language_hint: "zh",
+            job_id: "installed-local-diarization",
+            cancelled,
+        };
+        let segments = transcriber.transcribe(windows).await.unwrap();
+
+        assert!(segments.iter().all(|segment| {
+            let Some(speaker_id) = segment.speaker_id.as_deref() else {
+                return false;
+            };
+            segment.speaker_label == speaker_display_name(speaker_id)
+                && segment.start_ms < segment.end_ms.unwrap_or_default()
+                && segment.end_ms.is_some_and(|end_ms| end_ms <= info.duration_ms)
+                && segment.metadata.as_ref().is_some_and(|metadata| {
+                    metadata.provider_id.as_deref()
+                        == Some("sherpa-onnx-local/sense-voice-small-zh")
+                        && metadata.provider_session_id.as_deref()
+                            == Some("installed-local-diarization")
+                        && metadata.provider_start_ms == Some(segment.start_ms)
+                        && metadata.provider_end_ms == segment.end_ms
+                })
+        }));
+        let transcript_speakers = segments
+            .iter()
+            .filter_map(|segment| segment.speaker_id.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            transcript_speakers.len(),
+            2,
+            "expected both synthetic speakers in transcript segments: {segments:#?}"
+        );
+
+        runtime.release_now().await.unwrap();
+        let _ = std::fs::remove_dir_all(managed_dir);
+    }
+
     #[test]
     fn registry_only_exposes_supported_cloud_and_offline_local_models() {
         let models = list_meeting_file_asr_models();
