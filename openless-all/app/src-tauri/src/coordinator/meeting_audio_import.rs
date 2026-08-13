@@ -1402,7 +1402,10 @@ pub(super) async fn run_local_meeting_file_asr(
         let profiles = profiles_from_turns(&output.turns);
         (windows, output.turns, profiles)
     } else {
-        (bounded_windows(info.duration_ms), Vec::new(), Vec::new())
+        let windows = build_bounded_windows(info.duration_ms, |window_start_ms, target_ms| {
+            find_silence_split_ms(&source, window_start_ms, target_ms, &cancelled)
+        })?;
+        (windows, Vec::new(), Vec::new())
     };
     let transcriber = MeetingBatchTranscriber {
         runtime: Arc::clone(runtime),
@@ -1495,11 +1498,30 @@ fn local_window_timeout(duration_ms: u64) -> Duration {
     Duration::from_secs(duration_ms.div_ceil(1000).saturating_add(20).max(30))
 }
 
+#[cfg(test)]
 fn bounded_windows(duration_ms: u64) -> Vec<MeetingAsrWindow> {
+    build_bounded_windows(duration_ms, |_, _| Ok(None))
+        .expect("hard-bounded meeting windows cannot fail")
+}
+
+fn build_bounded_windows<F>(
+    duration_ms: u64,
+    mut find_split: F,
+) -> Result<Vec<MeetingAsrWindow>, String>
+where
+    F: FnMut(u64, u64) -> Result<Option<u64>, String>,
+{
     let mut windows = Vec::new();
     let mut start_ms = 0;
     while start_ms < duration_ms {
-        let end_ms = start_ms.saturating_add(LOCAL_WINDOW_MS).min(duration_ms);
+        let hard_end_ms = start_ms.saturating_add(LOCAL_WINDOW_MS).min(duration_ms);
+        let end_ms = if hard_end_ms < duration_ms {
+            find_split(start_ms, hard_end_ms)?
+                .filter(|split_ms| *split_ms > start_ms && *split_ms <= hard_end_ms)
+                .unwrap_or(hard_end_ms)
+        } else {
+            hard_end_ms
+        };
         windows.push(MeetingAsrWindow {
             start_ms,
             end_ms,
@@ -1508,7 +1530,7 @@ fn bounded_windows(duration_ms: u64) -> Vec<MeetingAsrWindow> {
         });
         start_ms = end_ms;
     }
-    windows
+    Ok(windows)
 }
 
 fn build_speaker_windows<F>(
@@ -2492,6 +2514,44 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[tokio::test]
+    #[ignore = "requires a >30s OPENLESS_MEETING_ASR_TEST_WAV and an installed offline sherpa model"]
+    async fn installed_local_asr_import_persists_multiple_bounded_windows() {
+        let source_path = std::env::var_os("OPENLESS_MEETING_ASR_TEST_WAV")
+            .map(PathBuf::from)
+            .expect("OPENLESS_MEETING_ASR_TEST_WAV must point to a PCM WAV");
+        let probe = probe_pcm_wav(&source_path).expect("import source WAV must be valid");
+        assert!(
+            probe.duration_ms > LOCAL_WINDOW_MS,
+            "OPENLESS_MEETING_ASR_TEST_WAV must be longer than 30 seconds"
+        );
+
+        let persisted = run_installed_local_import_fixture(
+            &source_path,
+            MeetingDiarizationMode::Off,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(persisted.transcript_segments.len() >= 2);
+        assert!(persisted
+            .transcript_segments
+            .windows(2)
+            .all(|segments| segments[0].start_ms < segments[1].start_ms));
+        assert!(persisted.transcript_segments.iter().all(|segment| {
+            segment.end_ms.is_some_and(|end_ms| {
+                end_ms <= probe.duration_ms
+                    && end_ms.saturating_sub(segment.start_ms) <= LOCAL_WINDOW_MS
+                    && segment.metadata.as_ref().is_some_and(|metadata| {
+                        metadata.provider_start_ms == Some(segment.start_ms)
+                            && metadata.provider_end_ms == Some(end_ms)
+                    })
+            })
+        }));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
     #[ignore = "requires OPENLESS_MEETING_DIARIZATION_TEST_WAV and installed local ASR/diarization models"]
     async fn installed_local_diarization_import_persists_speaker_timeline() {
         let source_path = std::env::var_os("OPENLESS_MEETING_DIARIZATION_TEST_WAV")
@@ -2795,6 +2855,27 @@ mod tests {
         assert_eq!(windows.len(), 240);
         assert_eq!(windows.first().unwrap().start_ms, 0);
         assert_eq!(windows.last().unwrap().end_ms, 7_200_000);
+        assert!(windows
+            .iter()
+            .all(|window| window.end_ms - window.start_ms <= LOCAL_WINDOW_MS));
+    }
+
+    #[test]
+    fn bounded_windows_prefer_nearby_silence_and_preserve_absolute_timestamps() {
+        let mut requested_targets = Vec::new();
+        let windows = build_bounded_windows(70_000, |start_ms, target_ms| {
+            requested_targets.push((start_ms, target_ms));
+            Ok(Some(target_ms - 2_000))
+        })
+        .unwrap();
+
+        assert_eq!(requested_targets, vec![(0, 30_000), (28_000, 58_000)]);
+        assert_eq!(windows[0].start_ms, 0);
+        assert_eq!(windows[0].end_ms, 28_000);
+        assert_eq!(windows[1].start_ms, 28_000);
+        assert_eq!(windows[1].end_ms, 56_000);
+        assert_eq!(windows[2].start_ms, 56_000);
+        assert_eq!(windows[2].end_ms, 70_000);
         assert!(windows
             .iter()
             .all(|window| window.end_ms - window.start_ms <= LOCAL_WINDOW_MS));
