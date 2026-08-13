@@ -5,13 +5,15 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
+use tauri_plugin_dialog::DialogExt;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::types::{
-    MeetingAudioState, MeetingListItem, MeetingStatus, PostMeetingAsrModelDescriptor,
-    RetryMeetingPostProcessingOptions, StartMeetingRecordingOptions, TranscriptSegment,
-    TranscriptSegmentSource,
+    MeetingAsrModelDescriptor, MeetingAudioSelection, MeetingAudioState, MeetingListItem,
+    MeetingStatus, PostMeetingAsrModelDescriptor, RetryMeetingAudioImportOptions,
+    RetryMeetingPostProcessingOptions, StartMeetingAudioImportOptions,
+    StartMeetingRecordingOptions, TranscriptSegment, TranscriptSegmentSource,
 };
 
 const WAV_HEADER_BYTES: u64 = 44;
@@ -73,16 +75,34 @@ pub fn update_meeting_record(record: MeetingRecord) -> Result<MeetingRecord, Str
 }
 
 #[tauri::command]
-pub fn delete_meeting_record(id: String) -> Result<(), String> {
+pub async fn delete_meeting_record(id: String) -> Result<(), String> {
     validate_meeting_id(&id)?;
     let store = MeetingStore::new().map_err(|e| e.to_string())?;
-    let mut cancellation = None;
+    let record = store
+        .get(&id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    ensure_meeting_record_is_not_active(&record)?;
+    let import_job_id = crate::coordinator::request_import_stop_for_deletion(&record);
+    let post_processing = crate::coordinator::request_post_processing_stop_for_deletion(&record);
+    if let Some(import_job_id) = import_job_id.as_deref() {
+        crate::coordinator::wait_for_import_worker_exit(import_job_id).await?;
+    }
+    if let Some(request) = post_processing.as_ref() {
+        crate::coordinator::wait_for_post_processing_worker_exit(request).await?;
+    }
+
+    let mut import_cancellation = None;
     store
         .delete_with_cleanup(
             &id,
             |record| {
                 ensure_meeting_record_is_not_active(record).map_err(anyhow::Error::msg)?;
-                cancellation = crate::coordinator::cancel_post_processing_for_deletion(
+                let _ = crate::coordinator::cancel_post_processing_for_deletion(
+                    record,
+                    &Utc::now().to_rfc3339(),
+                );
+                import_cancellation = crate::coordinator::cancel_import_for_deletion(
                     record,
                     &Utc::now().to_rfc3339(),
                 );
@@ -94,8 +114,8 @@ pub fn delete_meeting_record(id: String) -> Result<(), String> {
             },
         )
         .map_err(|e| e.to_string())?;
-    if let Some(cancellation) = cancellation {
-        crate::coordinator::dispatch_post_processing_cancellation(cancellation);
+    if let Some(import_job_id) = import_cancellation {
+        crate::coordinator::cleanup_import_after_deletion(&import_job_id);
     }
     Ok(())
 }
@@ -155,6 +175,60 @@ pub fn list_post_meeting_asr_models(
     coord: CoordinatorState<'_>,
 ) -> Vec<PostMeetingAsrModelDescriptor> {
     coord.list_post_meeting_asr_models()
+}
+
+#[tauri::command]
+pub async fn choose_meeting_audio_file(
+    app: AppHandle,
+    coord: CoordinatorState<'_>,
+) -> Result<Option<MeetingAudioSelection>, String> {
+    let selected = tokio::task::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("PCM WAV audio", &["wav"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|error| format!("meetingAudioDialogFailed: {error}"))?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|error| format!("meetingAudioSelectionInvalid: {error}"))?;
+    coord.register_meeting_audio_selection(path).map(Some)
+}
+
+#[tauri::command]
+pub fn list_meeting_file_asr_models(coord: CoordinatorState<'_>) -> Vec<MeetingAsrModelDescriptor> {
+    coord.list_meeting_file_asr_models()
+}
+
+#[tauri::command]
+pub fn start_meeting_audio_import(
+    options: StartMeetingAudioImportOptions,
+    coord: CoordinatorState<'_>,
+) -> Result<MeetingRecord, String> {
+    coord.start_meeting_audio_import(options)
+}
+
+#[tauri::command]
+pub fn cancel_meeting_audio_import(
+    id: String,
+    coord: CoordinatorState<'_>,
+) -> Result<MeetingRecord, String> {
+    validate_meeting_id(&id)?;
+    coord.cancel_meeting_audio_import(id)
+}
+
+#[tauri::command]
+pub fn retry_meeting_audio_import(
+    id: String,
+    options: Option<RetryMeetingAudioImportOptions>,
+    coord: CoordinatorState<'_>,
+) -> Result<MeetingRecord, String> {
+    validate_meeting_id(&id)?;
+    coord.retry_meeting_audio_import(id, options)
 }
 
 #[tauri::command]
@@ -1100,6 +1174,8 @@ mod tests {
             realtime_asr: None,
             post_processing_config: None,
             post_processing: None,
+            import_config: None,
+            import_state: None,
             transcript_revisions: Vec::new(),
             active_transcript_revision: None,
             speaker_profiles: Vec::new(),

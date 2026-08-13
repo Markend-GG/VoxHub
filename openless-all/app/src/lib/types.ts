@@ -406,6 +406,19 @@ export interface PostMeetingAsrModelDescriptor extends MeetingAsrModelRef {
   isDefault: boolean;
 }
 
+export type MeetingAsrModelReadiness = 'ready' | 'missing' | 'unavailable';
+
+export interface MeetingAsrModelDescriptor extends MeetingAsrModelRef {
+  displayName: string;
+  runtimeKind: MeetingAsrRuntimeKind;
+  supportsMeetingFile: boolean;
+  supportsDiarization: boolean;
+  supportsSpeakerCount: boolean;
+  readiness: MeetingAsrModelReadiness;
+  readinessMessage: string | null;
+  isDefault: boolean;
+}
+
 export type MeetingDiarizationMode = 'off' | 'cloud' | 'local';
 
 export interface DiarizationSettings {
@@ -512,6 +525,81 @@ export interface RetryMeetingPostProcessingOptions {
     | { mode: 'fixed'; count: number };
 }
 
+export interface MeetingAudioSelection {
+  selectionToken: string;
+  fileName: string;
+  format: string;
+  sizeBytes: number;
+  durationMs: number;
+  channels: number;
+  sampleRate: number;
+  bitsPerSample: number;
+}
+
+export interface StartMeetingAudioImportOptions {
+  selectionToken: string;
+  title: string;
+  asrModelRef: MeetingAsrModelRef;
+  diarizationMode: MeetingDiarizationMode;
+  localDiarizationModelId: string | null;
+  expectedSpeakerCount: number | null;
+  generateSummary: boolean;
+}
+
+export interface RetryMeetingAudioImportOptions {
+  selectionToken?: string | null;
+  asrModelRef?: MeetingAsrModelRef | null;
+  diarizationMode?: MeetingDiarizationMode | null;
+  localDiarizationModelId?: string | null;
+  expectedSpeakerCount?:
+    | { mode: 'auto' }
+    | { mode: 'fixed'; count: number };
+  generateSummary?: boolean | null;
+}
+
+export interface MeetingImportConfig {
+  sourceFileName: string;
+  sourceFormat: string;
+  asrModelRef: MeetingAsrModelRef;
+  resolvedAsrRuntimeKind: MeetingAsrRuntimeKind;
+  diarizationMode: MeetingDiarizationMode;
+  localDiarizationModelId: string | null;
+  expectedSpeakerCount: number | null;
+  generateSummary: boolean;
+  processingRevision: number;
+}
+
+export type MeetingImportStatus =
+  | 'selected'
+  | 'validating'
+  | 'importing'
+  | 'ready'
+  | 'transcribing'
+  | 'applying'
+  | 'summarizing'
+  | 'completed'
+  | 'failed'
+  | 'cancelling'
+  | 'cancelled';
+
+export interface MeetingImportState {
+  status: MeetingImportStatus;
+  importJobId: string;
+  progress: number | null;
+  attempt: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export interface MeetingImportEvent {
+  meetingId: string;
+  state: MeetingImportState;
+  meeting: MeetingRecord;
+}
+
 export interface MeetingPostProcessingEvent {
   meetingId: string;
   state: MeetingPostProcessingState;
@@ -531,6 +619,8 @@ export interface MeetingRecord {
   realtimeAsr?: MeetingRealtimeAsrSnapshot | null;
   postProcessingConfig?: MeetingPostProcessingConfig | null;
   postProcessing?: MeetingPostProcessingState | null;
+  importConfig?: MeetingImportConfig | null;
+  importState?: MeetingImportState | null;
   transcriptRevisions?: TranscriptRevision[];
   activeTranscriptRevision?: number | null;
   speakerProfiles?: SpeakerProfile[];

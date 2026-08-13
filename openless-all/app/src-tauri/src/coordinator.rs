@@ -74,6 +74,7 @@ mod capsule_focus;
 mod dictation;
 mod hotkey_loops;
 mod meeting;
+mod meeting_audio_import;
 mod meeting_post_processing;
 mod meeting_summary;
 mod polish_flow;
@@ -92,8 +93,13 @@ pub(crate) use asr_wiring::whisper_request_format;
 use capsule_focus::*;
 use hotkey_loops::*;
 use meeting::*;
+pub(crate) use meeting_audio_import::{
+    cancel_import_for_deletion, cleanup_import_after_deletion, request_import_stop_for_deletion,
+    wait_for_import_worker_exit,
+};
 pub(crate) use meeting_post_processing::{
-    cancel_post_processing_for_deletion, dispatch_post_processing_cancellation,
+    cancel_post_processing_for_deletion, request_post_processing_stop_for_deletion,
+    wait_for_post_processing_worker_exit,
 };
 use meeting_summary::*;
 use polish_flow::*;
@@ -1228,6 +1234,9 @@ impl Coordinator {
 
     pub fn bind_app(&self, handle: AppHandle) {
         *self.inner.app.lock() = Some(handle);
+        if let Err(error) = meeting_audio_import::recover_meeting_audio_imports(&self.inner) {
+            log::warn!("[meeting-audio-import] recover jobs failed: {error}");
+        }
         if let Err(error) = meeting_post_processing::resume_post_processing_jobs(&self.inner) {
             log::warn!("[meeting-post-processing] resume jobs failed: {error}");
         }
@@ -2038,6 +2047,36 @@ impl Coordinator {
 
     pub fn list_post_meeting_asr_models(&self) -> Vec<crate::types::PostMeetingAsrModelDescriptor> {
         meeting_post_processing::list_post_meeting_asr_models()
+    }
+
+    pub fn list_meeting_file_asr_models(&self) -> Vec<crate::types::MeetingAsrModelDescriptor> {
+        meeting_audio_import::list_meeting_file_asr_models()
+    }
+
+    pub fn register_meeting_audio_selection(
+        &self,
+        path: std::path::PathBuf,
+    ) -> Result<crate::types::MeetingAudioSelection, String> {
+        meeting_audio_import::register_meeting_audio_selection(path)
+    }
+
+    pub fn start_meeting_audio_import(
+        &self,
+        options: crate::types::StartMeetingAudioImportOptions,
+    ) -> Result<MeetingRecord, String> {
+        meeting_audio_import::start_meeting_audio_import(&self.inner, options)
+    }
+
+    pub fn cancel_meeting_audio_import(&self, id: String) -> Result<MeetingRecord, String> {
+        meeting_audio_import::cancel_meeting_audio_import(&self.inner, &id)
+    }
+
+    pub fn retry_meeting_audio_import(
+        &self,
+        id: String,
+        options: Option<crate::types::RetryMeetingAudioImportOptions>,
+    ) -> Result<MeetingRecord, String> {
+        meeting_audio_import::retry_meeting_audio_import(&self.inner, &id, options)
     }
 
     pub async fn pause_meeting_recording(

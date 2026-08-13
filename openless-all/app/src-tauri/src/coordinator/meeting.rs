@@ -161,6 +161,8 @@ impl MeetingSession {
                 realtime_asr: None,
                 post_processing_config: None,
                 post_processing: None,
+                import_config: None,
+                import_state: None,
                 transcript_revisions: Vec::new(),
                 active_transcript_revision: None,
                 speaker_profiles: Vec::new(),

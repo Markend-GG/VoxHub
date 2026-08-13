@@ -20,11 +20,11 @@ use crate::persistence::{
 };
 use crate::types::{
     ExpectedSpeakerCountOverride, MeetingAsrModelRef, MeetingAsrRuntimeKind,
-    MeetingDiarizationMode, MeetingPostProcessingConfig, MeetingPostProcessingEvent,
-    MeetingPostProcessingState, MeetingPostProcessingStatus, MeetingRecord,
-    PostMeetingAsrModelDescriptor, ProcessingHold, RetryMeetingPostProcessingOptions,
-    SpeakerProfile, SpeakerTurn, StartMeetingRecordingOptions, TranscriptRevision,
-    TranscriptRevisionSource, TranscriptRevisionStatus, TranscriptSegment,
+    MeetingDiarizationMode, MeetingImportStatus, MeetingPostProcessingConfig,
+    MeetingPostProcessingEvent, MeetingPostProcessingState, MeetingPostProcessingStatus,
+    MeetingRecord, MeetingStatus, PostMeetingAsrModelDescriptor, ProcessingHold,
+    RetryMeetingPostProcessingOptions, SpeakerProfile, SpeakerTurn, StartMeetingRecordingOptions,
+    TranscriptRevision, TranscriptRevisionSource, TranscriptRevisionStatus, TranscriptSegment,
     TranscriptSegmentMetadata, TranscriptSegmentSource, UserPreferences,
 };
 
@@ -39,6 +39,7 @@ const REALTIME_TRANSCRIPT_REVISION: u32 = 0;
 const FIRST_POST_PROCESSING_REVISION: u32 = 1;
 const POST_MEETING_POLL_MIN_SECS: u64 = 600;
 const POST_MEETING_POLL_MAX_SECS: u64 = 8 * 60 * 60;
+const POST_PROCESSING_WORKER_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 static POST_PROCESSING_CANCEL_FLAGS: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -365,6 +366,43 @@ pub(crate) fn dispatch_post_processing_cancellation(request: PostProcessingCance
     spawn_remote_post_processing_cancel(request.model_ref, request.provider_task_id);
 }
 
+pub(crate) fn request_post_processing_stop_for_deletion(
+    record: &MeetingRecord,
+) -> Option<PostProcessingCancellationRequest> {
+    let state = record.post_processing.as_ref()?;
+    if !post_processing_status_is_active(state.status) {
+        return None;
+    }
+    let request = PostProcessingCancellationRequest {
+        job_id: state.job_id.clone(),
+        model_ref: state.model_ref.clone(),
+        provider_task_id: state.provider_task_id.clone(),
+    };
+    dispatch_post_processing_cancellation(request.clone());
+    Some(request)
+}
+
+pub(crate) async fn wait_for_post_processing_worker_exit(
+    request: &PostProcessingCancellationRequest,
+) -> Result<(), String> {
+    let started_at = std::time::Instant::now();
+    loop {
+        if !POST_PROCESSING_CANCEL_FLAGS
+            .lock()
+            .contains_key(&request.job_id)
+        {
+            return Ok(());
+        }
+        if started_at.elapsed() >= POST_PROCESSING_WORKER_STOP_TIMEOUT {
+            return Err(
+                "meetingPostProcessingStillStopping: 会后处理任务仍在停止，请稍后重试删除"
+                    .to_string(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 async fn run_post_processing_job(
     inner: &Arc<Inner>,
     meeting_id: &str,
@@ -374,11 +412,37 @@ async fn run_post_processing_job(
     let store = MeetingStore::new().map_err(|error| error.to_string())?;
     let record = current_post_processing_record(&store, meeting_id, job_id)?;
     let state = record.post_processing.as_ref().unwrap().clone();
-    if state.resolved_runtime_kind != MeetingAsrRuntimeKind::Cloud {
-        return Err("postMeetingAsrRuntimeUnsupported: 会后 ASR 运行时不是云端".to_string());
+    let model_id = if let Some(import_config) = record.import_config.as_ref() {
+        let descriptor = super::meeting_audio_import::resolve_meeting_asr_model(&state.model_ref)?;
+        if descriptor.runtime_kind != state.resolved_runtime_kind
+            || descriptor.runtime_kind != import_config.resolved_asr_runtime_kind
+            || descriptor.provider_id != import_config.asr_model_ref.provider_id
+            || descriptor.model_id != import_config.asr_model_ref.model_id
+        {
+            return Err(
+                "meetingAsrRouteMismatch: 导入任务的模型快照与后端注册表不一致".to_string(),
+            );
+        }
+        super::meeting_audio_import::validate_meeting_asr_combination(
+            &descriptor,
+            state.diarization_mode,
+            import_config.local_diarization_model_id.as_deref(),
+        )?;
+        descriptor.model_id
+    } else {
+        if state.resolved_runtime_kind != MeetingAsrRuntimeKind::Cloud {
+            return Err("postMeetingAsrRuntimeUnsupported: 会后 ASR 运行时不是云端".to_string());
+        }
+        resolve_post_meeting_asr_model(&state.model_ref)?.model_id
+    };
+
+    if state.resolved_runtime_kind == MeetingAsrRuntimeKind::Local {
+        return run_local_import_post_processing_job(
+            inner, &store, record, state, meeting_id, job_id, cancelled,
+        )
+        .await;
     }
-    let descriptor = resolve_post_meeting_asr_model(&state.model_ref)?;
-    let client = build_post_meeting_dashscope_client(&descriptor.model_id)?;
+    let client = build_post_meeting_dashscope_client(&model_id)?;
     let request_options = cloud_diarization_options(&state)?;
 
     let provider_task_id = if let Some(task_id) = resume_provider_task_id(&state)? {
@@ -508,7 +572,7 @@ async fn run_post_processing_job(
             &store,
             meeting_id,
             job_id,
-            &descriptor.model_id,
+            &model_id,
             &provider_task_id,
             &local_model_id,
             transcript,
@@ -528,17 +592,94 @@ async fn run_post_processing_job(
             &store,
             meeting_id,
             job_id,
-            &descriptor.model_id,
+            &model_id,
             &provider_task_id,
             transcript,
         )?
     };
     emit_post_processing_event(inner, &completed);
-    prepare_and_spawn_auto_meeting_summary(inner, &mut completed)?;
+    finish_post_processing_success(inner, &store, &mut completed)?;
     let retention_count = inner.prefs.get().meeting_audio_retention_count;
     store
         .prune_audio_retention(retention_count)
         .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn run_local_import_post_processing_job(
+    inner: &Arc<Inner>,
+    store: &MeetingStore,
+    record: MeetingRecord,
+    state: MeetingPostProcessingState,
+    meeting_id: &str,
+    job_id: &str,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let import_config = record.import_config.as_ref().ok_or_else(|| {
+        "postMeetingAsrRuntimeUnsupported: 现场会议不支持本地会后 ASR".to_string()
+    })?;
+    ensure_job_not_cancelled(store, meeting_id, job_id, &cancelled)?;
+    update_post_processing_progress(
+        inner,
+        store,
+        meeting_id,
+        job_id,
+        MeetingPostProcessingStatus::LocalAnalyzing,
+        Some(0.1),
+        None,
+    )?;
+    let path = meeting_recording_existing_path_for_id(meeting_id)
+        .map_err(|error| format!("meetingAudioUnavailable: {error}"))?;
+    let source = MeetingAudioSource::from_path(&path)
+        .map_err(|error| format!("meetingAudioInvalid: {error}"))?;
+    let (segments, profiles, turns) = super::meeting_audio_import::run_local_meeting_file_asr(
+        inner,
+        source,
+        &state.model_ref,
+        state.diarization_mode,
+        import_config.local_diarization_model_id.as_deref(),
+        state.expected_speaker_count,
+        job_id,
+        Arc::clone(&cancelled),
+    )
+    .await?;
+    ensure_job_not_cancelled(store, meeting_id, job_id, &cancelled)?;
+    update_post_processing_progress(
+        inner,
+        store,
+        meeting_id,
+        job_id,
+        MeetingPostProcessingStatus::Applying,
+        Some(0.95),
+        None,
+    )?;
+    let mut completed =
+        apply_import_local_asr_result(store, meeting_id, job_id, segments, profiles, turns)?;
+    emit_post_processing_event(inner, &completed);
+    finish_post_processing_success(inner, store, &mut completed)?;
+    let retention_count = inner.prefs.get().meeting_audio_retention_count;
+    store
+        .prune_audio_retention(retention_count)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn finish_post_processing_success(
+    inner: &Arc<Inner>,
+    _store: &MeetingStore,
+    completed: &mut MeetingRecord,
+) -> Result<(), String> {
+    let generate_summary = completed
+        .import_config
+        .as_ref()
+        .map(|config| config.generate_summary)
+        .unwrap_or(true);
+    if generate_summary {
+        prepare_and_spawn_auto_meeting_summary(inner, completed)?;
+    }
+    if completed.import_state.is_some() {
+        super::meeting_audio_import::emit_import_event(inner, completed);
+    }
     Ok(())
 }
 
@@ -683,6 +824,15 @@ fn update_post_processing_progress(
             state.updated_at = now.clone();
             state.error_code = None;
             state.error_message = None;
+            if let Some(import_state) = record.import_state.as_mut() {
+                import_state.status = if status == MeetingPostProcessingStatus::Applying {
+                    MeetingImportStatus::Applying
+                } else {
+                    MeetingImportStatus::Transcribing
+                };
+                import_state.progress = progress.map(|value| 0.25 + value.clamp(0.0, 1.0) * 0.75);
+                import_state.updated_at = now.clone();
+            }
             record.updated_at = now.clone();
             true
         })
@@ -764,6 +914,59 @@ fn apply_local_post_processing_result(
     updated.ok_or_else(|| "postMeetingAsrJobCancelled: 后处理任务已取消或被替换".to_string())
 }
 
+fn apply_import_local_asr_result(
+    store: &MeetingStore,
+    meeting_id: &str,
+    job_id: &str,
+    segments: Vec<TranscriptSegment>,
+    profiles: Vec<SpeakerProfile>,
+    turns: Vec<SpeakerTurn>,
+) -> Result<MeetingRecord, String> {
+    let now = Utc::now().to_rfc3339();
+    let mut transition_error = None;
+    let updated = store
+        .update_if(meeting_id, |record| {
+            let result = (|| -> Result<bool, String> {
+                let state = record
+                    .post_processing
+                    .as_ref()
+                    .ok_or_else(|| "meeting has no post-processing job".to_string())?;
+                if state.job_id != job_id
+                    || state.status != MeetingPostProcessingStatus::Applying
+                    || state.resolved_runtime_kind != MeetingAsrRuntimeKind::Local
+                    || record.import_config.is_none()
+                {
+                    return Ok(false);
+                }
+                let revision = state.processing_revision;
+                stage_transcript_revision(
+                    record,
+                    revision,
+                    TranscriptRevisionSource::Imported,
+                    segments.clone(),
+                    &now,
+                )?;
+                record.speaker_profiles = profiles.clone();
+                record.speaker_turns = turns.clone();
+                activate_staging_transcript_revision(record, revision)?;
+                complete_processing_transition(record, &now);
+                Ok(true)
+            })();
+            match result {
+                Ok(applied) => applied,
+                Err(error) => {
+                    transition_error = Some(error);
+                    false
+                }
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    if let Some(error) = transition_error {
+        return Err(format!("meetingLocalAsrResultInvalid: {error}"));
+    }
+    updated.ok_or_else(|| "postMeetingAsrJobCancelled: 后处理任务已取消或被替换".to_string())
+}
+
 fn apply_cloud_result_transition(
     record: &mut MeetingRecord,
     job_id: &str,
@@ -789,25 +992,16 @@ fn apply_cloud_result_transition(
     let revision = state.processing_revision;
     let (segments, profiles, turns) =
         normalize_cloud_transcript(model_id, provider_task_id, diarization_mode, transcript)?;
-    stage_transcript_revision(
-        record,
-        revision,
-        TranscriptRevisionSource::CloudPostprocess,
-        segments,
-        now,
-    )?;
+    let source = if record.import_config.is_some() {
+        TranscriptRevisionSource::Imported
+    } else {
+        TranscriptRevisionSource::CloudPostprocess
+    };
+    stage_transcript_revision(record, revision, source, segments, now)?;
     record.speaker_profiles = profiles;
     record.speaker_turns = turns;
     activate_staging_transcript_revision(record, revision)?;
-    let state = record.post_processing.as_mut().unwrap();
-    state.status = MeetingPostProcessingStatus::Completed;
-    state.progress = Some(1.0);
-    state.error_code = None;
-    state.error_message = None;
-    state.updated_at = now.to_string();
-    state.completed_at = Some(now.to_string());
-    record.processing_hold = None;
-    record.updated_at = now.to_string();
+    complete_processing_transition(record, now);
     Ok(true)
 }
 
@@ -855,16 +1049,20 @@ fn apply_local_result_transition(
             "local diarization speaker count is inconsistent with speaker turns".to_string(),
         );
     }
-    stage_transcript_revision(
-        record,
-        revision,
-        TranscriptRevisionSource::LocalPostprocess,
-        segments,
-        now,
-    )?;
+    let source = if record.import_config.is_some() {
+        TranscriptRevisionSource::Imported
+    } else {
+        TranscriptRevisionSource::LocalPostprocess
+    };
+    stage_transcript_revision(record, revision, source, segments, now)?;
     record.speaker_profiles = profiles;
     record.speaker_turns = local_output.turns.clone();
     activate_staging_transcript_revision(record, revision)?;
+    complete_processing_transition(record, now);
+    Ok(true)
+}
+
+fn complete_processing_transition(record: &mut MeetingRecord, now: &str) {
     let state = record.post_processing.as_mut().unwrap();
     state.status = MeetingPostProcessingStatus::Completed;
     state.progress = Some(1.0);
@@ -872,9 +1070,28 @@ fn apply_local_result_transition(
     state.error_message = None;
     state.updated_at = now.to_string();
     state.completed_at = Some(now.to_string());
-    record.processing_hold = None;
+    let generate_summary = record
+        .import_config
+        .as_ref()
+        .map(|config| config.generate_summary)
+        .unwrap_or(false);
+    if let Some(import_state) = record.import_state.as_mut() {
+        import_state.status = if generate_summary {
+            MeetingImportStatus::Summarizing
+        } else {
+            MeetingImportStatus::Completed
+        };
+        import_state.progress = Some(1.0);
+        import_state.error_code = None;
+        import_state.error_message = None;
+        import_state.updated_at = now.to_string();
+        import_state.completed_at = (!generate_summary).then(|| now.to_string());
+        record.status = MeetingStatus::Completed;
+    }
+    if !generate_summary {
+        record.processing_hold = None;
+    }
     record.updated_at = now.to_string();
-    Ok(true)
 }
 
 fn normalize_cloud_transcript(
@@ -1140,6 +1357,13 @@ fn fail_active_post_processing_job(
     state.progress = None;
     state.started_at.get_or_insert_with(|| now.to_string());
     state.updated_at = now.to_string();
+    if let Some(import_state) = record.import_state.as_mut() {
+        import_state.status = MeetingImportStatus::Failed;
+        import_state.progress = None;
+        import_state.error_code = state.error_code.clone();
+        import_state.error_message = state.error_message.clone();
+        import_state.updated_at = now.to_string();
+    }
     record.updated_at = now.to_string();
     true
 }
@@ -1165,6 +1389,14 @@ pub(crate) fn cancel_post_processing_for_deletion(
     state.error_message = None;
     state.updated_at = now.to_string();
     state.completed_at = Some(now.to_string());
+    if let Some(import_state) = record.import_state.as_mut() {
+        import_state.status = MeetingImportStatus::Cancelled;
+        import_state.progress = None;
+        import_state.error_code = None;
+        import_state.error_message = None;
+        import_state.updated_at = now.to_string();
+        import_state.completed_at = Some(now.to_string());
+    }
     record.processing_hold = None;
     record.updated_at = now.to_string();
     Some(request)
@@ -1376,6 +1608,14 @@ fn apply_cancel_transition(record: &mut MeetingRecord, expected_job_id: &str, no
     state.error_message = None;
     state.updated_at = now.to_string();
     state.completed_at = Some(now.to_string());
+    if let Some(import_state) = record.import_state.as_mut() {
+        import_state.status = MeetingImportStatus::Cancelled;
+        import_state.progress = None;
+        import_state.error_code = None;
+        import_state.error_message = None;
+        import_state.updated_at = now.to_string();
+        import_state.completed_at = Some(now.to_string());
+    }
     record.processing_hold = None;
     record.updated_at = now.to_string();
     true
@@ -1599,6 +1839,8 @@ mod tests {
                 processing_revision: 1,
             }),
             post_processing: None,
+            import_config: None,
+            import_state: None,
             transcript_revisions: Vec::new(),
             active_transcript_revision: None,
             speaker_profiles: vec![SpeakerProfile {
@@ -1843,6 +2085,63 @@ mod tests {
             retried.post_processing.as_ref().unwrap().status,
             MeetingPostProcessingStatus::Pending
         );
+    }
+
+    #[test]
+    fn cancelling_import_post_processing_updates_import_state_and_releases_hold() {
+        let mut record = record();
+        prepare_post_processing_after_stop(&mut record, "2026-08-13T00:00:01Z").unwrap();
+        let job_id = record.post_processing.as_ref().unwrap().job_id.clone();
+        record.import_state = Some(crate::types::MeetingImportState {
+            status: MeetingImportStatus::Transcribing,
+            import_job_id: "import-job".to_string(),
+            progress: Some(0.6),
+            attempt: 1,
+            error_code: Some("oldError".to_string()),
+            error_message: Some("old message".to_string()),
+            created_at: "2026-08-13T00:00:00Z".to_string(),
+            updated_at: "2026-08-13T00:00:01Z".to_string(),
+            completed_at: None,
+        });
+
+        assert!(apply_cancel_transition(
+            &mut record,
+            &job_id,
+            "2026-08-13T00:00:02Z"
+        ));
+        let import_state = record.import_state.as_ref().unwrap();
+        assert_eq!(import_state.status, MeetingImportStatus::Cancelled);
+        assert_eq!(import_state.progress, None);
+        assert_eq!(import_state.error_code, None);
+        assert_eq!(import_state.error_message, None);
+        assert_eq!(
+            import_state.completed_at.as_deref(),
+            Some("2026-08-13T00:00:02Z")
+        );
+        assert!(record.processing_hold.is_none());
+    }
+
+    #[tokio::test]
+    async fn deletion_stop_signals_and_waits_for_post_processing_worker_unregister() {
+        let mut record = record();
+        prepare_post_processing_after_stop(&mut record, "2026-08-13T00:00:01Z").unwrap();
+        let job_id = record.post_processing.as_ref().unwrap().job_id.clone();
+        let cancelled = register_post_processing_job(&job_id).unwrap();
+
+        let request = request_post_processing_stop_for_deletion(&record).unwrap();
+        assert_eq!(request.job_id, job_id);
+        assert!(cancelled.load(Ordering::Acquire));
+
+        let job_id_for_cleanup = job_id.clone();
+        let cleanup = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            POST_PROCESSING_CANCEL_FLAGS
+                .lock()
+                .remove(&job_id_for_cleanup);
+        });
+        wait_for_post_processing_worker_exit(&request).await.unwrap();
+        cleanup.await.unwrap();
+        assert!(!POST_PROCESSING_CANCEL_FLAGS.lock().contains_key(&job_id));
     }
 
     fn cloud_transcript(with_speakers: bool) -> DashScopeAsyncTranscript {

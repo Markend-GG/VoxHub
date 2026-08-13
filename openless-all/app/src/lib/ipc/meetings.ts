@@ -1,9 +1,13 @@
 import type {
+    MeetingAsrModelDescriptor,
+    MeetingAudioSelection,
     MeetingListItem,
     MeetingRecord,
     MeetingRecordingSnapshot,
     PostMeetingAsrModelDescriptor,
+    RetryMeetingAudioImportOptions,
     RetryMeetingPostProcessingOptions,
+    StartMeetingAudioImportOptions,
     StartMeetingRecordingOptions,
 } from "../types"
 import { invokeOrMock } from "./shared"
@@ -124,6 +128,118 @@ export function listPostMeetingAsrModels(): Promise<PostMeetingAsrModelDescripto
             isDefault: false,
         },
     ])
+}
+
+export function chooseMeetingAudioFile(): Promise<MeetingAudioSelection | null> {
+    return invokeOrMock("choose_meeting_audio_file", undefined, () => ({
+        selectionToken: "mock-meeting-audio-selection",
+        fileName: "meeting.wav",
+        format: "wav",
+        sizeBytes: 1_920_044,
+        durationMs: 60_000,
+        channels: 1,
+        sampleRate: 16_000,
+        bitsPerSample: 16,
+    }))
+}
+
+export function listMeetingFileAsrModels(): Promise<MeetingAsrModelDescriptor[]> {
+    return invokeOrMock("list_meeting_file_asr_models", undefined, () => [
+        {
+            providerId: "bailian",
+            modelId: "fun-asr",
+            displayName: "Fun-ASR",
+            runtimeKind: "cloud",
+            supportsMeetingFile: true,
+            supportsDiarization: true,
+            supportsSpeakerCount: true,
+            readiness: "ready",
+            readinessMessage: null,
+            isDefault: true,
+        },
+        {
+            providerId: "bailian",
+            modelId: "paraformer-v2",
+            displayName: "Paraformer V2",
+            runtimeKind: "cloud",
+            supportsMeetingFile: true,
+            supportsDiarization: true,
+            supportsSpeakerCount: true,
+            readiness: "ready",
+            readinessMessage: null,
+            isDefault: false,
+        },
+        {
+            providerId: "sherpa-onnx-local",
+            modelId: "sense-voice-small-zh",
+            displayName: "SenseVoice Small (local)",
+            runtimeKind: "local",
+            supportsMeetingFile: true,
+            supportsDiarization: false,
+            supportsSpeakerCount: false,
+            readiness: "missing",
+            readinessMessage: "Local model is not downloaded",
+            isDefault: false,
+        },
+    ])
+}
+
+export function startMeetingAudioImport(
+    options: StartMeetingAudioImportOptions,
+): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "start_meeting_audio_import",
+        { options },
+        () => ({
+            ...mockMeetings[0],
+            id: `mock-import-${Date.now()}`,
+            title: options.title || "Imported meeting",
+            status: "draft",
+            transcriptSegments: [],
+            audio: { state: "temporary", retained: false, path: null },
+            importState: {
+                status: "importing",
+                importJobId: "mock-import-job",
+                progress: 0,
+                attempt: 1,
+                errorCode: null,
+                errorMessage: null,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                completedAt: null,
+            },
+            importConfig: {
+                sourceFileName: "meeting.wav",
+                sourceFormat: "wav",
+                asrModelRef: options.asrModelRef,
+                resolvedAsrRuntimeKind: options.asrModelRef.providerId === "bailian" ? "cloud" : "local",
+                diarizationMode: options.diarizationMode,
+                localDiarizationModelId: options.localDiarizationModelId,
+                expectedSpeakerCount: options.expectedSpeakerCount,
+                generateSummary: options.generateSummary,
+                processingRevision: 1,
+            },
+        }),
+    )
+}
+
+export function cancelMeetingAudioImport(id: string): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "cancel_meeting_audio_import",
+        { id },
+        () => ({ ...mockMeetings[0], id }),
+    )
+}
+
+export function retryMeetingAudioImport(
+    id: string,
+    options?: RetryMeetingAudioImportOptions,
+): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "retry_meeting_audio_import",
+        { id, options: options ?? null },
+        () => ({ ...mockMeetings[0], id }),
+    )
 }
 
 export function retryMeetingPostProcessing(

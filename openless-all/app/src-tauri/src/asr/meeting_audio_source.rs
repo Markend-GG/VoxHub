@@ -18,8 +18,7 @@ const BITS_PER_SAMPLE: u16 = 16;
 const BLOCK_ALIGN: u16 = CHANNELS * (BITS_PER_SAMPLE / 8);
 const BYTE_RATE: u32 = SAMPLE_RATE * BLOCK_ALIGN as u32;
 
-pub type MeetingAudioByteStream =
-    Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send + 'static>>;
+pub type MeetingAudioByteStream = Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send + 'static>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeetingAudioSource {
@@ -194,10 +193,7 @@ impl MeetingAudioSource {
         Ok((info, Box::pin(stream)))
     }
 
-    pub fn read_waveform(
-        &self,
-        cancelled: &AtomicBool,
-    ) -> Result<(MeetingAudioInfo, Vec<f32>)> {
+    pub fn read_waveform(&self, cancelled: &AtomicBool) -> Result<(MeetingAudioInfo, Vec<f32>)> {
         let info = self.inspect()?;
         let sample_count = usize::try_from(info.pcm_bytes / BLOCK_ALIGN as u64)
             .context("meeting audio is too large for this process")?;
@@ -240,6 +236,87 @@ impl MeetingAudioSource {
             );
         }
         Ok((info, samples))
+    }
+
+    pub fn read_pcm_range(
+        &self,
+        start_ms: u64,
+        end_ms: u64,
+        cancelled: &AtomicBool,
+    ) -> Result<Vec<u8>> {
+        if end_ms <= start_ms {
+            anyhow::bail!("meeting audio range is empty");
+        }
+        let start_byte = start_ms
+            .checked_mul(BYTE_RATE as u64)
+            .context("meeting audio range start overflow")?
+            / 1000;
+        let end_byte = end_ms
+            .checked_mul(BYTE_RATE as u64)
+            .context("meeting audio range end overflow")?
+            .div_ceil(1000);
+        let start_byte = start_byte - start_byte % BLOCK_ALIGN as u64;
+        let end_byte = end_byte
+            .checked_add(BLOCK_ALIGN as u64 - 1)
+            .context("meeting audio range alignment overflow")?
+            / BLOCK_ALIGN as u64
+            * BLOCK_ALIGN as u64;
+        let info = self.inspect()?;
+        let end_byte = end_byte.min(info.pcm_bytes);
+        if start_byte >= end_byte {
+            anyhow::bail!("meeting audio range is outside the recording");
+        }
+        if cancelled.load(Ordering::Acquire) {
+            anyhow::bail!("meeting audio range read cancelled");
+        }
+        let byte_len = end_byte - start_byte;
+        let capacity = usize::try_from(byte_len).context("meeting audio range is too large")?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(capacity)
+            .context("reserve meeting audio range memory failed")?;
+
+        let mut global_offset = 0u64;
+        for path in self.paths() {
+            if cancelled.load(Ordering::Acquire) {
+                anyhow::bail!("meeting audio range read cancelled");
+            }
+            let part_bytes = inspect_wav(path)?;
+            let part_start = global_offset;
+            let part_end = part_start
+                .checked_add(part_bytes)
+                .context("meeting audio part offset overflow")?;
+            let overlap_start = start_byte.max(part_start);
+            let overlap_end = end_byte.min(part_end);
+            if overlap_end > overlap_start {
+                let local_start = overlap_start - part_start;
+                let local_len = overlap_end - overlap_start;
+                let mut file = std::fs::File::open(path)
+                    .with_context(|| format!("read meeting WAV failed: {}", path.display()))?;
+                std::io::Seek::seek(
+                    &mut file,
+                    io::SeekFrom::Start(WAV_HEADER_BYTES + local_start),
+                )
+                .with_context(|| format!("seek meeting WAV failed: {}", path.display()))?;
+                let output_start = output.len();
+                output.resize(
+                    output_start
+                        + usize::try_from(local_len)
+                            .context("meeting audio range part is too large")?,
+                    0,
+                );
+                std::io::Read::read_exact(&mut file, &mut output[output_start..])
+                    .with_context(|| format!("read meeting WAV PCM failed: {}", path.display()))?;
+            }
+            global_offset = part_end;
+            if global_offset >= end_byte {
+                break;
+            }
+        }
+        if output.len() != capacity {
+            anyhow::bail!("meeting audio range is incomplete");
+        }
+        Ok(output)
     }
 
     fn paths(&self) -> &[PathBuf] {
@@ -295,7 +372,9 @@ fn inspect_wav(path: &Path) -> Result<u64> {
         .metadata()
         .with_context(|| format!("read meeting WAV metadata failed: {}", path.display()))?
         .len();
-    if pcm_bytes == 0 || pcm_bytes % BLOCK_ALIGN as u64 != 0 || file_len != WAV_HEADER_BYTES + pcm_bytes
+    if pcm_bytes == 0
+        || pcm_bytes % BLOCK_ALIGN as u64 != 0
+        || file_len != WAV_HEADER_BYTES + pcm_bytes
     {
         anyhow::bail!("meeting recording is empty or corrupt");
     }
@@ -339,7 +418,9 @@ mod tests {
         std::fs::write(dir.join("part-0001.wav"), encode_wav_16k_mono(&[1, 2])).unwrap();
         std::fs::write(dir.join("part-0002.wav"), encode_wav_16k_mono(&[3, 4, 5])).unwrap();
         let source = MeetingAudioSource::from_path(&dir).unwrap();
-        let (info, stream) = source.into_stream(Arc::new(AtomicBool::new(false))).unwrap();
+        let (info, stream) = source
+            .into_stream(Arc::new(AtomicBool::new(false)))
+            .unwrap();
         let bytes = stream
             .try_fold(Vec::new(), |mut output, chunk| async move {
                 output.extend_from_slice(&chunk);
@@ -353,7 +434,10 @@ mod tests {
         assert_eq!(bytes.len() as u64, info.content_length);
         assert_eq!(&bytes[0..4], b"RIFF");
         assert_eq!(&bytes[8..12], b"WAVE");
-        assert_eq!(bytes.windows(4).filter(|window| *window == b"RIFF").count(), 1);
+        assert_eq!(
+            bytes.windows(4).filter(|window| *window == b"RIFF").count(),
+            1
+        );
         assert_eq!(&bytes[44..], &encode_wav_16k_mono(&[1, 2, 3, 4, 5])[44..]);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -394,7 +478,10 @@ mod tests {
             .unwrap()
             .into_stream(cancelled)
             .unwrap();
-        assert_eq!(stream.try_next().await.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            stream.try_next().await.unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -406,11 +493,7 @@ mod tests {
             encode_wav_16k_mono(&[i16::MIN, 0]),
         )
         .unwrap();
-        std::fs::write(
-            dir.join("part-0002.wav"),
-            encode_wav_16k_mono(&[i16::MAX]),
-        )
-        .unwrap();
+        std::fs::write(dir.join("part-0002.wav"), encode_wav_16k_mono(&[i16::MAX])).unwrap();
         let source = MeetingAudioSource::from_path(&dir).unwrap();
         let (info, waveform) = source.read_waveform(&AtomicBool::new(false)).unwrap();
 
@@ -434,6 +517,29 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("cancelled"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn segmented_source_reads_bounded_pcm_range_across_parts() {
+        let dir = temp_dir();
+        let first = vec![1i16; 16_000];
+        let second = vec![2i16; 16_000];
+        std::fs::write(dir.join("part-0001.wav"), encode_wav_16k_mono(&first)).unwrap();
+        std::fs::write(dir.join("part-0002.wav"), encode_wav_16k_mono(&second)).unwrap();
+        let source = MeetingAudioSource::from_path(&dir).unwrap();
+
+        let pcm = source
+            .read_pcm_range(500, 1_500, &AtomicBool::new(false))
+            .unwrap();
+
+        assert_eq!(pcm.len(), 16_000 * 2);
+        assert!(pcm[..16_000]
+            .chunks_exact(2)
+            .all(|sample| { i16::from_le_bytes([sample[0], sample[1]]) == 1 }));
+        assert!(pcm[16_000..]
+            .chunks_exact(2)
+            .all(|sample| { i16::from_le_bytes([sample[0], sample[1]]) == 2 }));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

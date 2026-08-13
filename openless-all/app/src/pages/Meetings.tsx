@@ -15,12 +15,16 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import {
   type BinaryPayload,
+  type SpeakerDiarizationModelDescriptor,
+  cancelMeetingAudioImport,
   cancelMeetingPostProcessing,
+  chooseMeetingAudioFile,
   deleteMeetingRecord,
   exportMeetingMarkdown,
   generateMeetingSummary,
   getActiveMeetingRecording,
   getMeeting,
+  listMeetingFileAsrModels,
   listPostMeetingAsrModels,
   listSpeakerDiarizationModels,
   retryMeetingSummary,
@@ -28,10 +32,12 @@ import {
   pauseMeetingRecording,
   prepareMeetingAudioPlayback,
   renameMeetingSpeaker,
+  retryMeetingAudioImport,
   retryMeetingPostProcessing,
   resumeMeetingRecording,
   retranscribeMeeting,
   showMeetingCompanion,
+  startMeetingAudioImport,
   startMeetingRecording,
   stopMeetingRecording,
   updateMeetingRecord,
@@ -41,7 +47,10 @@ import {
 import type {
   MeetingCloseRequestEvent,
   MeetingAudioState,
+  MeetingAsrModelDescriptor,
+  MeetingAudioSelection,
   MeetingErrorEvent,
+  MeetingImportEvent,
   MeetingListItem,
   MeetingAsrModelRef,
   MeetingPostProcessingEvent,
@@ -55,6 +64,8 @@ import type {
   TranscriptSegment,
   TranscriptSegmentSource,
   PostMeetingAsrModelDescriptor,
+  StartMeetingAudioImportOptions,
+  RetryMeetingAudioImportOptions,
   UserPreferences,
 } from '../lib/types';
 import { normalizeMeetingCloseRequest } from '../lib/types';
@@ -64,10 +75,15 @@ import { Btn, Card, PageHeader, Pill, type PillTone } from './_atoms';
 import { Modal } from '../components/ui/Modal';
 import { SelectLite } from '../components/ui/SelectLite';
 
-type ActionLoading = 'start' | 'pause' | 'resume' | 'stop' | 'summary' | 'save' | 'delete' | 'export' | 'retranscribe' | 'postProcessing' | null;
+type ActionLoading = 'start' | 'import' | 'pause' | 'resume' | 'stop' | 'summary' | 'save' | 'delete' | 'export' | 'retranscribe' | 'postProcessing' | null;
 type ActiveControlMode = 'recording' | 'paused';
 const PLAYBACK_SPEEDS = [0.75, 1, 1.25, 1.5, 2] as const;
 type PlaybackSpeed = typeof PLAYBACK_SPEEDS[number];
+const configLabelStyle: CSSProperties = {
+  fontSize: 11.5,
+  fontWeight: 600,
+  color: 'var(--ol-ink-3)',
+};
 
 interface MeetingEditDraft {
   id: string;
@@ -120,8 +136,11 @@ export function Meetings({
   const [rewriteConfirmId, setRewriteConfirmId] = useState<string | null>(null);
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [startConfigOpen, setStartConfigOpen] = useState(false);
+  const [audioImportOpen, setAudioImportOpen] = useState(false);
   const [expectedSpeakerCount, setExpectedSpeakerCount] = useState('auto');
   const [postMeetingAsrModels, setPostMeetingAsrModels] = useState<PostMeetingAsrModelDescriptor[]>([]);
+  const [meetingFileAsrModels, setMeetingFileAsrModels] = useState<MeetingAsrModelDescriptor[]>([]);
+  const [speakerDiarizationModels, setSpeakerDiarizationModels] = useState<SpeakerDiarizationModelDescriptor[]>([]);
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const transcriptStickToBottomRef = useRef(true);
   const meetingsRef = useRef<MeetingListItem[]>([]);
@@ -224,13 +243,24 @@ export function Meetings({
 
   useEffect(() => {
     let cancelled = false;
-    void listPostMeetingAsrModels()
-      .then(models => {
-        if (!cancelled) setPostMeetingAsrModels(models);
+    void Promise.all([
+      listPostMeetingAsrModels(),
+      listMeetingFileAsrModels(),
+      listSpeakerDiarizationModels(),
+    ])
+      .then(([postModels, fileModels, speakerModels]) => {
+        if (cancelled) return;
+        setPostMeetingAsrModels(postModels);
+        setMeetingFileAsrModels(fileModels);
+        setSpeakerDiarizationModels(speakerModels);
       })
       .catch(error => {
-        console.warn('[meetings] failed to load post-meeting ASR models', error);
-        if (!cancelled) setPostMeetingAsrModels([]);
+        console.warn('[meetings] failed to load meeting ASR models', error);
+        if (!cancelled) {
+          setPostMeetingAsrModels([]);
+          setMeetingFileAsrModels([]);
+          setSpeakerDiarizationModels([]);
+        }
       });
     return () => {
       cancelled = true;
@@ -245,6 +275,8 @@ export function Meetings({
     let unlistenError: (() => void) | undefined;
     let unlistenSummary: (() => void) | undefined;
     let unlistenPostProcessing: (() => void) | undefined;
+    let unlistenImport: (() => void) | undefined;
+    let unlistenRecordDeleted: (() => void) | undefined;
     let unlistenClose: (() => void) | undefined;
 
     (async () => {
@@ -345,6 +377,25 @@ export function Meetings({
           cacheMeetingRecord(event.payload.meeting);
           setSelectedId(prev => prev ?? event.payload.meetingId);
         });
+        const importHandle = await listen<MeetingImportEvent>('meeting:import-state', event => {
+          if (cancelled) return;
+          cacheMeetingRecord(event.payload.meeting);
+          setSelectedId(prev => prev ?? event.payload.meetingId);
+        });
+        const recordDeletedHandle = await listen<string>('meeting:record-deleted', event => {
+          if (cancelled) return;
+          const meetingId = event.payload;
+          setMeetings(prev => prev.filter(record => record.id !== meetingId));
+          setMeetingDetails(prev => {
+            const next = { ...prev };
+            delete next[meetingId];
+            return next;
+          });
+          setSelectedId(current => {
+            if (current !== meetingId) return current;
+            return meetingsRef.current.find(record => record.id !== meetingId)?.id ?? null;
+          });
+        });
         const closeHandle = await listen<MeetingCloseRequestEvent | MeetingRecordingSnapshot>('meeting:close-requested', event => {
           if (cancelled) return;
           const { snapshot } = normalizeMeetingCloseRequest(event.payload);
@@ -363,6 +414,8 @@ export function Meetings({
           errorHandle();
           summaryHandle();
           postProcessingHandle();
+          importHandle();
+          recordDeletedHandle();
           closeHandle();
         } else {
           unlistenState = stateHandle;
@@ -371,6 +424,8 @@ export function Meetings({
           unlistenError = errorHandle;
           unlistenSummary = summaryHandle;
           unlistenPostProcessing = postProcessingHandle;
+          unlistenImport = importHandle;
+          unlistenRecordDeleted = recordDeletedHandle;
           unlistenClose = closeHandle;
         }
       } catch (error) {
@@ -386,6 +441,8 @@ export function Meetings({
       unlistenError?.();
       unlistenSummary?.();
       unlistenPostProcessing?.();
+      unlistenImport?.();
+      unlistenRecordDeleted?.();
       unlistenClose?.();
     };
   }, [cacheMeetingRecord, mobile, syncActiveSnapshot, t]);
@@ -505,6 +562,69 @@ export function Meetings({
     } catch (error) {
       console.error('[meetings] start failed', error);
       setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runStartAudioImport = async (options: StartMeetingAudioImportOptions) => {
+    setActionLoading('import');
+    setActionError(null);
+    setEventError(null);
+    try {
+      const record = await startMeetingAudioImport(options);
+      cacheMeetingRecord(record);
+      setSelectedId(record.id);
+      setAudioImportOpen(false);
+      if (mobile) setMobileDetailOpen(true);
+    } catch (error) {
+      console.error('[meetings] audio import failed', error);
+      setActionError(t('meetings.audioImport.startFailed', { err: errorMessage(error) }));
+      throw error;
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runCancelAudioImport = async (id: string) => {
+    setActionLoading('import');
+    setActionError(null);
+    try {
+      const updated = await cancelMeetingAudioImport(id);
+      if (updated.audio.state === 'retained') cacheMeetingRecord(updated);
+    } catch (error) {
+      console.error('[meetings] cancel audio import failed', error);
+      setActionError(t('meetings.audioImport.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runRetryAudioImport = async (
+    record: MeetingRecord,
+    options: RetryMeetingAudioImportOptions,
+  ) => {
+    setActionLoading('import');
+    setActionError(null);
+    setEventError(null);
+    try {
+      let updated: MeetingRecord;
+      try {
+        updated = await retryMeetingAudioImport(record.id, options);
+      } catch (error) {
+        if (!errorMessage(error).includes('meetingAudioReselectionRequired')) throw error;
+        const selection = await chooseMeetingAudioFile();
+        if (!selection) return;
+        updated = await retryMeetingAudioImport(record.id, {
+          ...options,
+          selectionToken: selection.selectionToken,
+        });
+      }
+      cacheMeetingRecord(updated);
+      setSelectedId(updated.id);
+    } catch (error) {
+      console.error('[meetings] retry audio import failed', error);
+      setActionError(t('meetings.audioImport.actionFailed', { err: errorMessage(error) }));
     } finally {
       setActionLoading(null);
     }
@@ -801,6 +921,9 @@ export function Meetings({
             <Btn icon="refresh" variant="ghost" size="sm" onClick={() => void refresh()} disabled={loading}>
               {t('common.refresh')}
             </Btn>
+            <Btn icon="doc" variant="ghost" size="sm" onClick={() => setAudioImportOpen(true)} disabled={Boolean(activeSnapshot) || actionLoading !== null}>
+              {t('meetings.audioImport.open')}
+            </Btn>
             <Btn icon="mic" variant="blue" size="sm" onClick={() => setStartConfigOpen(true)} disabled={Boolean(activeSnapshot) || actionLoading !== null}>
               {actionLoading === 'start' ? t('meetings.actions.starting') : t('meetings.actions.start')}
             </Btn>
@@ -817,6 +940,17 @@ export function Meetings({
           loading={actionLoading === 'start'}
           onClose={() => setStartConfigOpen(false)}
           onStart={() => void runStart()}
+        />
+      )}
+
+      {audioImportOpen && (
+        <MeetingAudioImportDialog
+          models={meetingFileAsrModels}
+          speakerModels={speakerDiarizationModels}
+          prefs={prefs}
+          loading={actionLoading === 'import'}
+          onClose={() => setAudioImportOpen(false)}
+          onStart={runStartAudioImport}
         />
       )}
 
@@ -927,15 +1061,27 @@ export function Meetings({
                       {t('meetings.audioPlayback.missing')}
                     </ErrorBanner>
                   )}
-                  <PostProcessingSection
-                    record={detailMeeting}
-                    models={postMeetingAsrModels}
-                    actionLoading={actionLoading}
-                    onRetry={(modelRef, speakerCount) => void runRetryPostProcessing(detailMeeting, modelRef, speakerCount)}
-                    onCancel={() => void runCancelPostProcessing(detailMeeting.id)}
-                    onUseRealtime={() => void runUseRealtimeTranscript(detailMeeting.id)}
-                    onRenameSpeaker={(speakerId, displayName) => void runRenameSpeaker(detailMeeting.id, speakerId, displayName)}
-                  />
+                  {detailMeeting.importState && detailMeeting.importConfig ? (
+                    <MeetingAudioImportSection
+                      record={detailMeeting}
+                      models={meetingFileAsrModels}
+                      speakerModels={speakerDiarizationModels}
+                      actionLoading={actionLoading}
+                      onRetry={options => void runRetryAudioImport(detailMeeting, options)}
+                      onCancel={() => void runCancelAudioImport(detailMeeting.id)}
+                      onRenameSpeaker={(speakerId, displayName) => void runRenameSpeaker(detailMeeting.id, speakerId, displayName)}
+                    />
+                  ) : (
+                    <PostProcessingSection
+                      record={detailMeeting}
+                      models={postMeetingAsrModels}
+                      actionLoading={actionLoading}
+                      onRetry={(modelRef, speakerCount) => void runRetryPostProcessing(detailMeeting, modelRef, speakerCount)}
+                      onCancel={() => void runCancelPostProcessing(detailMeeting.id)}
+                      onUseRealtime={() => void runUseRealtimeTranscript(detailMeeting.id)}
+                      onRenameSpeaker={(speakerId, displayName) => void runRenameSpeaker(detailMeeting.id, speakerId, displayName)}
+                    />
+                  )}
                   {canPlayMeetingAudio(detailMeeting, activeSnapshot) && (
                     <MeetingAudioPlayer
                       meetingId={detailMeeting.id}
@@ -1118,12 +1264,469 @@ function StartMeetingConfigDialog({
   );
 }
 
+function MeetingAudioImportDialog({
+  models,
+  speakerModels,
+  prefs,
+  loading,
+  onClose,
+  onStart,
+}: {
+  models: MeetingAsrModelDescriptor[];
+  speakerModels: SpeakerDiarizationModelDescriptor[];
+  prefs: UserPreferences | null;
+  loading: boolean;
+  onClose: () => void;
+  onStart: (options: StartMeetingAudioImportOptions) => Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const defaultModel = models.find(model => model.isDefault && model.readiness === 'ready')
+    ?? models.find(model => model.readiness === 'ready')
+    ?? models[0];
+  const defaultLocalSpeakerModel = speakerModels.find(model => (
+    model.id === prefs?.postMeetingAsr.diarization.localModelId
+    && model.readiness === 'ready'
+  )) ?? speakerModels.find(model => model.readiness === 'ready');
+  const [selection, setSelection] = useState<MeetingAudioSelection | null>(null);
+  const [choosing, setChoosing] = useState(false);
+  const [dialogError, setDialogError] = useState<string | null>(null);
+  const [title, setTitle] = useState('');
+  const [modelValue, setModelValue] = useState(() => (
+    defaultModel ? meetingModelValue(defaultModel) : ''
+  ));
+  const [diarizationMode, setDiarizationMode] = useState<'off' | 'cloud' | 'local'>('off');
+  const [localDiarizationModelId, setLocalDiarizationModelId] = useState(
+    defaultLocalSpeakerModel?.id ?? '',
+  );
+  const [speakerCount, setSpeakerCount] = useState('auto');
+  const [generateSummary, setGenerateSummary] = useState(true);
+
+  useEffect(() => {
+    if (models.some(model => meetingModelValue(model) === modelValue)) return;
+    const next = models.find(model => model.isDefault && model.readiness === 'ready')
+      ?? models.find(model => model.readiness === 'ready')
+      ?? models[0];
+    setModelValue(next ? meetingModelValue(next) : '');
+  }, [modelValue, models]);
+
+  useEffect(() => {
+    if (speakerModels.some(model => model.id === localDiarizationModelId)) return;
+    setLocalDiarizationModelId(
+      speakerModels.find(model => model.readiness === 'ready')?.id ?? '',
+    );
+  }, [localDiarizationModelId, speakerModels]);
+
+  const selectedModel = models.find(model => meetingModelValue(model) === modelValue);
+  const selectedSpeakerModel = speakerModels.find(model => model.id === localDiarizationModelId);
+  const localSpeakerUnavailable = diarizationMode === 'local'
+    && selectedSpeakerModel?.readiness !== 'ready';
+  const unsupportedCombination = selectedModel?.runtimeKind === 'local'
+    && diarizationMode === 'cloud';
+  const modelUnavailable = selectedModel?.readiness !== 'ready';
+  const canStart = Boolean(
+    selection
+    && selectedModel
+    && !modelUnavailable
+    && !localSpeakerUnavailable
+    && !unsupportedCombination
+    && !loading
+    && !choosing,
+  );
+
+  const chooseFile = async () => {
+    setChoosing(true);
+    setDialogError(null);
+    try {
+      setSelection(await chooseMeetingAudioFile());
+    } catch (error) {
+      setDialogError(t('meetings.audioImport.chooseFailed', { err: errorMessage(error) }));
+    } finally {
+      setChoosing(false);
+    }
+  };
+
+  const start = async () => {
+    if (!canStart || !selection || !selectedModel) return;
+    setDialogError(null);
+    try {
+      await onStart({
+        selectionToken: selection.selectionToken,
+        title: title.trim(),
+        asrModelRef: {
+          providerId: selectedModel.providerId,
+          modelId: selectedModel.modelId,
+        },
+        diarizationMode,
+        localDiarizationModelId: diarizationMode === 'local'
+          ? localDiarizationModelId
+          : null,
+        expectedSpeakerCount: speakerCount === 'auto' ? null : Number(speakerCount),
+        generateSummary,
+      });
+    } catch (error) {
+      setDialogError(t('meetings.audioImport.startFailed', { err: errorMessage(error) }));
+    }
+  };
+
+  return (
+    <Modal onClose={loading ? () => undefined : onClose} width="min(560px, 100%)">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 17, fontWeight: 650, color: 'var(--ol-ink)' }}>
+          {t('meetings.audioImport.title')}
+        </h2>
+        <Btn icon="x" variant="ghost" size="sm" disabled={loading} onClick={onClose}>
+          {t('common.cancel')}
+        </Btn>
+      </div>
+      <div style={{ display: 'grid', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <Btn icon="doc" variant="ghost" size="sm" disabled={loading || choosing} onClick={() => void chooseFile()}>
+            {choosing ? t('meetings.audioImport.choosing') : t('meetings.audioImport.chooseFile')}
+          </Btn>
+          <span style={{ minWidth: 0, flex: 1, fontSize: 12, color: 'var(--ol-ink-3)', overflowWrap: 'anywhere' }}>
+            {selection?.fileName ?? t('meetings.audioImport.noFile')}
+          </span>
+        </div>
+        {selection && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8, padding: 10, border: '0.5px solid var(--ol-line-soft)', borderRadius: 8, fontSize: 11.5, color: 'var(--ol-ink-4)' }}>
+            <span>{t('meetings.audioImport.duration')}: {formatDuration(selection.durationMs, t)}</span>
+            <span>{t('meetings.audioImport.size')}: {formatFileSize(selection.sizeBytes)}</span>
+            <span>{selection.sampleRate / 1000} kHz · {selection.channels} ch · {selection.bitsPerSample} bit</span>
+          </div>
+        )}
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={configLabelStyle}>{t('meetings.audioImport.meetingTitle')}</span>
+          <input
+            value={title}
+            onChange={event => setTitle(event.target.value)}
+            placeholder={selection?.fileName.replace(/\.wav$/i, '') ?? t('meetings.audioImport.titlePlaceholder')}
+            aria-label={t('meetings.audioImport.meetingTitle')}
+            style={editorInputStyle}
+          />
+        </label>
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={configLabelStyle}>{t('meetings.audioImport.asrModel')}</span>
+          <SelectLite
+            value={modelValue}
+            onChange={setModelValue}
+            options={models.map(model => ({
+              value: meetingModelValue(model),
+              label: `${model.displayName} · ${t(`meetings.audioImport.runtime.${model.runtimeKind}`)}`,
+              disabled: model.readiness !== 'ready',
+            }))}
+            placeholder={t('meetings.audioImport.modelUnavailable')}
+            ariaLabel={t('meetings.audioImport.asrModel')}
+            style={{ width: '100%' }}
+          />
+          {selectedModel?.readinessMessage && selectedModel.readiness !== 'ready' && (
+            <span style={{ fontSize: 11, color: 'var(--ol-danger)' }}>{selectedModel.readinessMessage}</span>
+          )}
+        </label>
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={configLabelStyle}>{t('meetings.audioImport.diarization')}</span>
+          <SelectLite
+            value={diarizationMode}
+            onChange={value => setDiarizationMode(value as 'off' | 'cloud' | 'local')}
+            options={[
+              { value: 'off', label: t('meetings.postProcessing.diarization.off') },
+              {
+                value: 'cloud',
+                label: t('meetings.postProcessing.diarization.cloud'),
+                disabled: selectedModel?.runtimeKind === 'local' || !selectedModel?.supportsDiarization,
+              },
+              { value: 'local', label: t('meetings.postProcessing.diarization.local') },
+            ]}
+            ariaLabel={t('meetings.audioImport.diarization')}
+            style={{ width: '100%' }}
+          />
+        </label>
+        {diarizationMode === 'local' && (
+          <label style={{ display: 'grid', gap: 6 }}>
+            <span style={configLabelStyle}>{t('meetings.audioImport.localSpeakerModel')}</span>
+            <SelectLite
+              value={localDiarizationModelId}
+              onChange={setLocalDiarizationModelId}
+              options={speakerModels.map(model => ({
+                value: model.id,
+                label: model.displayName,
+                disabled: model.readiness !== 'ready',
+              }))}
+              placeholder={t('meetings.audioImport.localSpeakerModelMissing')}
+              ariaLabel={t('meetings.audioImport.localSpeakerModel')}
+              style={{ width: '100%' }}
+            />
+          </label>
+        )}
+        {diarizationMode !== 'off' && (
+          <label style={{ display: 'grid', gap: 6 }}>
+            <span style={configLabelStyle}>{t('meetings.startConfig.expectedSpeakers')}</span>
+            <SelectLite
+              value={speakerCount}
+              onChange={setSpeakerCount}
+              options={speakerCountOptions(t)}
+              ariaLabel={t('meetings.startConfig.expectedSpeakers')}
+              style={{ width: '100%' }}
+            />
+          </label>
+        )}
+        <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 12.5, color: 'var(--ol-ink-2)' }}>
+          <input
+            type="checkbox"
+            checked={generateSummary}
+            onChange={event => setGenerateSummary(event.target.checked)}
+          />
+          {t('meetings.audioImport.generateSummary')}
+        </label>
+        {selectedModel?.runtimeKind === 'cloud' && (
+          <ErrorBanner tone="warning">
+            {diarizationMode === 'local'
+              ? t('meetings.audioImport.cloudAsrLocalDiarizationNotice')
+              : t('meetings.audioImport.cloudUploadNotice')}
+          </ErrorBanner>
+        )}
+        {selectedModel?.runtimeKind === 'local' && (
+          <ErrorBanner tone={unsupportedCombination ? 'error' : 'warning'}>
+            {unsupportedCombination
+              ? t('meetings.audioImport.unsupportedLocalCloud')
+              : t('meetings.audioImport.localOnlyNotice')}
+          </ErrorBanner>
+        )}
+        {localSpeakerUnavailable && (
+          <ErrorBanner tone="error">{t('meetings.audioImport.localSpeakerModelMissing')}</ErrorBanner>
+        )}
+        {dialogError && <ErrorBanner tone="error">{dialogError}</ErrorBanner>}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
+        <Btn variant="ghost" size="sm" disabled={loading} onClick={onClose}>
+          {t('common.cancel')}
+        </Btn>
+        <Btn icon="doc" variant="blue" size="sm" disabled={!canStart} onClick={() => void start()}>
+          {loading ? t('meetings.audioImport.starting') : t('meetings.audioImport.start')}
+        </Btn>
+      </div>
+    </Modal>
+  );
+}
+
 function MeetingConfigRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 14, paddingBottom: 10, borderBottom: '0.5px solid var(--ol-line-soft)' }}>
       <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>{label}</span>
       <span style={{ minWidth: 0, textAlign: 'right', fontSize: 12.5, color: 'var(--ol-ink)', overflowWrap: 'anywhere' }}>{children}</span>
     </div>
+  );
+}
+
+function MeetingAudioImportSection({
+  record,
+  models,
+  speakerModels,
+  actionLoading,
+  onRetry,
+  onCancel,
+  onRenameSpeaker,
+}: {
+  record: MeetingRecord;
+  models: MeetingAsrModelDescriptor[];
+  speakerModels: SpeakerDiarizationModelDescriptor[];
+  actionLoading: ActionLoading;
+  onRetry: (options: RetryMeetingAudioImportOptions) => void;
+  onCancel: () => void;
+  onRenameSpeaker: (speakerId: string, displayName: string) => void;
+}) {
+  const { t } = useTranslation();
+  const state = record.importState;
+  const config = record.importConfig;
+  const [modelValue, setModelValue] = useState(() => (
+    config ? meetingModelValue(config.asrModelRef) : ''
+  ));
+  const [diarizationMode, setDiarizationMode] = useState(config?.diarizationMode ?? 'off');
+  const [localModelId, setLocalModelId] = useState(config?.localDiarizationModelId ?? '');
+  const [speakerCount, setSpeakerCount] = useState(
+    config?.expectedSpeakerCount ? String(config.expectedSpeakerCount) : 'auto',
+  );
+  const [generateSummary, setGenerateSummary] = useState(config?.generateSummary ?? true);
+
+  useEffect(() => {
+    if (!config) return;
+    setModelValue(meetingModelValue(config.asrModelRef));
+    setDiarizationMode(config.diarizationMode);
+    setLocalModelId(config.localDiarizationModelId ?? '');
+    setSpeakerCount(config.expectedSpeakerCount ? String(config.expectedSpeakerCount) : 'auto');
+    setGenerateSummary(config.generateSummary);
+  }, [config]);
+
+  if (!state || !config) return null;
+  const selectedModel = models.find(model => meetingModelValue(model) === modelValue);
+  const selectedLocalModel = speakerModels.find(model => model.id === localModelId);
+  const summaryFailure = state.status === 'failed'
+    && state.errorCode?.startsWith('summary') === true;
+  const retryable = (state.status === 'failed' || state.status === 'cancelled')
+    && !summaryFailure;
+  const cancellable = ['selected', 'validating', 'importing', 'ready', 'transcribing', 'applying'].includes(state.status);
+  const busy = actionLoading === 'import';
+  const unsupportedCombination = selectedModel?.runtimeKind === 'local' && diarizationMode === 'cloud';
+  const localSpeakerUnavailable = diarizationMode === 'local'
+    && selectedLocalModel?.readiness !== 'ready';
+  const canRetry = Boolean(
+    retryable
+    && selectedModel?.readiness === 'ready'
+    && !unsupportedCombination
+    && !localSpeakerUnavailable
+    && !busy,
+  );
+  const progress = state.progress == null ? null : Math.round(state.progress * 100);
+
+  return (
+    <section style={{ padding: '12px 0', borderBottom: '0.5px solid var(--ol-line)', marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
+          {t('meetings.audioImport.processingTitle')}
+        </span>
+        <Pill size="sm" tone={importStatusTone(state.status)}>
+          {t(`meetings.audioImport.status.${state.status}`)}
+        </Pill>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, fontSize: 11.5, color: 'var(--ol-ink-4)' }}>
+        <span>{t('meetings.audioImport.sourceFile')}: {config.sourceFileName}</span>
+        <span>{t('meetings.audioImport.asrModel')}: {config.asrModelRef.modelId}</span>
+        <span>{t('meetings.audioImport.runtimeLabel')}: {t(`meetings.audioImport.runtime.${config.resolvedAsrRuntimeKind}`)}</span>
+        <span>{t('meetings.postProcessing.attempt')}: {state.attempt}</span>
+      </div>
+      {progress != null && !['completed', 'failed', 'cancelled'].includes(state.status) && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ height: 5, borderRadius: 3, background: 'var(--ol-control-muted)', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${progress}%`, background: 'var(--ol-blue)', transition: 'width .18s var(--ol-motion-quick)' }} />
+          </div>
+          <div style={{ marginTop: 4, fontSize: 10.5, color: 'var(--ol-ink-4)' }}>{progress}%</div>
+        </div>
+      )}
+      {state.errorMessage && (
+        <div style={{ marginTop: 10 }}><ErrorBanner tone="error">{state.errorMessage}</ErrorBanner></div>
+      )}
+      {summaryFailure && (
+        <div style={{ marginTop: 10 }}>
+          <ErrorBanner tone="warning">{t('meetings.audioImport.summaryRetryHint')}</ErrorBanner>
+        </div>
+      )}
+      {retryable && (
+        <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
+          <SelectLite
+            value={modelValue}
+            onChange={setModelValue}
+            options={models.map(model => ({
+              value: meetingModelValue(model),
+              label: `${model.displayName} · ${t(`meetings.audioImport.runtime.${model.runtimeKind}`)}`,
+              disabled: model.readiness !== 'ready',
+            }))}
+            ariaLabel={t('meetings.audioImport.asrModel')}
+            style={{ width: '100%' }}
+          />
+          <SelectLite
+            value={diarizationMode}
+            onChange={value => setDiarizationMode(value as 'off' | 'cloud' | 'local')}
+            options={[
+              { value: 'off', label: t('meetings.postProcessing.diarization.off') },
+              {
+                value: 'cloud',
+                label: t('meetings.postProcessing.diarization.cloud'),
+                disabled: selectedModel?.runtimeKind === 'local' || !selectedModel?.supportsDiarization,
+              },
+              { value: 'local', label: t('meetings.postProcessing.diarization.local') },
+            ]}
+            ariaLabel={t('meetings.audioImport.diarization')}
+            style={{ width: '100%' }}
+          />
+          {diarizationMode === 'local' && (
+            <SelectLite
+              value={localModelId}
+              onChange={setLocalModelId}
+              options={speakerModels.map(model => ({
+                value: model.id,
+                label: model.displayName,
+                disabled: model.readiness !== 'ready',
+              }))}
+              placeholder={t('meetings.audioImport.localSpeakerModelMissing')}
+              ariaLabel={t('meetings.audioImport.localSpeakerModel')}
+              style={{ width: '100%' }}
+            />
+          )}
+          {diarizationMode !== 'off' && (
+            <SelectLite
+              value={speakerCount}
+              onChange={setSpeakerCount}
+              options={speakerCountOptions(t)}
+              ariaLabel={t('meetings.startConfig.expectedSpeakers')}
+              style={{ width: '100%' }}
+            />
+          )}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 12, color: 'var(--ol-ink-2)' }}>
+            <input
+              type="checkbox"
+              checked={generateSummary}
+              onChange={event => setGenerateSummary(event.target.checked)}
+            />
+            {t('meetings.audioImport.generateSummary')}
+          </label>
+          {(unsupportedCombination || localSpeakerUnavailable) && (
+            <ErrorBanner tone="error">
+              {unsupportedCombination
+                ? t('meetings.audioImport.unsupportedLocalCloud')
+                : t('meetings.audioImport.localSpeakerModelMissing')}
+            </ErrorBanner>
+          )}
+        </div>
+      )}
+      {(retryable || cancellable) && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+          {retryable && selectedModel && (
+            <Btn
+              icon="refresh"
+              variant="blue"
+              size="sm"
+              disabled={!canRetry}
+              onClick={() => onRetry({
+                asrModelRef: {
+                  providerId: selectedModel.providerId,
+                  modelId: selectedModel.modelId,
+                },
+                diarizationMode,
+                localDiarizationModelId: diarizationMode === 'local' ? localModelId : null,
+                expectedSpeakerCount: speakerCount === 'auto'
+                  ? { mode: 'auto' }
+                  : { mode: 'fixed', count: Number(speakerCount) },
+                generateSummary,
+              })}
+            >
+              {t('meetings.audioImport.retry')}
+            </Btn>
+          )}
+          {cancellable && (
+            <Btn icon="x" variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
+              {state.status === 'cancelling'
+                ? t('meetings.audioImport.cancelling')
+                : t('meetings.audioImport.cancel')}
+            </Btn>
+          )}
+        </div>
+      )}
+      {(record.speakerProfiles?.length ?? 0) > 0 && (
+        <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
+          <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>
+            {t('meetings.postProcessing.speakers')}
+          </span>
+          {record.speakerProfiles?.map(profile => (
+            <SpeakerRenameRow
+              key={profile.id}
+              speakerId={profile.id}
+              displayName={profile.displayName}
+              disabled={busy}
+              onRename={onRenameSpeaker}
+            />
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1314,6 +1917,12 @@ function postProcessingTone(status: NonNullable<MeetingRecord['postProcessing']>
   if (status === 'completed' || status === 'realtime_accepted') return 'ok';
   if (status === 'failed') return 'outline';
   if (status === 'cancelled') return 'outline';
+  return 'blue';
+}
+
+function importStatusTone(status: NonNullable<MeetingRecord['importState']>['status']): PillTone {
+  if (status === 'completed') return 'ok';
+  if (status === 'failed' || status === 'cancelled') return 'outline';
   return 'blue';
 }
 
@@ -2564,6 +3173,19 @@ function formatDuration(ms: number | null, t: ReturnType<typeof useTranslation>[
   const sec = ms / 1000;
   if (sec < 60) return t('common.durationSeconds', { value: sec.toFixed(1) });
   return t('common.durationMinutes', { value: (sec / 60).toFixed(1) });
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(kb >= 100 ? 0 : 1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(mb >= 100 ? 0 : 1)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+
+function meetingModelValue(model: MeetingAsrModelRef): string {
+  return `${model.providerId}/${model.modelId}`;
 }
 
 function dateMs(iso: string): number {

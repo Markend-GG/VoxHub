@@ -16,6 +16,7 @@ pub mod dashscope_multimodal;
 pub mod elevenlabs;
 mod frame;
 pub mod local;
+pub mod meeting_audio_import;
 pub mod meeting_audio_source;
 pub mod mimo;
 pub mod pcm;

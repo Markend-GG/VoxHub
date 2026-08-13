@@ -731,6 +731,29 @@ pub enum MeetingAsrRuntimeKind {
     Local,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingAsrModelReadiness {
+    Ready,
+    Missing,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingAsrModelDescriptor {
+    pub provider_id: String,
+    pub model_id: String,
+    pub display_name: String,
+    pub runtime_kind: MeetingAsrRuntimeKind,
+    pub supports_meeting_file: bool,
+    pub supports_diarization: bool,
+    pub supports_speaker_count: bool,
+    pub readiness: MeetingAsrModelReadiness,
+    pub readiness_message: Option<String>,
+    pub is_default: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PostMeetingAsrModelDescriptor {
@@ -833,6 +856,100 @@ pub struct MeetingPostProcessingState {
     pub completed_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingAudioSelection {
+    pub selection_token: String,
+    pub file_name: String,
+    pub format: String,
+    pub size_bytes: u64,
+    pub duration_ms: u64,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub bits_per_sample: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartMeetingAudioImportOptions {
+    pub selection_token: String,
+    pub title: String,
+    pub asr_model_ref: MeetingAsrModelRef,
+    pub diarization_mode: MeetingDiarizationMode,
+    pub local_diarization_model_id: Option<String>,
+    pub expected_speaker_count: Option<u32>,
+    pub generate_summary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryMeetingAudioImportOptions {
+    pub selection_token: Option<String>,
+    pub asr_model_ref: Option<MeetingAsrModelRef>,
+    pub diarization_mode: Option<MeetingDiarizationMode>,
+    pub local_diarization_model_id: Option<String>,
+    pub expected_speaker_count: Option<ExpectedSpeakerCountOverride>,
+    pub generate_summary: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingImportConfig {
+    pub source_file_name: String,
+    pub source_format: String,
+    pub asr_model_ref: MeetingAsrModelRef,
+    pub resolved_asr_runtime_kind: MeetingAsrRuntimeKind,
+    pub diarization_mode: MeetingDiarizationMode,
+    pub local_diarization_model_id: Option<String>,
+    pub expected_speaker_count: Option<u32>,
+    pub generate_summary: bool,
+    pub processing_revision: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingImportStatus {
+    Selected,
+    Validating,
+    Importing,
+    Ready,
+    Transcribing,
+    Applying,
+    Summarizing,
+    Completed,
+    Failed,
+    Cancelling,
+    Cancelled,
+}
+
+impl MeetingImportStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingImportState {
+    pub status: MeetingImportStatus,
+    pub import_job_id: String,
+    pub progress: Option<f32>,
+    pub attempt: u32,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingImportEvent {
+    pub meeting_id: String,
+    pub state: MeetingImportState,
+    pub meeting: MeetingRecord,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingPostProcessingEvent {
@@ -912,6 +1029,10 @@ pub struct MeetingRecord {
     pub post_processing_config: Option<MeetingPostProcessingConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_processing: Option<MeetingPostProcessingState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_config: Option<MeetingImportConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_state: Option<MeetingImportState>,
     #[serde(default)]
     pub transcript_revisions: Vec<TranscriptRevision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4951,6 +5072,8 @@ mod tests {
             realtime_asr: None,
             post_processing_config: None,
             post_processing: None,
+            import_config: None,
+            import_state: None,
             transcript_revisions: Vec::new(),
             active_transcript_revision: None,
             speaker_profiles: Vec::new(),

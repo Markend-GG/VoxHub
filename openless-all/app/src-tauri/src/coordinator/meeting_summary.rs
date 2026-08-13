@@ -9,8 +9,8 @@ use tauri::Emitter;
 
 use crate::persistence::{MeetingStore, PreferencesStore};
 use crate::types::{
-    MeetingErrorEvent, MeetingRecord, MeetingStatus, MeetingSummary, MeetingSummaryEvent,
-    MeetingTodo, OutputLanguagePreference, UserPreferences,
+    MeetingErrorEvent, MeetingImportStatus, MeetingRecord, MeetingStatus, MeetingSummary,
+    MeetingSummaryEvent, MeetingTodo, OutputLanguagePreference, UserPreferences,
 };
 
 use super::{complete_text_with_active_llm, Inner};
@@ -60,9 +60,12 @@ pub(super) fn prepare_and_spawn_auto_meeting_summary(
     let mut prepared = record.clone();
 
     if let Err(error) = prepare_summary_record(&mut prepared) {
+        complete_import_summary(&mut prepared, Some(&error));
         persist_summary_record(&store, &prepared)?;
+        apply_import_summary_retention(inner, &store, &mut prepared)?;
         *record = prepared;
         emit_meeting_summary_failed(inner, record, "emptyTranscript", &error);
+        super::meeting_audio_import::emit_import_event(inner, record);
         return Ok(());
     }
 
@@ -171,18 +174,62 @@ async fn finish_summarizing_record(
     match llm_result {
         Ok(parsed) => {
             apply_parsed_summary(&mut record, parsed);
+            complete_import_summary(&mut record, None);
             persist_summary_record(&store, &record)?;
+            apply_import_summary_retention(inner, store, &mut record)?;
             emit_meeting_summary(inner, &record, None);
+            super::meeting_audio_import::emit_import_event(inner, &record);
             Ok(record)
         }
         Err(error) => {
             record.status = MeetingStatus::SummaryFailed;
             record.updated_at = Utc::now().to_rfc3339();
+            complete_import_summary(&mut record, Some(&error));
             persist_summary_record(&store, &record)?;
+            apply_import_summary_retention(inner, store, &mut record)?;
             emit_meeting_summary_failed(inner, &record, summary_error_code(&error), &error);
+            super::meeting_audio_import::emit_import_event(inner, &record);
             Ok(record)
         }
     }
+}
+
+fn complete_import_summary(record: &mut MeetingRecord, error: Option<&str>) {
+    let Some(import_state) = record.import_state.as_mut() else {
+        return;
+    };
+    let now = Utc::now().to_rfc3339();
+    import_state.progress = Some(1.0);
+    import_state.updated_at = now.clone();
+    import_state.completed_at = Some(now.clone());
+    if let Some(error) = error {
+        import_state.status = MeetingImportStatus::Failed;
+        import_state.error_code = Some(summary_error_code(error).to_string());
+        import_state.error_message = Some(error.to_string());
+    } else {
+        import_state.status = MeetingImportStatus::Completed;
+        import_state.error_code = None;
+        import_state.error_message = None;
+    }
+    record.processing_hold = None;
+    record.updated_at = now;
+}
+
+fn apply_import_summary_retention(
+    inner: &Arc<Inner>,
+    store: &MeetingStore,
+    record: &mut MeetingRecord,
+) -> Result<(), String> {
+    if record.import_state.is_none() {
+        return Ok(());
+    }
+    store
+        .prune_audio_retention(inner.prefs.get().meeting_audio_retention_count)
+        .map_err(|error| error.to_string())?;
+    if let Some(updated) = store.get(&record.id).map_err(|error| error.to_string())? {
+        *record = updated;
+    }
+    Ok(())
 }
 
 fn summary_error_code(error: &str) -> &'static str {
@@ -715,6 +762,8 @@ mod tests {
             realtime_asr: None,
             post_processing_config: None,
             post_processing: None,
+            import_config: None,
+            import_state: None,
             transcript_revisions: Vec::new(),
             active_transcript_revision: None,
             speaker_profiles: Vec::new(),
