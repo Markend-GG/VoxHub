@@ -2221,6 +2221,146 @@ mod tests {
         result.unwrap();
     }
 
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires configured Bailian credentials and OPENLESS_MEETING_CLOUD_ASR_TEST_WAV"]
+    async fn configured_fun_asr_resumes_persisted_provider_task_after_store_reopen() {
+        let path = std::env::var_os("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV")
+            .map(std::path::PathBuf::from)
+            .expect("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV must point to a PCM WAV");
+        let probe = crate::asr::meeting_audio_import::probe_pcm_wav(&path)
+            .expect("post-meeting resume test WAV must be readable");
+        let managed_dir = std::env::temp_dir().join(format!(
+            "meeting-cloud-asr-resume-integration-{}",
+            Uuid::new_v4()
+        ));
+        let partial_path = managed_dir.join("part-0001.wav.partial");
+        let final_path = managed_dir.join("part-0001.wav");
+        let store_path = managed_dir.join("meetings.json");
+        let result = async {
+            crate::asr::meeting_audio_import::normalize_pcm_wav(
+                &probe,
+                &partial_path,
+                &final_path,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .map_err(|_| "post-meeting resume test WAV normalization failed")?;
+            let source = MeetingAudioSource::from_path(&final_path)
+                .map_err(|_| "normalized post-meeting resume test WAV must be readable")?;
+            let info = source
+                .inspect()
+                .map_err(|_| "post-meeting resume test WAV must be valid")?;
+            let client = build_post_meeting_dashscope_client(FUN_ASR_MODEL_ID)
+                .map_err(|_| "post-meeting resume test client setup failed")?;
+            let file_url = client
+                .upload_meeting_audio(source, Arc::new(AtomicBool::new(false)))
+                .await
+                .map_err(|_| "post-meeting resume test upload failed")?;
+            let provider_task_id = client
+                .submit_async_task(
+                    &file_url,
+                    DashScopeAsyncRequestOptions {
+                        diarization_enabled: false,
+                        speaker_count: None,
+                    },
+                )
+                .await
+                .map_err(|_| "post-meeting resume test submission failed")?;
+
+            let mut candidate = record();
+            candidate.id = "meeting-cloud-worker-resume-fun-asr".to_string();
+            candidate.duration_ms = Some(info.duration_ms);
+            let config = candidate.post_processing_config.as_mut().unwrap();
+            config.diarization_mode = MeetingDiarizationMode::Off;
+            config.expected_speaker_count = None;
+            prepare_post_processing_after_stop(&mut candidate, "2026-08-13T00:00:00Z")
+                .map_err(|_| "post-meeting resume revision setup failed")?;
+            let meeting_id = candidate.id.clone();
+            let state = candidate.post_processing.as_mut().unwrap();
+            state.status = MeetingPostProcessingStatus::Running;
+            state.progress = Some(0.55);
+            state.provider_task_id = Some(provider_task_id.clone());
+            state.started_at = Some("2026-08-13T00:00:01Z".to_string());
+            state.updated_at = "2026-08-13T00:00:01Z".to_string();
+            let job_id = state.job_id.clone();
+            MeetingStore::new_for_path(store_path.clone())
+                .create(candidate)
+                .map_err(|_| "post-meeting resume fixture persistence failed")?;
+
+            let reopened = MeetingStore::new_for_path(store_path.clone());
+            let resumable_jobs = reopened
+                .list()
+                .map_err(|_| "post-meeting resume scan failed")?
+                .into_iter()
+                .filter_map(resumable_post_processing_job)
+                .collect::<Vec<_>>();
+            if resumable_jobs != vec![(meeting_id.clone(), job_id.clone())] {
+                return Err("post-meeting resume scan did not select the persisted running job");
+            }
+
+            let audio_resolver_calls = std::sync::atomic::AtomicUsize::new(0);
+            let audio_path_for_id = |_id: &str| {
+                audio_resolver_calls.fetch_add(1, Ordering::AcqRel);
+                anyhow::bail!("resumed provider task must not reopen meeting audio")
+            };
+            let context = PostProcessingJobContext {
+                inner: None,
+                store: &reopened,
+                audio_path_for_id: &audio_path_for_id,
+            };
+            run_post_processing_job_with_context(
+                &context,
+                &meeting_id,
+                &job_id,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .map_err(|_| "post-meeting resumed worker execution failed")?;
+            if audio_resolver_calls.load(Ordering::Acquire) != 0 {
+                return Err("post-meeting resumed worker accessed meeting audio");
+            }
+
+            let persisted = MeetingStore::new_for_path(store_path)
+                .get(&meeting_id)
+                .map_err(|_| "post-meeting resumed result reload failed")?
+                .ok_or("post-meeting resumed result was not persisted")?;
+            let state = persisted
+                .post_processing
+                .as_ref()
+                .ok_or("post-meeting resumed state is missing")?;
+            let active_revision = persisted
+                .transcript_revisions
+                .iter()
+                .find(|revision| revision.revision == 1)
+                .ok_or("post-meeting resumed revision is missing")?;
+            if state.status != MeetingPostProcessingStatus::Completed
+                || state.provider_task_id.as_deref() != Some(provider_task_id.as_str())
+                || state.model_ref.model_id != FUN_ASR_MODEL_ID
+                || persisted.active_transcript_revision != Some(1)
+                || persisted.processing_hold.is_some()
+                || active_revision.source != TranscriptRevisionSource::CloudPostprocess
+                || active_revision.status != TranscriptRevisionStatus::Active
+                || active_revision.segments != persisted.transcript_segments
+                || persisted.transcript_segments.is_empty()
+                || !persisted.transcript_segments.iter().all(|segment| {
+                    segment.speaker_id.is_none()
+                        && segment.metadata.as_ref().is_some_and(|metadata| {
+                            metadata.provider_id.as_deref() == Some("bailian/fun-asr")
+                                && metadata.provider_session_id.as_deref()
+                                    == Some(provider_task_id.as_str())
+                        })
+                })
+            {
+                return Err("post-meeting resumed worker result is inconsistent");
+            }
+            Ok::<(), &str>(())
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(managed_dir);
+        result.unwrap();
+    }
+
     fn record() -> MeetingRecord {
         MeetingRecord {
             id: "meeting-1".to_string(),
