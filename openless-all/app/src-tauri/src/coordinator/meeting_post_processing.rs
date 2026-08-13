@@ -1981,6 +1981,144 @@ mod tests {
         result.unwrap();
     }
 
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires configured Bailian credentials, OPENLESS_MEETING_DIARIZATION_TEST_WAV, and an installed local diarization package"]
+    async fn configured_fun_asr_worker_persists_local_diarization_result() {
+        let path = std::env::var_os("OPENLESS_MEETING_DIARIZATION_TEST_WAV")
+            .map(std::path::PathBuf::from)
+            .expect("OPENLESS_MEETING_DIARIZATION_TEST_WAV must point to a two-speaker PCM WAV");
+        let probe = crate::asr::meeting_audio_import::probe_pcm_wav(&path)
+            .expect("local diarization worker test WAV must be readable");
+        let managed_dir = std::env::temp_dir().join(format!(
+            "meeting-cloud-local-diarization-integration-{}",
+            Uuid::new_v4()
+        ));
+        let partial_path = managed_dir.join("part-0001.wav.partial");
+        let final_path = managed_dir.join("part-0001.wav");
+        let store_path = managed_dir.join("meetings.json");
+        let result = async {
+            crate::asr::meeting_audio_import::normalize_pcm_wav(
+                &probe,
+                &partial_path,
+                &final_path,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .map_err(|_| "local diarization worker WAV normalization failed")?;
+            let source = MeetingAudioSource::from_path(&final_path)
+                .map_err(|_| "local diarization worker WAV must be readable")?;
+            let info = source
+                .inspect()
+                .map_err(|_| "local diarization worker WAV must be valid")?;
+
+            let local_model_id =
+                crate::asr::local::speaker_diarization::DEFAULT_PACKAGE_ID.to_string();
+            crate::asr::local::speaker_diarization::ensure_package_ready(&local_model_id)
+                .map_err(|_| "local diarization package is not ready")?;
+            let mut candidate = record();
+            candidate.id = "meeting-cloud-local-worker-fun-asr".to_string();
+            candidate.duration_ms = Some(info.duration_ms);
+            let config = candidate.post_processing_config.as_mut().unwrap();
+            config.diarization_mode = MeetingDiarizationMode::Local;
+            config.local_diarization_model_id = Some(local_model_id.clone());
+            config.expected_speaker_count = Some(2);
+            prepare_post_processing_after_stop(&mut candidate, "2026-08-13T00:00:00Z")
+                .map_err(|_| "local diarization worker revision setup failed")?;
+            let meeting_id = candidate.id.clone();
+            let job_id = candidate.post_processing.as_ref().unwrap().job_id.clone();
+            let store = MeetingStore::new_for_path(store_path.clone());
+            store
+                .create(candidate)
+                .map_err(|_| "local diarization worker fixture persistence failed")?;
+            let audio_path_for_id = |_id: &str| Ok(final_path.clone());
+            let context = PostProcessingJobContext {
+                inner: None,
+                store: &store,
+                audio_path_for_id: &audio_path_for_id,
+            };
+            run_post_processing_job_with_context(
+                &context,
+                &meeting_id,
+                &job_id,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .map_err(|_| "local diarization worker execution failed")?;
+
+            let reopened = MeetingStore::new_for_path(store_path);
+            let persisted = reopened
+                .get(&meeting_id)
+                .map_err(|_| "local diarization worker result reload failed")?
+                .ok_or("local diarization worker result was not persisted")?;
+            let state = persisted
+                .post_processing
+                .as_ref()
+                .ok_or("local diarization worker state is missing")?;
+            let provider_task_id = state
+                .provider_task_id
+                .as_deref()
+                .ok_or("local diarization worker provider task id is missing")?;
+            if state.status != MeetingPostProcessingStatus::Completed
+                || state.model_ref.model_id != FUN_ASR_MODEL_ID
+                || state.diarization_mode != MeetingDiarizationMode::Local
+                || persisted.active_transcript_revision != Some(1)
+                || persisted.processing_hold.is_some()
+            {
+                return Err("local diarization worker result did not complete atomically");
+            }
+            let active_revision = persisted
+                .transcript_revisions
+                .iter()
+                .find(|revision| revision.revision == 1)
+                .ok_or("local diarization worker revision is missing")?;
+            if active_revision.source != TranscriptRevisionSource::LocalPostprocess
+                || active_revision.status != TranscriptRevisionStatus::Active
+                || active_revision.segments != persisted.transcript_segments
+            {
+                return Err("local diarization worker active revision is inconsistent");
+            }
+            let turn_speaker_ids = persisted
+                .speaker_turns
+                .iter()
+                .map(|turn| turn.speaker_id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            if turn_speaker_ids.len() != 2
+                || persisted.speaker_profiles.len() != 2
+                || !persisted.speaker_turns.iter().all(|turn| {
+                    turn.start_ms < turn.end_ms && turn.end_ms <= info.duration_ms
+                })
+                || persisted.transcript_segments.is_empty()
+                || !persisted
+                    .transcript_segments
+                    .iter()
+                    .any(|segment| segment.speaker_id.is_some())
+                || !persisted.transcript_segments.iter().all(|segment| {
+                    !segment.text.trim().is_empty()
+                        && segment.start_ms < segment.end_ms.unwrap_or_default()
+                        && segment.end_ms.unwrap_or_default()
+                            <= info.duration_ms.saturating_add(5_000)
+                        && segment.speaker_id.as_deref().is_none_or(|speaker_id| {
+                            turn_speaker_ids.contains(speaker_id)
+                        })
+                        && segment.metadata.as_ref().is_some_and(|metadata| {
+                            metadata.provider_id.as_deref() == Some("bailian/fun-asr")
+                                && metadata.provider_session_id.as_deref()
+                                    == Some(provider_task_id)
+                                && metadata.provider_start_ms == Some(segment.start_ms)
+                                && metadata.provider_end_ms == segment.end_ms
+                        })
+                })
+            {
+                return Err("local diarization worker speaker or timeline mapping is inconsistent");
+            }
+            Ok::<(), &str>(())
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(managed_dir);
+        result.unwrap();
+    }
+
     fn record() -> MeetingRecord {
         MeetingRecord {
             id: "meeting-1".to_string(),
