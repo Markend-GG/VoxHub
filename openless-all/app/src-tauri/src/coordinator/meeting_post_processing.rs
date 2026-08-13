@@ -3266,6 +3266,74 @@ mod tests {
     }
 
     #[test]
+    fn retry_preserves_manual_speaker_names_until_new_revision_is_activated() {
+        let mut candidate = record();
+        candidate
+            .post_processing_config
+            .as_mut()
+            .unwrap()
+            .diarization_mode = MeetingDiarizationMode::Cloud;
+        candidate.transcript_segments[0].speaker_id = Some("speaker-0".to_string());
+        candidate.transcript_segments[0].speaker_label = "发言人 1".to_string();
+        candidate.speaker_profiles[0].display_name = "张三".to_string();
+        candidate.speaker_profiles[0].manually_named = true;
+        prepare_post_processing_after_stop(&mut candidate, "2026-08-12T10:00:01Z").unwrap();
+        let original_job_id = candidate.post_processing.as_ref().unwrap().job_id.clone();
+        candidate.post_processing.as_mut().unwrap().status = MeetingPostProcessingStatus::Failed;
+
+        let mut next_config = candidate.post_processing_config.clone().unwrap();
+        next_config.processing_revision = 2;
+        let next_state = MeetingPostProcessingState {
+            status: MeetingPostProcessingStatus::Pending,
+            job_id: "job-new".to_string(),
+            model_ref: next_config.post_meeting_asr_model_ref.clone(),
+            resolved_runtime_kind: MeetingAsrRuntimeKind::Cloud,
+            diarization_mode: MeetingDiarizationMode::Cloud,
+            expected_speaker_count: None,
+            processing_revision: 2,
+            provider_task_id: None,
+            progress: Some(0.0),
+            attempt: 2,
+            error_code: None,
+            error_message: None,
+            created_at: "2026-08-12T10:01:00Z".to_string(),
+            updated_at: "2026-08-12T10:01:00Z".to_string(),
+            started_at: None,
+            completed_at: None,
+        };
+
+        assert!(apply_retry_transition(
+            &mut candidate,
+            &original_job_id,
+            MeetingPostProcessingStatus::Failed,
+            next_config,
+            next_state,
+            "2026-08-12T10:01:00Z",
+        ));
+        assert_eq!(candidate.speaker_profiles[0].display_name, "张三");
+        assert!(candidate.speaker_profiles[0].manually_named);
+        assert_eq!(candidate.active_transcript_revision, Some(0));
+
+        let state = candidate.post_processing.as_mut().unwrap();
+        state.status = MeetingPostProcessingStatus::Applying;
+        state.provider_task_id = Some("task-2".to_string());
+        assert!(apply_cloud_result_transition(
+            &mut candidate,
+            "job-new",
+            FUN_ASR_MODEL_ID,
+            "task-2",
+            &cloud_transcript(true),
+            "2026-08-12T10:02:00Z",
+        )
+        .unwrap());
+
+        assert_eq!(candidate.active_transcript_revision, Some(2));
+        assert_eq!(candidate.speaker_profiles.len(), 2);
+        assert_eq!(candidate.speaker_profiles[0].display_name, "发言人 1");
+        assert!(!candidate.speaker_profiles[0].manually_named);
+    }
+
+    #[test]
     fn cancel_transition_requires_current_job_and_is_idempotent() {
         let mut candidate = record();
         prepare_post_processing_after_stop(&mut candidate, "2026-08-12T10:00:01Z").unwrap();
