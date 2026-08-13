@@ -2184,6 +2184,280 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[tokio::test]
+    #[ignore = "requires configured Bailian credentials and OPENLESS_MEETING_CLOUD_ASR_TEST_WAV"]
+    async fn configured_bailian_explicit_retry_switches_model_and_revision() {
+        let source_path = std::env::var_os("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV")
+            .map(PathBuf::from)
+            .expect("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV must point to a PCM WAV");
+        let source_before =
+            std::fs::read(&source_path).expect("import source WAV must be readable");
+        let source_hash = Sha256::digest(&source_before);
+        let source_modified = std::fs::metadata(&source_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("import source WAV modification time must be readable");
+        let probe = probe_pcm_wav(&source_path).expect("import source WAV must be valid");
+        let managed_dir = std::env::temp_dir().join(format!(
+            "meeting-audio-import-cloud-retry-integration-{}",
+            Uuid::new_v4()
+        ));
+        let store_path = managed_dir.join("meetings.json");
+        let staging_dir = managed_dir.join("staging");
+        let audio_dir = managed_dir.join("audio");
+
+        let result = async {
+            let mut registry = SelectionRegistry::default();
+            let selection = registry.insert(probe, Instant::now());
+            let store = MeetingStore::new_for_path(store_path.clone());
+            let prepared = persist_meeting_audio_import(
+                StartMeetingAudioImportOptions {
+                    selection_token: selection.selection_token,
+                    title: "云端导入改选重试闭环".to_string(),
+                    asr_model_ref: MeetingAsrModelRef {
+                        provider_id: CLOUD_PROVIDER_ID.to_string(),
+                        model_id: "fun-asr".to_string(),
+                    },
+                    diarization_mode: MeetingDiarizationMode::Off,
+                    local_diarization_model_id: None,
+                    expected_speaker_count: None,
+                    generate_summary: false,
+                },
+                |token| registry.consume(token, Instant::now()),
+                |import_job_id| Ok(staging_dir.join(format!("{import_job_id}.wav.partial"))),
+                |meeting_id| Ok(audio_dir.join(meeting_id).join("part-0001.wav")),
+                |record| {
+                    store
+                        .create(record)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                },
+                "2026-08-13T01:00:00Z",
+            )
+            .map_err(|_| "audio import persistence setup failed")?;
+            let meeting_id = prepared.record.id.clone();
+            let import_job_id = prepared
+                .record
+                .import_state
+                .as_ref()
+                .ok_or("audio import state is missing")?
+                .import_job_id
+                .clone();
+            let normalized = normalize_pcm_wav(
+                &prepared.probe,
+                &prepared.partial_path,
+                &prepared.managed_path,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .map_err(|_| "audio import normalization failed")?;
+
+            let first_post_job_id = Uuid::new_v4().to_string();
+            transition_import_to_post_processing_with_store(
+                &store,
+                &meeting_id,
+                &import_job_id,
+                normalized.duration_ms,
+                &AtomicBool::new(false),
+                &first_post_job_id,
+                "2026-08-13T01:00:01Z",
+            )
+            .map_err(|_| "audio import post-processing transition failed")?;
+            let failed = store
+                .update_if(&meeting_id, |record| {
+                    let Some(post_state) = record.post_processing.as_mut() else {
+                        return false;
+                    };
+                    if post_state.job_id != first_post_job_id
+                        || post_state.model_ref.model_id != "fun-asr"
+                        || post_state.status != MeetingPostProcessingStatus::Pending
+                    {
+                        return false;
+                    }
+                    post_state.status = MeetingPostProcessingStatus::Failed;
+                    post_state.error_code = Some("configuredTestFailure".to_string());
+                    post_state.error_message = Some("测试持久化的 fun-asr 失败".to_string());
+                    post_state.updated_at = "2026-08-13T01:00:02Z".to_string();
+                    post_state.started_at = Some("2026-08-13T01:00:01Z".to_string());
+
+                    let Some(import_state) = record.import_state.as_mut() else {
+                        return false;
+                    };
+                    if import_state.import_job_id != import_job_id {
+                        return false;
+                    }
+                    import_state.status = MeetingImportStatus::Failed;
+                    import_state.progress = None;
+                    import_state.error_code = Some("configuredTestFailure".to_string());
+                    import_state.error_message = Some("测试持久化的 fun-asr 失败".to_string());
+                    import_state.updated_at = "2026-08-13T01:00:02Z".to_string();
+                    record.transcript_revisions.push(TranscriptRevision {
+                        revision: 1,
+                        source: TranscriptRevisionSource::Imported,
+                        status: TranscriptRevisionStatus::Staging,
+                        segments: Vec::new(),
+                        created_at: "2026-08-13T01:00:01Z".to_string(),
+                    });
+                    record.updated_at = "2026-08-13T01:00:02Z".to_string();
+                    true
+                })
+                .map_err(|_| "failed state persistence failed")?
+                .ok_or("failed state transition was rejected")?;
+
+            let failed_import_state = failed
+                .import_state
+                .as_ref()
+                .ok_or("failed import state is missing")?;
+            let failed_post_state = failed
+                .post_processing
+                .as_ref()
+                .ok_or("failed post-processing state is missing")?;
+            if failed_import_state.status != MeetingImportStatus::Failed
+                || failed_import_state.attempt != 1
+                || failed_post_state.status != MeetingPostProcessingStatus::Failed
+                || failed_post_state.model_ref.model_id != "fun-asr"
+                || failed_post_state.job_id != first_post_job_id
+                || failed
+                    .import_config
+                    .as_ref()
+                    .is_none_or(|config| config.asr_model_ref.model_id != "fun-asr")
+                || failed
+                    .processing_hold
+                    .as_ref()
+                    .is_none_or(|hold| hold.job_id != first_post_job_id)
+            {
+                return Err("fun-asr failure changed route without an explicit retry");
+            }
+
+            let mut next_config = failed
+                .import_config
+                .clone()
+                .ok_or("failed import config is missing")?;
+            next_config.asr_model_ref = MeetingAsrModelRef {
+                provider_id: CLOUD_PROVIDER_ID.to_string(),
+                model_id: "paraformer-v2".to_string(),
+            };
+            next_config.resolved_asr_runtime_kind = MeetingAsrRuntimeKind::Cloud;
+            next_config.processing_revision = 2;
+            let second_post_job_id = Uuid::new_v4().to_string();
+            let retry_created_at = failed_import_state.created_at.clone();
+            let retried = store
+                .update_if(&meeting_id, |record| {
+                    apply_managed_audio_retry_transition(
+                        record,
+                        &import_job_id,
+                        MeetingImportStatus::Failed,
+                        &next_config,
+                        &second_post_job_id,
+                        2,
+                        &retry_created_at,
+                        "2026-08-13T01:00:03Z",
+                    )
+                })
+                .map_err(|_| "explicit retry persistence failed")?
+                .ok_or("explicit retry transition was rejected")?;
+            if second_post_job_id == first_post_job_id
+                || retried
+                    .import_state
+                    .as_ref()
+                    .is_none_or(|state| {
+                        state.status != MeetingImportStatus::Transcribing
+                            || state.attempt != 2
+                            || state.created_at != retry_created_at
+                    })
+                || retried
+                    .post_processing
+                    .as_ref()
+                    .is_none_or(|state| {
+                        state.status != MeetingPostProcessingStatus::Pending
+                            || state.job_id != second_post_job_id
+                            || state.model_ref.model_id != "paraformer-v2"
+                            || state.attempt != 2
+                            || state.processing_revision != 2
+                    })
+                || retried.transcript_revisions.iter().any(|revision| {
+                    revision.revision == 1
+                        && revision.status != TranscriptRevisionStatus::Rejected
+                })
+            {
+                return Err("explicit retry did not create an isolated second attempt");
+            }
+
+            super::super::meeting_post_processing::run_post_processing_job_for_test(
+                &store,
+                &meeting_id,
+                &second_post_job_id,
+                prepared.managed_path.clone(),
+            )
+            .await
+            .map_err(|_| "paraformer-v2 retry worker execution failed")?;
+
+            let persisted = MeetingStore::new_for_path(store_path)
+                .get(&meeting_id)
+                .map_err(|_| "audio import retry result reload failed")?
+                .ok_or("audio import retry result was not persisted")?;
+            let import_state = persisted
+                .import_state
+                .as_ref()
+                .ok_or("audio import retry final state is missing")?;
+            let post_state = persisted
+                .post_processing
+                .as_ref()
+                .ok_or("audio import retry post-processing state is missing")?;
+            let provider_task_id = post_state
+                .provider_task_id
+                .as_deref()
+                .ok_or("audio import retry provider task id is missing")?;
+            let active_revision = persisted
+                .transcript_revisions
+                .iter()
+                .find(|revision| revision.revision == 2)
+                .ok_or("audio import retry revision is missing")?;
+            let old_revision = persisted
+                .transcript_revisions
+                .iter()
+                .find(|revision| revision.revision == 1)
+                .ok_or("audio import original staging revision is missing")?;
+            if persisted.status != MeetingStatus::Completed
+                || import_state.status != MeetingImportStatus::Completed
+                || import_state.attempt != 2
+                || post_state.status != MeetingPostProcessingStatus::Completed
+                || post_state.job_id != second_post_job_id
+                || post_state.model_ref.model_id != "paraformer-v2"
+                || post_state.attempt != 2
+                || post_state.processing_revision != 2
+                || persisted.active_transcript_revision != Some(2)
+                || persisted.processing_hold.is_some()
+                || old_revision.status != TranscriptRevisionStatus::Rejected
+                || active_revision.source != TranscriptRevisionSource::Imported
+                || active_revision.status != TranscriptRevisionStatus::Active
+                || active_revision.segments != persisted.transcript_segments
+                || persisted.transcript_segments.is_empty()
+                || !persisted.transcript_segments.iter().all(|segment| {
+                    segment.metadata.as_ref().is_some_and(|metadata| {
+                        metadata.provider_id.as_deref() == Some("bailian/paraformer-v2")
+                            && metadata.provider_session_id.as_deref()
+                                == Some(provider_task_id)
+                    })
+                })
+            {
+                return Err("audio import explicit retry result is inconsistent");
+            }
+            Ok::<(), &str>(())
+        }
+        .await;
+
+        let source_after =
+            std::fs::read(&source_path).expect("import source WAV must remain readable");
+        let source_modified_after = std::fs::metadata(&source_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("import source WAV modification time must remain readable");
+        let _ = std::fs::remove_dir_all(managed_dir);
+        assert_eq!(Sha256::digest(source_after), source_hash);
+        assert_eq!(source_modified_after, source_modified);
+        result.unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
     #[ignore = "requires OPENLESS_MEETING_ASR_TEST_WAV and an installed offline sherpa model"]
     async fn installed_local_asr_import_persists_end_to_end_route() {
         let source_path = std::env::var_os("OPENLESS_MEETING_ASR_TEST_WAV")
