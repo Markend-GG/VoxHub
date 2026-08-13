@@ -1730,6 +1730,76 @@ mod tests {
         (probe_pcm_wav(&path).unwrap(), dir)
     }
 
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires OPENLESS_MEETING_ASR_TEST_WAV and an installed offline sherpa model"]
+    async fn installed_local_model_runs_meeting_batch_transcriber() {
+        let path = std::env::var_os("OPENLESS_MEETING_ASR_TEST_WAV")
+            .map(PathBuf::from)
+            .expect("OPENLESS_MEETING_ASR_TEST_WAV must point to a PCM WAV");
+        let probe = probe_pcm_wav(&path).unwrap();
+        let managed_dir = std::env::temp_dir().join(format!(
+            "meeting-local-asr-integration-{}",
+            Uuid::new_v4()
+        ));
+        let partial_path = managed_dir.join("part-0001.wav.partial");
+        let final_path = managed_dir.join("part-0001.wav");
+        normalize_pcm_wav(
+            &probe,
+            &partial_path,
+            &final_path,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        let source = MeetingAudioSource::from_path(&final_path).unwrap();
+        let info = source.inspect().unwrap();
+        let model_ref = MeetingAsrModelRef {
+            provider_id: LOCAL_PROVIDER_ID.to_string(),
+            model_id: crate::asr::local::sherpa::DEFAULT_MODEL_ALIAS.to_string(),
+        };
+        let runtime = Arc::new(crate::asr::local::SherpaOnnxRuntime::new());
+        let transcriber = MeetingBatchTranscriber {
+            runtime: Arc::clone(&runtime),
+            source,
+            model_ref: &model_ref,
+            language_hint: "zh",
+            job_id: "installed-local-model",
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+
+        let segments = transcriber
+            .transcribe(bounded_windows(info.duration_ms))
+            .await
+            .unwrap();
+
+        assert!(!segments.is_empty());
+        assert!(segments.iter().all(|segment| {
+            segment.source == TranscriptSegmentSource::RetranscribedAsr
+                && segment.speaker_id.is_none()
+                && segment.speaker_label == "未区分"
+                && segment.metadata.as_ref().is_some_and(|metadata| {
+                    metadata.provider_id.as_deref()
+                        == Some("sherpa-onnx-local/sense-voice-small-zh")
+                        && metadata.provider_session_id.as_deref()
+                            == Some("installed-local-model")
+                })
+        }));
+        let transcript = segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            ["会议", "计划", "任务"]
+                .iter()
+                .any(|keyword| transcript.contains(keyword)),
+            "unexpected local meeting transcript: {transcript}"
+        );
+        runtime.release_now().await.unwrap();
+        let _ = std::fs::remove_dir_all(managed_dir);
+    }
+
     #[test]
     fn registry_only_exposes_supported_cloud_and_offline_local_models() {
         let models = list_meeting_file_asr_models();
