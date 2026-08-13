@@ -1780,6 +1780,206 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    async fn run_installed_local_import_fixture(
+        source_path: &std::path::Path,
+        diarization_mode: MeetingDiarizationMode,
+        local_diarization_model_id: Option<&str>,
+        expected_speaker_count: Option<u32>,
+    ) -> Result<MeetingRecord, String> {
+        let source_before = std::fs::read(source_path)
+            .map_err(|error| format!("import source WAV must be readable: {error}"))?;
+        let source_hash = Sha256::digest(&source_before);
+        let source_modified = std::fs::metadata(source_path)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|error| format!("import source WAV modification time is unavailable: {error}"))?;
+        let probe = probe_pcm_wav(source_path)
+            .map_err(|error| format!("import source WAV must be valid: {error:#}"))?;
+        let managed_dir = std::env::temp_dir().join(format!(
+            "meeting-local-import-integration-{}",
+            Uuid::new_v4()
+        ));
+        let store_path = managed_dir.join("meetings.json");
+        let staging_dir = managed_dir.join("staging");
+        let audio_dir = managed_dir.join("audio");
+        let runtime = Arc::new(crate::asr::local::SherpaOnnxRuntime::new());
+        let result = async {
+            let mut registry = SelectionRegistry::default();
+            let selection = registry.insert(probe, Instant::now());
+            let options = StartMeetingAudioImportOptions {
+                selection_token: selection.selection_token.clone(),
+                title: "本地导入闭环".to_string(),
+                asr_model_ref: MeetingAsrModelRef {
+                    provider_id: LOCAL_PROVIDER_ID.to_string(),
+                    model_id: crate::asr::local::sherpa::DEFAULT_MODEL_ALIAS.to_string(),
+                },
+                diarization_mode,
+                local_diarization_model_id: local_diarization_model_id.map(str::to_string),
+                expected_speaker_count,
+                generate_summary: false,
+            };
+            let store = MeetingStore::new_for_path(store_path.clone());
+            let prepared = persist_meeting_audio_import(
+                options,
+                |token| registry.consume(token, Instant::now()),
+                |import_job_id| Ok(staging_dir.join(format!("{import_job_id}.wav.partial"))),
+                |meeting_id| Ok(audio_dir.join(meeting_id).join("part-0001.wav")),
+                |record| {
+                    store
+                        .create(record)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                },
+                "2026-08-13T00:10:00Z",
+            )
+            .map_err(|error| format!("audio import persistence setup failed: {error}"))?;
+            if registry
+                .consume(&selection.selection_token, Instant::now())
+                .is_ok()
+            {
+                return Err("audio import selection token was reusable".to_string());
+            }
+            let meeting_id = prepared.record.id.clone();
+            let import_job_id = prepared
+                .record
+                .import_state
+                .as_ref()
+                .ok_or_else(|| "audio import state is missing".to_string())?
+                .import_job_id
+                .clone();
+            let import_config = prepared
+                .record
+                .import_config
+                .as_ref()
+                .ok_or_else(|| "audio import config is missing".to_string())?;
+            if import_config.asr_model_ref.provider_id != LOCAL_PROVIDER_ID
+                || import_config.asr_model_ref.model_id
+                    != crate::asr::local::sherpa::DEFAULT_MODEL_ALIAS
+                || import_config.resolved_asr_runtime_kind != MeetingAsrRuntimeKind::Local
+                || import_config.diarization_mode != diarization_mode
+                || import_config.local_diarization_model_id.as_deref()
+                    != local_diarization_model_id
+                || import_config.expected_speaker_count != expected_speaker_count
+            {
+                return Err("audio import did not persist the backend-resolved local route".to_string());
+            }
+
+            let normalized = normalize_pcm_wav(
+                &prepared.probe,
+                &prepared.partial_path,
+                &prepared.managed_path,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .map_err(|error| format!("audio import normalization failed: {error:#}"))?;
+            if prepared.partial_path.exists() || !prepared.managed_path.exists() {
+                return Err("audio import managed WAV was not committed atomically".to_string());
+            }
+            MeetingAudioSource::from_path(&prepared.managed_path)
+                .and_then(|source| source.inspect())
+                .map_err(|error| format!("audio import managed WAV is invalid: {error:#}"))?;
+
+            let post_job_id = Uuid::new_v4().to_string();
+            let transitioned = transition_import_to_post_processing_with_store(
+                &store,
+                &meeting_id,
+                &import_job_id,
+                normalized.duration_ms,
+                &AtomicBool::new(false),
+                &post_job_id,
+                "2026-08-13T00:10:01Z",
+            )
+            .map_err(|error| format!("audio import post-processing transition failed: {error}"))?;
+            if transitioned
+                .post_processing
+                .as_ref()
+                .is_none_or(|state| {
+                    state.status != MeetingPostProcessingStatus::Pending
+                        || state.job_id != post_job_id
+                        || state.model_ref.provider_id != LOCAL_PROVIDER_ID
+                        || state.resolved_runtime_kind != MeetingAsrRuntimeKind::Local
+                        || state.diarization_mode != diarization_mode
+                })
+                || transitioned
+                    .processing_hold
+                    .as_ref()
+                    .is_none_or(|hold| hold.job_id != post_job_id)
+            {
+                return Err("audio import did not transition to the resolved local worker".to_string());
+            }
+            super::super::meeting_post_processing::run_local_post_processing_job_for_test(
+                &store,
+                &meeting_id,
+                &post_job_id,
+                prepared.managed_path.clone(),
+                &runtime,
+                "zh",
+            )
+            .await
+            .map_err(|error| format!("audio import local worker execution failed: {error}"))?;
+
+            let persisted = MeetingStore::new_for_path(store_path.clone())
+                .get(&meeting_id)
+                .map_err(|error| format!("audio import result reload failed: {error}"))?
+                .ok_or_else(|| "audio import result was not persisted".to_string())?;
+            let import_state = persisted
+                .import_state
+                .as_ref()
+                .ok_or_else(|| "audio import final state is missing".to_string())?;
+            let post_state = persisted
+                .post_processing
+                .as_ref()
+                .ok_or_else(|| "audio import final post-processing state is missing".to_string())?;
+            let active_revision = persisted
+                .transcript_revisions
+                .iter()
+                .find(|revision| revision.revision == 1)
+                .ok_or_else(|| "audio import revision is missing".to_string())?;
+            if persisted.status != MeetingStatus::Completed
+                || persisted.audio.state != MeetingAudioState::Retained
+                || !persisted.audio.retained
+                || import_state.status != MeetingImportStatus::Completed
+                || post_state.status != MeetingPostProcessingStatus::Completed
+                || post_state.resolved_runtime_kind != MeetingAsrRuntimeKind::Local
+                || post_state.diarization_mode != diarization_mode
+                || post_state.provider_task_id.is_some()
+                || persisted.active_transcript_revision != Some(1)
+                || persisted.processing_hold.is_some()
+                || active_revision.source != TranscriptRevisionSource::Imported
+                || active_revision.status != TranscriptRevisionStatus::Active
+                || active_revision.segments != persisted.transcript_segments
+                || persisted.transcript_segments.is_empty()
+                || !persisted.transcript_segments.iter().all(|segment| {
+                    segment.source == TranscriptSegmentSource::RetranscribedAsr
+                        && segment.metadata.as_ref().is_some_and(|metadata| {
+                            metadata.provider_id.as_deref()
+                                == Some("sherpa-onnx-local/sense-voice-small-zh")
+                                && metadata.provider_session_id.as_deref() == Some(&post_job_id)
+                        })
+                })
+            {
+                return Err("audio import persisted local result is inconsistent".to_string());
+            }
+            Ok(persisted)
+        }
+        .await;
+        let release_result = runtime
+            .release_now()
+            .await
+            .map_err(|error| format!("local runtime release failed: {error:#}"));
+        let source_after = std::fs::read(source_path)
+            .map_err(|error| format!("import source WAV must remain readable: {error}"))?;
+        let source_modified_after = std::fs::metadata(source_path)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|error| format!("import source WAV modification time changed: {error}"))?;
+        let _ = std::fs::remove_dir_all(managed_dir);
+        if Sha256::digest(source_after) != source_hash || source_modified_after != source_modified {
+            return Err("audio import modified the user source file".to_string());
+        }
+        release_result?;
+        result
+    }
+
+    #[cfg(target_os = "windows")]
     #[tokio::test]
     #[ignore = "requires configured Bailian credentials and OPENLESS_MEETING_CLOUD_ASR_TEST_WAV"]
     async fn configured_fun_asr_import_persists_end_to_end_cloud_route() {
@@ -1971,291 +2171,80 @@ mod tests {
         let source_path = std::env::var_os("OPENLESS_MEETING_ASR_TEST_WAV")
             .map(PathBuf::from)
             .expect("OPENLESS_MEETING_ASR_TEST_WAV must point to a PCM WAV");
-        let source_before = std::fs::read(&source_path).expect("import source WAV must be readable");
-        let source_hash = Sha256::digest(&source_before);
-        let source_modified = std::fs::metadata(&source_path)
-            .and_then(|metadata| metadata.modified())
-            .expect("import source WAV modification time must be readable");
-        let probe = probe_pcm_wav(&source_path).expect("import source WAV must be valid");
-        let managed_dir = std::env::temp_dir().join(format!(
-            "meeting-local-asr-integration-{}",
-            Uuid::new_v4()
-        ));
-        let store_path = managed_dir.join("meetings.json");
-        let staging_dir = managed_dir.join("staging");
-        let audio_dir = managed_dir.join("audio");
-        let runtime = Arc::new(crate::asr::local::SherpaOnnxRuntime::new());
-        let result = async {
-            let mut registry = SelectionRegistry::default();
-            let selection = registry.insert(probe, Instant::now());
-            let options = StartMeetingAudioImportOptions {
-                selection_token: selection.selection_token.clone(),
-                title: "本地导入闭环".to_string(),
-                asr_model_ref: MeetingAsrModelRef {
-                    provider_id: LOCAL_PROVIDER_ID.to_string(),
-                    model_id: crate::asr::local::sherpa::DEFAULT_MODEL_ALIAS.to_string(),
-                },
-                diarization_mode: MeetingDiarizationMode::Off,
-                local_diarization_model_id: None,
-                expected_speaker_count: None,
-                generate_summary: false,
-            };
-            let store = MeetingStore::new_for_path(store_path.clone());
-            let prepared = persist_meeting_audio_import(
-                options,
-                |token| registry.consume(token, Instant::now()),
-                |import_job_id| Ok(staging_dir.join(format!("{import_job_id}.wav.partial"))),
-                |meeting_id| Ok(audio_dir.join(meeting_id).join("part-0001.wav")),
-                |record| {
-                    store
-                        .create(record)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
-                },
-                "2026-08-13T00:10:00Z",
-            )
-            .map_err(|error| format!("audio import persistence setup failed: {error}"))?;
-            if registry
-                .consume(&selection.selection_token, Instant::now())
-                .is_ok()
-            {
-                return Err("audio import selection token was reusable".to_string());
-            }
-            let meeting_id = prepared.record.id.clone();
-            let import_job_id = prepared
-                .record
-                .import_state
-                .as_ref()
-                .ok_or_else(|| "audio import state is missing".to_string())?
-                .import_job_id
-                .clone();
-            if prepared
-                .record
-                .import_config
-                .as_ref()
-                .is_none_or(|config| {
-                    config.asr_model_ref.provider_id != LOCAL_PROVIDER_ID
-                        || config.asr_model_ref.model_id
-                            != crate::asr::local::sherpa::DEFAULT_MODEL_ALIAS
-                        || config.resolved_asr_runtime_kind != MeetingAsrRuntimeKind::Local
-                        || config.diarization_mode != MeetingDiarizationMode::Off
-                })
-            {
-                return Err("audio import did not persist the backend-resolved local route".to_string());
-            }
-
-            let normalized = normalize_pcm_wav(
-                &prepared.probe,
-                &prepared.partial_path,
-                &prepared.managed_path,
-                &AtomicBool::new(false),
-                |_| {},
-            )
-            .map_err(|error| format!("audio import normalization failed: {error:#}"))?;
-            if prepared.partial_path.exists() || !prepared.managed_path.exists() {
-                return Err("audio import managed WAV was not committed atomically".to_string());
-            }
-            MeetingAudioSource::from_path(&prepared.managed_path)
-                .and_then(|source| source.inspect())
-                .map_err(|error| format!("audio import managed WAV is invalid: {error:#}"))?;
-
-            let post_job_id = Uuid::new_v4().to_string();
-            let transitioned = transition_import_to_post_processing_with_store(
-                &store,
-                &meeting_id,
-                &import_job_id,
-                normalized.duration_ms,
-                &AtomicBool::new(false),
-                &post_job_id,
-                "2026-08-13T00:10:01Z",
-            )
-            .map_err(|error| format!("audio import post-processing transition failed: {error}"))?;
-            if transitioned
-                .post_processing
-                .as_ref()
-                .is_none_or(|state| {
-                    state.status != MeetingPostProcessingStatus::Pending
-                        || state.job_id != post_job_id
-                        || state.model_ref.provider_id != LOCAL_PROVIDER_ID
-                        || state.resolved_runtime_kind != MeetingAsrRuntimeKind::Local
-                })
-                || transitioned
-                    .processing_hold
-                    .as_ref()
-                    .is_none_or(|hold| hold.job_id != post_job_id)
-            {
-                return Err("audio import did not transition to the resolved local worker".to_string());
-            }
-            super::super::meeting_post_processing::run_local_post_processing_job_for_test(
-                &store,
-                &meeting_id,
-                &post_job_id,
-                prepared.managed_path.clone(),
-                &runtime,
-                "zh",
-            )
-            .await
-            .map_err(|error| format!("audio import local worker execution failed: {error}"))?;
-
-            let persisted = MeetingStore::new_for_path(store_path.clone())
-                .get(&meeting_id)
-                .map_err(|error| format!("audio import result reload failed: {error}"))?
-                .ok_or_else(|| "audio import result was not persisted".to_string())?;
-            let import_state = persisted
-                .import_state
-                .as_ref()
-                .ok_or_else(|| "audio import final state is missing".to_string())?;
-            let post_state = persisted
-                .post_processing
-                .as_ref()
-                .ok_or_else(|| "audio import final post-processing state is missing".to_string())?;
-            let active_revision = persisted
-                .transcript_revisions
+        let persisted = run_installed_local_import_fixture(
+            &source_path,
+            MeetingDiarizationMode::Off,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(persisted.speaker_profiles.is_empty());
+        assert!(persisted.speaker_turns.is_empty());
+        assert!(persisted.transcript_segments.iter().all(|segment| {
+            segment.speaker_id.is_none() && segment.speaker_label == "未区分"
+        }));
+        let transcript = persisted
+            .transcript_segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            ["会议", "计划", "任务"]
                 .iter()
-                .find(|revision| revision.revision == 1)
-                .ok_or_else(|| "audio import revision is missing".to_string())?;
-            if persisted.status != MeetingStatus::Completed
-                || persisted.audio.state != MeetingAudioState::Retained
-                || !persisted.audio.retained
-                || import_state.status != MeetingImportStatus::Completed
-                || post_state.status != MeetingPostProcessingStatus::Completed
-                || post_state.resolved_runtime_kind != MeetingAsrRuntimeKind::Local
-                || post_state.provider_task_id.is_some()
-                || persisted.active_transcript_revision != Some(1)
-                || persisted.processing_hold.is_some()
-                || active_revision.source != TranscriptRevisionSource::Imported
-                || active_revision.status != TranscriptRevisionStatus::Active
-                || active_revision.segments != persisted.transcript_segments
-                || persisted.transcript_segments.is_empty()
-                || !persisted.transcript_segments.iter().all(|segment| {
-                    segment.source == TranscriptSegmentSource::RetranscribedAsr
-                        && segment.speaker_id.is_none()
-                        && segment.speaker_label == "未区分"
-                        && segment.metadata.as_ref().is_some_and(|metadata| {
-                            metadata.provider_id.as_deref()
-                                == Some("sherpa-onnx-local/sense-voice-small-zh")
-                                && metadata.provider_session_id.as_deref() == Some(&post_job_id)
-                        })
-                })
-            {
-                return Err("audio import persisted local result is inconsistent".to_string());
-            }
-            let transcript = persisted
-                .transcript_segments
-                .iter()
-                .map(|segment| segment.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            if !["会议", "计划", "任务"]
-                .iter()
-                .any(|keyword| transcript.contains(keyword))
-            {
-                return Err(format!("unexpected local meeting transcript: {transcript}"));
-            }
-            Ok::<(), String>(())
-        }
-        .await;
-        runtime.release_now().await.unwrap();
-        let source_after = std::fs::read(&source_path).expect("import source WAV must remain readable");
-        let source_modified_after = std::fs::metadata(&source_path)
-            .and_then(|metadata| metadata.modified())
-            .expect("import source WAV modification time must remain readable");
-        let _ = std::fs::remove_dir_all(managed_dir);
-        assert_eq!(Sha256::digest(source_after), source_hash);
-        assert_eq!(source_modified_after, source_modified);
-        result.unwrap();
+                .any(|keyword| transcript.contains(keyword)),
+            "unexpected local meeting transcript: {transcript}"
+        );
     }
 
     #[cfg(target_os = "windows")]
     #[tokio::test]
     #[ignore = "requires OPENLESS_MEETING_DIARIZATION_TEST_WAV and installed local ASR/diarization models"]
-    async fn installed_local_diarization_and_batch_asr_keep_speaker_timeline() {
-        let path = std::env::var_os("OPENLESS_MEETING_DIARIZATION_TEST_WAV")
+    async fn installed_local_diarization_import_persists_speaker_timeline() {
+        let source_path = std::env::var_os("OPENLESS_MEETING_DIARIZATION_TEST_WAV")
             .map(PathBuf::from)
             .expect("OPENLESS_MEETING_DIARIZATION_TEST_WAV must point to a two-speaker PCM WAV");
-        let probe = probe_pcm_wav(&path).unwrap();
-        let managed_dir = std::env::temp_dir().join(format!(
-            "meeting-local-diarization-integration-{}",
-            Uuid::new_v4()
-        ));
-        let partial_path = managed_dir.join("part-0001.wav.partial");
-        let final_path = managed_dir.join("part-0001.wav");
-        normalize_pcm_wav(
-            &probe,
-            &partial_path,
-            &final_path,
-            &AtomicBool::new(false),
-            |_| {},
-        )
-        .unwrap();
-        let source = MeetingAudioSource::from_path(&final_path).unwrap();
-        let info = source.inspect().unwrap();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let diarization = crate::asr::local::speaker_diarization_runtime::run_local_diarization(
-            source.clone(),
-            crate::asr::local::speaker_diarization::DEFAULT_PACKAGE_ID,
+        let persisted = run_installed_local_import_fixture(
+            &source_path,
+            MeetingDiarizationMode::Local,
+            Some(crate::asr::local::speaker_diarization::DEFAULT_PACKAGE_ID),
             Some(2),
-            Arc::clone(&cancelled),
         )
+        .await
         .unwrap();
-
-        assert_eq!(diarization.detected_speaker_count, 2);
-        assert!(diarization.turns.iter().all(|turn| {
+        assert_eq!(persisted.speaker_profiles.len(), 2);
+        assert!(persisted.speaker_profiles.iter().all(|profile| {
+            matches!(profile.id.as_str(), "speaker-0" | "speaker-1")
+                && profile.display_name == speaker_display_name(&profile.id)
+        }));
+        assert!(!persisted.speaker_turns.is_empty());
+        assert!(persisted.speaker_turns.iter().all(|turn| {
             turn.start_ms < turn.end_ms
-                && turn.end_ms <= info.duration_ms
                 && matches!(turn.speaker_id.as_str(), "speaker-0" | "speaker-1")
         }));
-        let windows = build_speaker_windows(&diarization.turns, info.duration_ms, |_, _| Ok(None))
-            .unwrap();
-        assert!(windows.iter().all(|window| {
-            window.start_ms < window.end_ms
-                && window.end_ms <= info.duration_ms
-                && window.speaker_id.is_some()
-        }));
-
-        let model_ref = MeetingAsrModelRef {
-            provider_id: LOCAL_PROVIDER_ID.to_string(),
-            model_id: crate::asr::local::sherpa::DEFAULT_MODEL_ALIAS.to_string(),
-        };
-        let runtime = Arc::new(crate::asr::local::SherpaOnnxRuntime::new());
-        let transcriber = MeetingBatchTranscriber {
-            runtime: Arc::clone(&runtime),
-            source,
-            model_ref: &model_ref,
-            language_hint: "zh",
-            job_id: "installed-local-diarization",
-            cancelled,
-        };
-        let segments = transcriber.transcribe(windows).await.unwrap();
-
-        assert!(segments.iter().all(|segment| {
+        assert!(persisted.transcript_segments.iter().all(|segment| {
             let Some(speaker_id) = segment.speaker_id.as_deref() else {
                 return false;
             };
             segment.speaker_label == speaker_display_name(speaker_id)
                 && segment.start_ms < segment.end_ms.unwrap_or_default()
-                && segment.end_ms.is_some_and(|end_ms| end_ms <= info.duration_ms)
                 && segment.metadata.as_ref().is_some_and(|metadata| {
-                    metadata.provider_id.as_deref()
-                        == Some("sherpa-onnx-local/sense-voice-small-zh")
-                        && metadata.provider_session_id.as_deref()
-                            == Some("installed-local-diarization")
-                        && metadata.provider_start_ms == Some(segment.start_ms)
+                    metadata.provider_start_ms == Some(segment.start_ms)
                         && metadata.provider_end_ms == segment.end_ms
                 })
         }));
-        let transcript_speakers = segments
+        let transcript_speakers = persisted
+            .transcript_segments
             .iter()
             .filter_map(|segment| segment.speaker_id.as_deref())
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(
             transcript_speakers.len(),
             2,
-            "expected both synthetic speakers in transcript segments: {segments:#?}"
+            "expected both synthetic speakers in transcript segments: {:#?}",
+            persisted.transcript_segments
         );
-
-        runtime.release_now().await.unwrap();
-        let _ = std::fs::remove_dir_all(managed_dir);
     }
 
     #[test]
