@@ -47,10 +47,18 @@ static POST_PROCESSING_CANCEL_FLAGS: LazyLock<Mutex<HashMap<String, Arc<AtomicBo
 
 type MeetingAudioPathResolver<'a> = dyn Fn(&str) -> anyhow::Result<PathBuf> + Sync + 'a;
 
+#[cfg(target_os = "windows")]
+struct LocalMeetingAsrContext<'a> {
+    runtime: &'a Arc<crate::asr::local::SherpaOnnxRuntime>,
+    language_hint: &'a str,
+}
+
 struct PostProcessingJobContext<'a> {
     inner: Option<&'a Arc<Inner>>,
     store: &'a MeetingStore,
     audio_path_for_id: &'a MeetingAudioPathResolver<'a>,
+    #[cfg(target_os = "windows")]
+    local_asr: Option<LocalMeetingAsrContext<'a>>,
 }
 
 #[derive(Debug, Clone)]
@@ -421,10 +429,17 @@ async fn run_post_processing_job(
 ) -> Result<(), String> {
     let store = MeetingStore::new().map_err(|error| error.to_string())?;
     let audio_path_for_id = |id: &str| meeting_recording_existing_path_for_id(id);
+    #[cfg(target_os = "windows")]
+    let language_hint = inner.prefs.get().sherpa_onnx_language_hint;
     let context = PostProcessingJobContext {
         inner: Some(inner),
         store: &store,
         audio_path_for_id: &audio_path_for_id,
+        #[cfg(target_os = "windows")]
+        local_asr: Some(LocalMeetingAsrContext {
+            runtime: &inner.sherpa_onnx_runtime,
+            language_hint: language_hint.trim(),
+        }),
     };
     run_post_processing_job_with_context(&context, meeting_id, job_id, cancelled).await
 }
@@ -448,13 +463,20 @@ async fn run_post_processing_job_with_context(
     };
 
     if state.resolved_runtime_kind == MeetingAsrRuntimeKind::Local {
-        let inner = context.inner.ok_or_else(|| {
-            "postMeetingAsrRuntimeUnsupported: 本地会后 ASR 缺少运行时上下文".to_string()
-        })?;
-        return run_local_import_post_processing_job(
-            context, inner, record, state, meeting_id, job_id, cancelled,
-        )
-        .await;
+        #[cfg(target_os = "windows")]
+        {
+            let local_asr = context.local_asr.as_ref().ok_or_else(|| {
+                "postMeetingAsrRuntimeUnsupported: 本地会后 ASR 缺少运行时上下文".to_string()
+            })?;
+            return run_local_import_post_processing_job(
+                context, local_asr, record, state, meeting_id, job_id, cancelled,
+            )
+            .await;
+        }
+        #[cfg(not(target_os = "windows"))]
+        return Err(
+            "meetingAsrModelUnavailable: 当前平台暂不支持本地会议文件识别".to_string(),
+        );
     }
     let client = build_post_meeting_dashscope_client(&model_id)?;
     let request_options = cloud_diarization_options(&state)?;
@@ -619,6 +641,36 @@ pub(super) async fn run_post_processing_job_for_test(
         inner: None,
         store,
         audio_path_for_id: &audio_path_for_id,
+        #[cfg(target_os = "windows")]
+        local_asr: None,
+    };
+    run_post_processing_job_with_context(
+        &context,
+        meeting_id,
+        job_id,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+}
+
+#[cfg(all(test, target_os = "windows"))]
+pub(super) async fn run_local_post_processing_job_for_test(
+    store: &MeetingStore,
+    meeting_id: &str,
+    job_id: &str,
+    audio_path: PathBuf,
+    runtime: &Arc<crate::asr::local::SherpaOnnxRuntime>,
+    language_hint: &str,
+) -> Result<(), String> {
+    let audio_path_for_id = |_id: &str| Ok(audio_path.clone());
+    let context = PostProcessingJobContext {
+        inner: None,
+        store,
+        audio_path_for_id: &audio_path_for_id,
+        local_asr: Some(LocalMeetingAsrContext {
+            runtime,
+            language_hint,
+        }),
     };
     run_post_processing_job_with_context(
         &context,
@@ -651,9 +703,10 @@ fn validate_import_post_processing_route(
     Ok(descriptor.model_id)
 }
 
+#[cfg(target_os = "windows")]
 async fn run_local_import_post_processing_job(
     context: &PostProcessingJobContext<'_>,
-    inner: &Arc<Inner>,
+    local_asr: &LocalMeetingAsrContext<'_>,
     record: MeetingRecord,
     state: MeetingPostProcessingState,
     meeting_id: &str,
@@ -678,7 +731,8 @@ async fn run_local_import_post_processing_job(
     let source = MeetingAudioSource::from_path(&path)
         .map_err(|error| format!("meetingAudioInvalid: {error}"))?;
     let (segments, profiles, turns) = super::meeting_audio_import::run_local_meeting_file_asr(
-        inner,
+        local_asr.runtime,
+        local_asr.language_hint,
         source,
         &state.model_ref,
         state.diarization_mode,
@@ -1906,6 +1960,8 @@ mod tests {
             inner: None,
             store: &store,
             audio_path_for_id: &audio_path_for_id,
+            #[cfg(target_os = "windows")]
+            local_asr: None,
         };
         run_post_processing_job_with_context(
             &context,
@@ -2330,6 +2386,8 @@ mod tests {
                 inner: None,
                 store: &reopened,
                 audio_path_for_id: &audio_path_for_id,
+                #[cfg(target_os = "windows")]
+                local_asr: None,
             };
             run_post_processing_job_with_context(
                 &context,
