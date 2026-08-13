@@ -1439,6 +1439,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn meeting_upload_connection_drop_returns_error_without_deleting_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "dashscope-meeting-upload-drop-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let part_path = dir.join("part-0001.wav");
+        std::fs::write(
+            &part_path,
+            crate::asr::wav::encode_wav_16k_mono(&[1, 2, 3, 4]),
+        )
+        .unwrap();
+        let source_before = std::fs::read(&part_path).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let upload_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_attempts = Arc::clone(&upload_attempts);
+        let server = thread::spawn(move || {
+            let (mut policy_stream, _) = listener.accept().unwrap();
+            policy_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let policy_request = read_http_request(&mut policy_stream);
+            assert!(String::from_utf8_lossy(&policy_request).starts_with(
+                "GET /api/v1/uploads?action=getPolicy&model=fun-asr HTTP/1.1"
+            ));
+            write_json_response(
+                &mut policy_stream,
+                &format!(
+                    r#"{{"data":{{"policy":"policy","signature":"signature","upload_dir":"dashscope-instant/drop","upload_host":"http://{addr}","oss_access_key_id":"key-id","x_oss_object_acl":"private","x_oss_forbid_overwrite":"true"}}}}"#
+                ),
+            );
+
+            let (mut upload_stream, _) = listener.accept().unwrap();
+            upload_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let upload_request = read_http_request(&mut upload_stream);
+            assert!(String::from_utf8_lossy(&upload_request).starts_with("POST / HTTP/1.1"));
+            server_attempts.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let asr = DashScopeMultimodalASR::new(
+            "sk-test".to_string(),
+            format!("http://{addr}/api/v1/services/audio/asr/transcription"),
+            "fun-asr".to_string(),
+        );
+        let source = MeetingAudioSource::from_path(&dir).unwrap();
+        let error = asr
+            .upload_meeting_audio(source, Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("DashScope temporary upload"),
+            "unexpected error: {error}"
+        );
+        server.join().unwrap();
+        assert_eq!(upload_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&part_path).unwrap(), source_before);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn cancels_pending_async_task_with_credentials() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

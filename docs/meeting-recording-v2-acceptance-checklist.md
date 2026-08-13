@@ -75,7 +75,7 @@ Phase 0 已按当前基线核查代码与自动测试。除 V2-1 现有代码证
 - 本地关闭说话人处理时按不超过 30 秒的有界绝对时间窗执行 batch ASR；本地说话人处理采用 diarization-first，合并同 speaker 短间隔 turn，长窗口优先在目标切点前 5 秒内寻找低能量静音帧，找不到时回退到 30 秒硬切，最终保存绝对时间戳、稳定 speakerId 和 overlap 待确认标记。
 - 导入复用 `MeetingRecord`、`MeetingAudioSource`、post-processing job、staging revision、总结、播放、Markdown 导出、删除和 retention。应用重启会清理 importing `.partial` 并要求重选；有 providerTaskId 的云端任务复用 V2-2 恢复轮询；总结中断会只开放总结重试，不重复 ASR。
 - 删除会议采用两阶段停止：先标记并等待导入 / 后处理 worker 释放文件句柄，再删除受管音频和记录；迟到 worker 不能写回已删除或已替换任务。
-- 自动验证：`cargo test meeting_audio_import --lib`（22 passed）、`cargo test meeting_post_processing --lib`（33 passed）、`cargo test meeting_summary --lib`（17 passed）、`cargo test meeting --lib`（170 passed）、`cargo test bailian --lib`（39 passed）、`cargo test preferences --lib`（13 passed）、`cargo test credentials --lib`（46 passed）、MSVC `cargo check`、`tsc --noEmit`、`npm run build` 和 `git diff --check` 通过。真实百炼双模型、本地 ASR、本地说话人、Tauri UI、磁盘不足、真实应用重启及 5 / 30 / 60 / 120 分钟音频仍未验证，因此 MR-V2-201～212 仅标记为 `partial`。
+- 自动验证：`cargo test meeting_audio_import --lib`（22 passed）、`cargo test meeting_post_processing --lib`（33 passed）、`cargo test meeting_summary --lib`（17 passed）、`cargo test meeting --lib`（171 passed）、`cargo test dashscope_multimodal --lib`（27 passed）、`cargo test bailian --lib`（39 passed）、`cargo test preferences --lib`（13 passed）、`cargo test credentials --lib`（46 passed）、MSVC `cargo check`、`tsc --noEmit`、`npm run build` 和 `git diff --check` 通过。真实百炼双模型、本地 ASR、本地说话人、Tauri UI、磁盘不足、真实应用重启及 5 / 30 / 60 / 120 分钟音频仍未验证，因此 MR-V2-201～212 仅标记为 `partial`。
 
 ### Phase 6 有限桌面验证与补充回归证据（2026-08-13）
 
@@ -87,6 +87,7 @@ Phase 0 已按当前基线核查代码与自动测试。除 V2-1 现有代码证
 - 原子提交故障注入：规范化已写完但最终路径被占用时，最终 rename 明确失败，`.partial` 被清理，源文件保持不变，占用文件不会被覆盖或误认成有效受管 WAV。该测试不等同于真实磁盘不足验证。
 - 路由安全回归：worker 在选择云端 adapter 或本地 engine 前重新解析后端模型注册表；正常云端快照通过，伪造 state `runtimeKind`、伪造 import config `runtimeKind`、模型引用不一致均返回 `meetingAsrRouteMismatch`。
 - 导入重试回归：已有受管音频时从 `fun-asr` 改选 `paraformer-v2`，同一原子转换同步更新 import config、post-processing config / state、attempt、processing revision 和 processing hold，拒绝旧 staging revision；同一旧任务不能重复转换。
+- 云端上传故障注入：本机回环服务在接收完整会议 multipart 上传后关闭连接且不返回成功响应，客户端明确返回 `DashScope temporary upload` 错误，只发起一次非幂等上传，源分片保持不变。该测试不替代真实公网中断验证。
 
 ## V2-1 Realtime ASR
 
@@ -104,7 +105,7 @@ Phase 0 已按当前基线核查代码与自动测试。除 V2-1 现有代码证
 | MR-V2-102 | 开始会议选择自动或预计发言人数，并将本场配置完整快照。 | V2-2 plan 2.2、4 | partial | `Meetings.tsx` 提供 auto / 1～20 人；后端持久化 `MeetingPostProcessingConfig`；新增测试确认配置解析后不受后续全局偏好变化影响 | 仍需开始会议、进行中修改设置和重启后的 Tauri 集成验证 | 后端保存 `Option<u32>`，实时实际模型建立后同步写入已固化配置 |
 | MR-V2-103 | 会后 ASR 默认 `fun-asr`，下拉可选 `paraformer-v2`，不能路由到其他模型。 | V2 plan 1、3；V2-2 plan 1、7 | partial | 后端注册表只返回两个模型，默认和非法模型测试通过；设置和重试下拉均使用注册表；worker 只按快照中的显式 modelRef 构建对应百炼客户端 | 仍需真实双模型和 Tauri 下拉人工验证 | 实时 ASR 与会后 ASR 独立快照；备选不表示自动 fallback |
 | MR-V2-104 | 停止会议快速返回，后处理任务持久化并在后台执行。 | V2-2 plan 5、10 | partial | `stop_meeting_recording` 固化实时 revision、job 和 hold，持久化后清理 runtime 并 spawn 后台 job；worker 已执行音频校验、上传、提交、轮询、应用和总结触发；`bind_app` 扫描非终态任务 | 状态机及恢复选择测试通过；仍缺 stop 延迟测量、真实任务和应用重启人工验证 | stop IPC 不等待云端任务完成 |
-| MR-V2-105 | 会议音频使用 `MeetingAudioSource` 从分片 WAV 按块读取，上传路径不复制完整 PCM/WAV。 | V2-2 plan 6 | partial | `MeetingAudioSource` 以单 header + 64 KiB PCM 块输出确定长度；百炼 multipart 使用 `Body::wrap_stream`，集成测试确认两段 WAV 上传体只有一个 RIFF 且 PCM 顺序完整 | 4 项音频源测试及 multipart 集成测试通过；仍缺真实 OSS、上传中断网、峰值内存和 120 分钟测试 | 现有短口述内存客户端不用于会议 |
+| MR-V2-105 | 会议音频使用 `MeetingAudioSource` 从分片 WAV 按块读取，上传路径不复制完整 PCM/WAV。 | V2-2 plan 6 | partial | `MeetingAudioSource` 以单 header + 64 KiB PCM 块输出确定长度；百炼 multipart 使用 `Body::wrap_stream`，集成测试确认两段 WAV 上传体只有一个 RIFF 且 PCM 顺序完整；上传连接关闭时明确失败、只尝试一次且保留源分片 | 音频源、multipart 和本机回环上传断线测试通过；仍缺真实 OSS、真实公网中断、峰值内存和 120 分钟测试 | 现有短口述内存客户端不用于会议；未知结果的上传 POST 不静默重试 |
 | MR-V2-106 | `fun-asr` 和 `paraformer-v2` 共用任务框架并分别适配请求 / 结果；云端说话人模式解析 sentence time、text、speaker_id。 | V2-2 plan 6.3、7 | partial | 统一完成临时 OSS 上传、异步提交、轮询和结果下载；双模型专属解析入口保留时间戳、sentenceId、speakerId；请求测试覆盖 diarization、合法 speakerCount 和排队任务远端取消 | `cargo test dashscope_multimodal` 26 项及 worker 双模型转换测试通过；仍需两个模型真实百炼任务 | 关闭说话人时设置 `diarization_enabled=false`；1 人不发送非法 speakerCount |
 | MR-V2-107 | 云端结果作为新的整理后原文 revision 原子提交，失败保留实时原文和旧总结。 | V2-2 plan 4、5、7 | partial | worker 将结构化结果写入 staging revision，并在 jobId、status、providerTaskId、modelRef 全部匹配后原子激活；双模型、无效结果和迟到 job 测试保留旧 active revision | 自动状态机测试通过；仍缺持久化故障注入和真实重启恢复 | speakerId 只应用于同一模型返回的文本，不跨模型硬贴 |
 | MR-V2-108 | 总结只在会后 ASR / 说话人处理完成，或用户明确沿用实时原文后启动。 | V2-2 plan 1、5 | partial | 云端结果原子激活并将任务置为 `completed` 后才调用自动总结；`meeting_summary.rs` 仍只接受 `completed` / `realtime_accepted`；失败或取消后可明确沿用实时原文 | meeting 和 meeting_post_processing 自动测试通过；仍缺真实完成顺序和 Tauri 失败 UI 验证 | 关闭说话人也必须先完成会后 ASR |
@@ -139,8 +140,8 @@ Phase 0 已按当前基线核查代码与自动测试。除 V2-1 现有代码证
 | --- | --- | --- | --- | --- | --- | --- |
 | MR-V2-301 | 真实音频覆盖 1/2/4/8 人、相似声线、抢话、静音和背景噪声。 | V2-2 plan 13；V2-3 plan 13 | missing | - | 标注集与人工记录 | 记录 DER、人数差异、字错率 |
 | MR-V2-302 | 30/60/120 分钟覆盖上传内存、云端耗时、本地内存和处理耗时。 | V2-2 plan 13；V2-3 plan 13 | missing | - | Windows 真实机器基准 | 作为本地模型能力上限依据 |
-| MR-V2-303 | 网络中断、模型缺失、磁盘不足、应用退出、删除会议均有确定恢复或清理结果。 | V2-2 plan 9-10；V2-3 plan 9-10 | partial | 已覆盖缺本地模型拒绝、非终态启动扫描、同 jobId 单 worker、旧 job guard、processing hold、导入 `.partial` 清理、原子提交失败清理、总结中断释放 hold、两阶段删除等待和原子删除；已有 providerTaskId 时恢复轮询，提交结果未知时拒绝自动重提 | 瞬态 GET 会有界重试；仍缺真实上传 / 提交断网、磁盘不足和真实应用重启 | 不重复提交未知结果的云端任务，不留下不可解释写回 |
-| MR-V2-304 | 当前其他 ASR、短口述、会议播放、总结和导出链路无回归。 | AGENTS.md；V2 plan | partial | Phase 6 的 `meeting_audio_import` 22 项、`meeting_post_processing` 33 项、`meeting_summary` 17 项、完整 meeting 170 项、bailian 39 项、preferences 13 项、credentials 46 项、MSVC `cargo check`、`tsc --noEmit` 和生产 build 均通过 | Tauri dev 与短口述 / 播放 / 总结 / 导出人工回归按用户要求暂停 | ASR 为高风险区域 |
+| MR-V2-303 | 网络中断、模型缺失、磁盘不足、应用退出、删除会议均有确定恢复或清理结果。 | V2-2 plan 9-10；V2-3 plan 9-10 | partial | 已覆盖缺本地模型拒绝、非终态启动扫描、同 jobId 单 worker、旧 job guard、processing hold、导入 `.partial` 清理、原子提交失败清理、上传连接关闭明确失败且不重试 POST、总结中断释放 hold、两阶段删除等待和原子删除；已有 providerTaskId 时恢复轮询，提交结果未知时拒绝自动重提 | 瞬态 GET 会有界重试；仍缺真实公网上传 / 提交断网、磁盘不足和真实应用重启 | 不重复提交未知结果的云端任务，不留下不可解释写回 |
+| MR-V2-304 | 当前其他 ASR、短口述、会议播放、总结和导出链路无回归。 | AGENTS.md；V2 plan | partial | Phase 6 的 `meeting_audio_import` 22 项、`meeting_post_processing` 33 项、`meeting_summary` 17 项、完整 meeting 171 项、dashscope_multimodal 27 项、bailian 39 项、preferences 13 项、credentials 46 项、MSVC `cargo check`、`tsc --noEmit` 和生产 build 均通过 | Tauri dev 与短口述 / 播放 / 总结 / 导出人工回归按用户要求暂停 | ASR 为高风险区域 |
 
 ## Deferred Log（延期记录）
 
