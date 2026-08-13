@@ -1853,6 +1853,54 @@ mod tests {
     };
 
     #[cfg(target_os = "windows")]
+    async fn run_configured_cloud_worker_fixture(
+        store_path: &std::path::Path,
+        audio_path: &std::path::Path,
+        duration_ms: u64,
+        model_id: &str,
+        diarization_mode: MeetingDiarizationMode,
+        local_model_id: Option<&str>,
+        expected_speaker_count: Option<u32>,
+        meeting_id: String,
+    ) -> Result<MeetingRecord, &'static str> {
+        let mut candidate = record();
+        candidate.id = meeting_id.clone();
+        candidate.duration_ms = Some(duration_ms);
+        let config = candidate.post_processing_config.as_mut().unwrap();
+        config.post_meeting_asr_model_ref.model_id = model_id.to_string();
+        config.diarization_mode = diarization_mode;
+        config.local_diarization_model_id = local_model_id.map(str::to_string);
+        config.expected_speaker_count = expected_speaker_count;
+        prepare_post_processing_after_stop(&mut candidate, "2026-08-13T00:00:00Z")
+            .map_err(|_| "cloud worker revision setup failed")?;
+        let job_id = candidate.post_processing.as_ref().unwrap().job_id.clone();
+        let store = MeetingStore::new_for_path(store_path.to_path_buf());
+        store
+            .create(candidate)
+            .map_err(|_| "cloud worker fixture persistence failed")?;
+        let audio_path = audio_path.to_path_buf();
+        let audio_path_for_id = |_id: &str| Ok(audio_path.clone());
+        let context = PostProcessingJobContext {
+            inner: None,
+            store: &store,
+            audio_path_for_id: &audio_path_for_id,
+        };
+        run_post_processing_job_with_context(
+            &context,
+            &meeting_id,
+            &job_id,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .map_err(|_| "cloud worker execution failed")?;
+
+        MeetingStore::new_for_path(store_path.to_path_buf())
+            .get(&meeting_id)
+            .map_err(|_| "cloud worker result reload failed")?
+            .ok_or("cloud worker result was not persisted")
+    }
+
+    #[cfg(target_os = "windows")]
     #[tokio::test]
     #[ignore = "requires configured Bailian credentials and OPENLESS_MEETING_CLOUD_ASR_TEST_WAV"]
     async fn configured_bailian_runs_both_post_meeting_models_with_cloud_diarization() {
@@ -1883,42 +1931,18 @@ mod tests {
                 .inspect()
                 .map_err(|_| "cloud post-meeting test WAV must be valid")?;
 
-            for model_id in ["fun-asr", "paraformer-v2"] {
-                let mut candidate = record();
-                candidate.id = format!("meeting-cloud-worker-{model_id}");
-                candidate.duration_ms = Some(info.duration_ms);
-                let config = candidate.post_processing_config.as_mut().unwrap();
-                config.post_meeting_asr_model_ref.model_id = model_id.to_string();
-                config.diarization_mode = MeetingDiarizationMode::Cloud;
-                config.expected_speaker_count = Some(2);
-                prepare_post_processing_after_stop(&mut candidate, "2026-08-13T00:00:00Z")
-                    .map_err(|_| "cloud worker revision setup failed")?;
-                let meeting_id = candidate.id.clone();
-                let job_id = candidate.post_processing.as_ref().unwrap().job_id.clone();
-                let store = MeetingStore::new_for_path(store_path.clone());
-                store
-                    .create(candidate)
-                    .map_err(|_| "cloud worker fixture persistence failed")?;
-                let audio_path_for_id = |_id: &str| Ok(final_path.clone());
-                let context = PostProcessingJobContext {
-                    inner: None,
-                    store: &store,
-                    audio_path_for_id: &audio_path_for_id,
-                };
-                run_post_processing_job_with_context(
-                    &context,
-                    &meeting_id,
-                    &job_id,
-                    Arc::new(AtomicBool::new(false)),
+            for model_id in [FUN_ASR_MODEL_ID, PARAFORMER_V2_MODEL_ID] {
+                let persisted = run_configured_cloud_worker_fixture(
+                    &store_path,
+                    &final_path,
+                    info.duration_ms,
+                    model_id,
+                    MeetingDiarizationMode::Cloud,
+                    None,
+                    Some(2),
+                    format!("meeting-cloud-worker-{model_id}"),
                 )
-                .await
-                .map_err(|_| "cloud worker execution failed")?;
-
-                let reopened = MeetingStore::new_for_path(store_path.clone());
-                let persisted = reopened
-                    .get(&meeting_id)
-                    .map_err(|_| "cloud worker result reload failed")?
-                    .ok_or("cloud worker result was not persisted")?;
+                .await?;
                 let state = persisted
                     .post_processing
                     .as_ref()
@@ -1983,8 +2007,105 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[tokio::test]
+    #[ignore = "requires configured Bailian credentials and OPENLESS_MEETING_CLOUD_ASR_TEST_WAV"]
+    async fn configured_bailian_runs_both_post_meeting_models_without_diarization() {
+        let path = std::env::var_os("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV")
+            .map(std::path::PathBuf::from)
+            .expect("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV must point to a PCM WAV");
+        let probe = crate::asr::meeting_audio_import::probe_pcm_wav(&path)
+            .expect("cloud post-meeting test WAV must be readable");
+        let managed_dir = std::env::temp_dir().join(format!(
+            "meeting-cloud-asr-no-diarization-integration-{}",
+            Uuid::new_v4()
+        ));
+        let partial_path = managed_dir.join("part-0001.wav.partial");
+        let final_path = managed_dir.join("part-0001.wav");
+        let store_path = managed_dir.join("meetings.json");
+        let result = async {
+            crate::asr::meeting_audio_import::normalize_pcm_wav(
+                &probe,
+                &partial_path,
+                &final_path,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .map_err(|_| "cloud no-diarization test WAV normalization failed")?;
+            let source = MeetingAudioSource::from_path(&final_path)
+                .map_err(|_| "normalized cloud no-diarization test WAV must be readable")?;
+            let info = source
+                .inspect()
+                .map_err(|_| "cloud no-diarization test WAV must be valid")?;
+
+            for model_id in [FUN_ASR_MODEL_ID, PARAFORMER_V2_MODEL_ID] {
+                let persisted = run_configured_cloud_worker_fixture(
+                    &store_path,
+                    &final_path,
+                    info.duration_ms,
+                    model_id,
+                    MeetingDiarizationMode::Off,
+                    None,
+                    None,
+                    format!("meeting-cloud-worker-off-{model_id}"),
+                )
+                .await?;
+                let state = persisted
+                    .post_processing
+                    .as_ref()
+                    .ok_or("cloud no-diarization worker state is missing")?;
+                let provider_task_id = state
+                    .provider_task_id
+                    .as_deref()
+                    .ok_or("cloud no-diarization worker provider task id is missing")?;
+                if state.status != MeetingPostProcessingStatus::Completed
+                    || state.model_ref.model_id != model_id
+                    || state.diarization_mode != MeetingDiarizationMode::Off
+                    || persisted.active_transcript_revision != Some(1)
+                    || persisted.processing_hold.is_some()
+                {
+                    return Err("cloud no-diarization worker result did not complete atomically");
+                }
+                let active_revision = persisted
+                    .transcript_revisions
+                    .iter()
+                    .find(|revision| revision.revision == 1)
+                    .ok_or("cloud no-diarization worker revision is missing")?;
+                if active_revision.source != TranscriptRevisionSource::CloudPostprocess
+                    || active_revision.status != TranscriptRevisionStatus::Active
+                    || active_revision.segments != persisted.transcript_segments
+                    || !persisted.speaker_profiles.is_empty()
+                    || !persisted.speaker_turns.is_empty()
+                    || persisted.transcript_segments.is_empty()
+                    || !persisted.transcript_segments.iter().all(|segment| {
+                        segment.speaker_id.is_none()
+                            && segment.speaker_label == "未区分"
+                            && !segment.text.trim().is_empty()
+                            && segment.start_ms < segment.end_ms.unwrap_or_default()
+                            && segment.end_ms.unwrap_or_default()
+                                <= info.duration_ms.saturating_add(5_000)
+                            && segment.metadata.as_ref().is_some_and(|metadata| {
+                                metadata.provider_id.as_deref()
+                                    == Some(format!("bailian/{model_id}").as_str())
+                                    && metadata.provider_session_id.as_deref()
+                                        == Some(provider_task_id)
+                                    && metadata.provider_start_ms == Some(segment.start_ms)
+                                    && metadata.provider_end_ms == segment.end_ms
+                            })
+                    })
+                {
+                    return Err("cloud no-diarization worker transcript is inconsistent");
+                }
+            }
+            Ok::<(), &str>(())
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(managed_dir);
+        result.unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
     #[ignore = "requires configured Bailian credentials, OPENLESS_MEETING_DIARIZATION_TEST_WAV, and an installed local diarization package"]
-    async fn configured_fun_asr_worker_persists_local_diarization_result() {
+    async fn configured_bailian_runs_both_models_with_local_diarization() {
         let path = std::env::var_os("OPENLESS_MEETING_DIARIZATION_TEST_WAV")
             .map(std::path::PathBuf::from)
             .expect("OPENLESS_MEETING_DIARIZATION_TEST_WAV must point to a two-speaker PCM WAV");
@@ -2016,101 +2137,82 @@ mod tests {
                 crate::asr::local::speaker_diarization::DEFAULT_PACKAGE_ID.to_string();
             crate::asr::local::speaker_diarization::ensure_package_ready(&local_model_id)
                 .map_err(|_| "local diarization package is not ready")?;
-            let mut candidate = record();
-            candidate.id = "meeting-cloud-local-worker-fun-asr".to_string();
-            candidate.duration_ms = Some(info.duration_ms);
-            let config = candidate.post_processing_config.as_mut().unwrap();
-            config.diarization_mode = MeetingDiarizationMode::Local;
-            config.local_diarization_model_id = Some(local_model_id.clone());
-            config.expected_speaker_count = Some(2);
-            prepare_post_processing_after_stop(&mut candidate, "2026-08-13T00:00:00Z")
-                .map_err(|_| "local diarization worker revision setup failed")?;
-            let meeting_id = candidate.id.clone();
-            let job_id = candidate.post_processing.as_ref().unwrap().job_id.clone();
-            let store = MeetingStore::new_for_path(store_path.clone());
-            store
-                .create(candidate)
-                .map_err(|_| "local diarization worker fixture persistence failed")?;
-            let audio_path_for_id = |_id: &str| Ok(final_path.clone());
-            let context = PostProcessingJobContext {
-                inner: None,
-                store: &store,
-                audio_path_for_id: &audio_path_for_id,
-            };
-            run_post_processing_job_with_context(
-                &context,
-                &meeting_id,
-                &job_id,
-                Arc::new(AtomicBool::new(false)),
-            )
-            .await
-            .map_err(|_| "local diarization worker execution failed")?;
-
-            let reopened = MeetingStore::new_for_path(store_path);
-            let persisted = reopened
-                .get(&meeting_id)
-                .map_err(|_| "local diarization worker result reload failed")?
-                .ok_or("local diarization worker result was not persisted")?;
-            let state = persisted
-                .post_processing
-                .as_ref()
-                .ok_or("local diarization worker state is missing")?;
-            let provider_task_id = state
-                .provider_task_id
-                .as_deref()
-                .ok_or("local diarization worker provider task id is missing")?;
-            if state.status != MeetingPostProcessingStatus::Completed
-                || state.model_ref.model_id != FUN_ASR_MODEL_ID
-                || state.diarization_mode != MeetingDiarizationMode::Local
-                || persisted.active_transcript_revision != Some(1)
-                || persisted.processing_hold.is_some()
-            {
-                return Err("local diarization worker result did not complete atomically");
-            }
-            let active_revision = persisted
-                .transcript_revisions
-                .iter()
-                .find(|revision| revision.revision == 1)
-                .ok_or("local diarization worker revision is missing")?;
-            if active_revision.source != TranscriptRevisionSource::LocalPostprocess
-                || active_revision.status != TranscriptRevisionStatus::Active
-                || active_revision.segments != persisted.transcript_segments
-            {
-                return Err("local diarization worker active revision is inconsistent");
-            }
-            let turn_speaker_ids = persisted
-                .speaker_turns
-                .iter()
-                .map(|turn| turn.speaker_id.as_str())
-                .collect::<std::collections::HashSet<_>>();
-            if turn_speaker_ids.len() != 2
-                || persisted.speaker_profiles.len() != 2
-                || !persisted.speaker_turns.iter().all(|turn| {
-                    turn.start_ms < turn.end_ms && turn.end_ms <= info.duration_ms
-                })
-                || persisted.transcript_segments.is_empty()
-                || !persisted
-                    .transcript_segments
+            for model_id in [FUN_ASR_MODEL_ID, PARAFORMER_V2_MODEL_ID] {
+                let persisted = run_configured_cloud_worker_fixture(
+                    &store_path,
+                    &final_path,
+                    info.duration_ms,
+                    model_id,
+                    MeetingDiarizationMode::Local,
+                    Some(&local_model_id),
+                    Some(2),
+                    format!("meeting-cloud-local-worker-{model_id}"),
+                )
+                .await?;
+                let state = persisted
+                    .post_processing
+                    .as_ref()
+                    .ok_or("local diarization worker state is missing")?;
+                let provider_task_id = state
+                    .provider_task_id
+                    .as_deref()
+                    .ok_or("local diarization worker provider task id is missing")?;
+                if state.status != MeetingPostProcessingStatus::Completed
+                    || state.model_ref.model_id != model_id
+                    || state.diarization_mode != MeetingDiarizationMode::Local
+                    || persisted.active_transcript_revision != Some(1)
+                    || persisted.processing_hold.is_some()
+                {
+                    return Err("local diarization worker result did not complete atomically");
+                }
+                let active_revision = persisted
+                    .transcript_revisions
                     .iter()
-                    .any(|segment| segment.speaker_id.is_some())
-                || !persisted.transcript_segments.iter().all(|segment| {
-                    !segment.text.trim().is_empty()
-                        && segment.start_ms < segment.end_ms.unwrap_or_default()
-                        && segment.end_ms.unwrap_or_default()
-                            <= info.duration_ms.saturating_add(5_000)
-                        && segment.speaker_id.as_deref().is_none_or(|speaker_id| {
-                            turn_speaker_ids.contains(speaker_id)
-                        })
-                        && segment.metadata.as_ref().is_some_and(|metadata| {
-                            metadata.provider_id.as_deref() == Some("bailian/fun-asr")
-                                && metadata.provider_session_id.as_deref()
-                                    == Some(provider_task_id)
-                                && metadata.provider_start_ms == Some(segment.start_ms)
-                                && metadata.provider_end_ms == segment.end_ms
-                        })
-                })
-            {
-                return Err("local diarization worker speaker or timeline mapping is inconsistent");
+                    .find(|revision| revision.revision == 1)
+                    .ok_or("local diarization worker revision is missing")?;
+                if active_revision.source != TranscriptRevisionSource::LocalPostprocess
+                    || active_revision.status != TranscriptRevisionStatus::Active
+                    || active_revision.segments != persisted.transcript_segments
+                {
+                    return Err("local diarization worker active revision is inconsistent");
+                }
+                let turn_speaker_ids = persisted
+                    .speaker_turns
+                    .iter()
+                    .map(|turn| turn.speaker_id.as_str())
+                    .collect::<std::collections::HashSet<_>>();
+                if turn_speaker_ids.len() != 2
+                    || persisted.speaker_profiles.len() != 2
+                    || !persisted.speaker_turns.iter().all(|turn| {
+                        turn.start_ms < turn.end_ms && turn.end_ms <= info.duration_ms
+                    })
+                    || persisted.transcript_segments.is_empty()
+                    || !persisted
+                        .transcript_segments
+                        .iter()
+                        .any(|segment| segment.speaker_id.is_some())
+                    || !persisted.transcript_segments.iter().all(|segment| {
+                        !segment.text.trim().is_empty()
+                            && segment.start_ms < segment.end_ms.unwrap_or_default()
+                            && segment.end_ms.unwrap_or_default()
+                                <= info.duration_ms.saturating_add(5_000)
+                            && segment.speaker_id.as_deref().is_none_or(|speaker_id| {
+                                turn_speaker_ids.contains(speaker_id)
+                            })
+                            && segment.metadata.as_ref().is_some_and(|metadata| {
+                                metadata.provider_id.as_deref()
+                                    == Some(format!("bailian/{model_id}").as_str())
+                                    && metadata.provider_session_id.as_deref()
+                                        == Some(provider_task_id)
+                                    && metadata.provider_start_ms == Some(segment.start_ms)
+                                    && metadata.provider_end_ms == segment.end_ms
+                            })
+                    })
+                {
+                    return Err(
+                        "local diarization worker speaker or timeline mapping is inconsistent",
+                    );
+                }
             }
             Ok::<(), &str>(())
         }
