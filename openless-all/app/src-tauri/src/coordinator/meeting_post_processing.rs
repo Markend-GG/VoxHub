@@ -1807,6 +1807,102 @@ mod tests {
         TranscriptSegmentSource,
     };
 
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires configured Bailian credentials and OPENLESS_MEETING_CLOUD_ASR_TEST_WAV"]
+    async fn configured_bailian_runs_both_post_meeting_models_with_cloud_diarization() {
+        let path = std::env::var_os("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV")
+            .map(std::path::PathBuf::from)
+            .expect("OPENLESS_MEETING_CLOUD_ASR_TEST_WAV must point to a two-speaker PCM WAV");
+        let probe = crate::asr::meeting_audio_import::probe_pcm_wav(&path)
+            .expect("cloud post-meeting test WAV must be readable");
+        let managed_dir = std::env::temp_dir().join(format!(
+            "meeting-cloud-asr-integration-{}",
+            Uuid::new_v4()
+        ));
+        let partial_path = managed_dir.join("part-0001.wav.partial");
+        let final_path = managed_dir.join("part-0001.wav");
+        let result = async {
+            crate::asr::meeting_audio_import::normalize_pcm_wav(
+                &probe,
+                &partial_path,
+                &final_path,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .map_err(|_| "cloud post-meeting test WAV normalization failed")?;
+            let source = MeetingAudioSource::from_path(&final_path)
+                .map_err(|_| "normalized cloud post-meeting test WAV must be readable")?;
+            let info = source
+                .inspect()
+                .map_err(|_| "cloud post-meeting test WAV must be valid")?;
+
+            for model_id in ["fun-asr", "paraformer-v2"] {
+                let client = build_post_meeting_dashscope_client(model_id)
+                    .map_err(|_| "cloud test credentials are unavailable")?;
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let file_url = client
+                    .upload_meeting_audio(source.clone(), Arc::clone(&cancelled))
+                    .await
+                    .map_err(|_| "cloud test upload failed")?;
+                let task_id = client
+                    .submit_async_task(
+                        &file_url,
+                        DashScopeAsyncRequestOptions {
+                            diarization_enabled: true,
+                            speaker_count: Some(2),
+                        },
+                    )
+                    .await
+                    .map_err(|_| "cloud test submission failed")?;
+                let transcript = match client
+                    .poll_async_task(
+                        &task_id,
+                        Duration::from_secs(10 * 60),
+                        Arc::clone(&cancelled),
+                    )
+                    .await
+                {
+                    Ok(transcript) => transcript,
+                    Err(_) => {
+                        let _ = client.cancel_async_task(&task_id).await;
+                        return Err("cloud test polling or result parsing failed");
+                    }
+                };
+
+                if transcript.sentences.is_empty() {
+                    return Err("cloud test returned no sentences");
+                }
+                if !transcript.sentences.iter().all(|sentence| {
+                    !sentence.text.trim().is_empty()
+                        && sentence.begin_time_ms <= sentence.end_time_ms
+                        && sentence.end_time_ms <= info.duration_ms.saturating_add(5_000)
+                }) {
+                    return Err("cloud test returned an invalid sentence timeline");
+                }
+                let speaker_ids = transcript
+                    .sentences
+                    .iter()
+                    .filter_map(|sentence| sentence.speaker_id.as_deref())
+                    .filter(|speaker_id| !speaker_id.trim().is_empty())
+                    .collect::<std::collections::HashSet<_>>();
+                if speaker_ids.is_empty() {
+                    return Err(match model_id {
+                        "fun-asr" => "fun-asr cloud diarization returned no speakerId",
+                        "paraformer-v2" => {
+                            "paraformer-v2 cloud diarization returned no speakerId"
+                        }
+                        _ => "cloud diarization returned no speakerId",
+                    });
+                }
+            }
+            Ok::<(), &str>(())
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(managed_dir);
+        result.unwrap();
+    }
+
     fn record() -> MeetingRecord {
         MeetingRecord {
             id: "meeting-1".to_string(),
