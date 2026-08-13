@@ -20,9 +20,10 @@ use crate::persistence::{
 };
 use crate::types::{
     ExpectedSpeakerCountOverride, MeetingAsrModelRef, MeetingAsrRuntimeKind,
-    MeetingDiarizationMode, MeetingImportStatus, MeetingPostProcessingConfig,
-    MeetingPostProcessingEvent, MeetingPostProcessingState, MeetingPostProcessingStatus,
-    MeetingRecord, MeetingStatus, PostMeetingAsrModelDescriptor, ProcessingHold,
+    MeetingDiarizationMode, MeetingImportConfig, MeetingImportStatus,
+    MeetingPostProcessingConfig, MeetingPostProcessingEvent, MeetingPostProcessingState,
+    MeetingPostProcessingStatus, MeetingRecord, MeetingStatus, PostMeetingAsrModelDescriptor,
+    ProcessingHold,
     RetryMeetingPostProcessingOptions, SpeakerProfile, SpeakerTurn, StartMeetingRecordingOptions,
     TranscriptRevision, TranscriptRevisionSource, TranscriptRevisionStatus, TranscriptSegment,
     TranscriptSegmentMetadata, TranscriptSegmentSource, UserPreferences,
@@ -413,22 +414,7 @@ async fn run_post_processing_job(
     let record = current_post_processing_record(&store, meeting_id, job_id)?;
     let state = record.post_processing.as_ref().unwrap().clone();
     let model_id = if let Some(import_config) = record.import_config.as_ref() {
-        let descriptor = super::meeting_audio_import::resolve_meeting_asr_model(&state.model_ref)?;
-        if descriptor.runtime_kind != state.resolved_runtime_kind
-            || descriptor.runtime_kind != import_config.resolved_asr_runtime_kind
-            || descriptor.provider_id != import_config.asr_model_ref.provider_id
-            || descriptor.model_id != import_config.asr_model_ref.model_id
-        {
-            return Err(
-                "meetingAsrRouteMismatch: 导入任务的模型快照与后端注册表不一致".to_string(),
-            );
-        }
-        super::meeting_audio_import::validate_meeting_asr_combination(
-            &descriptor,
-            state.diarization_mode,
-            import_config.local_diarization_model_id.as_deref(),
-        )?;
-        descriptor.model_id
+        validate_import_post_processing_route(&state, import_config)?
     } else {
         if state.resolved_runtime_kind != MeetingAsrRuntimeKind::Cloud {
             return Err("postMeetingAsrRuntimeUnsupported: 会后 ASR 运行时不是云端".to_string());
@@ -604,6 +590,28 @@ async fn run_post_processing_job(
         .prune_audio_retention(retention_count)
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn validate_import_post_processing_route(
+    state: &MeetingPostProcessingState,
+    import_config: &MeetingImportConfig,
+) -> Result<String, String> {
+    let descriptor = super::meeting_audio_import::resolve_meeting_asr_model(&state.model_ref)?;
+    if descriptor.runtime_kind != state.resolved_runtime_kind
+        || descriptor.runtime_kind != import_config.resolved_asr_runtime_kind
+        || descriptor.provider_id != import_config.asr_model_ref.provider_id
+        || descriptor.model_id != import_config.asr_model_ref.model_id
+    {
+        return Err(
+            "meetingAsrRouteMismatch: 导入任务的模型快照与后端注册表不一致".to_string(),
+        );
+    }
+    super::meeting_audio_import::validate_meeting_asr_combination(
+        &descriptor,
+        state.diarization_mode,
+        import_config.local_diarization_model_id.as_deref(),
+    )?;
+    Ok(descriptor.model_id)
 }
 
 async fn run_local_import_post_processing_job(
@@ -1951,6 +1959,47 @@ mod tests {
         assert_eq!(config.diarization_mode, MeetingDiarizationMode::Cloud);
         assert_eq!(config.expected_speaker_count, Some(6));
         assert_eq!(config.realtime_model_id.as_deref(), Some("fun-asr-realtime"));
+    }
+
+    #[test]
+    fn import_route_rejects_forged_or_stale_runtime_snapshots_before_dispatch() {
+        let mut candidate = record();
+        prepare_post_processing_after_stop(&mut candidate, "2026-08-13T01:00:00Z").unwrap();
+        let state = candidate.post_processing.as_ref().unwrap().clone();
+        let import_config = MeetingImportConfig {
+            source_file_name: "meeting.wav".to_string(),
+            source_format: "wav".to_string(),
+            asr_model_ref: state.model_ref.clone(),
+            resolved_asr_runtime_kind: MeetingAsrRuntimeKind::Cloud,
+            diarization_mode: MeetingDiarizationMode::Off,
+            local_diarization_model_id: None,
+            expected_speaker_count: None,
+            generate_summary: false,
+            processing_revision: state.processing_revision,
+        };
+
+        assert_eq!(
+            validate_import_post_processing_route(&state, &import_config).unwrap(),
+            "fun-asr"
+        );
+
+        let mut forged_state = state.clone();
+        forged_state.resolved_runtime_kind = MeetingAsrRuntimeKind::Local;
+        assert!(validate_import_post_processing_route(&forged_state, &import_config)
+            .unwrap_err()
+            .contains("meetingAsrRouteMismatch"));
+
+        let mut forged_config = import_config.clone();
+        forged_config.resolved_asr_runtime_kind = MeetingAsrRuntimeKind::Local;
+        assert!(validate_import_post_processing_route(&state, &forged_config)
+            .unwrap_err()
+            .contains("meetingAsrRouteMismatch"));
+
+        let mut stale_config = import_config;
+        stale_config.asr_model_ref.model_id = "paraformer-v2".to_string();
+        assert!(validate_import_post_processing_route(&state, &stale_config)
+            .unwrap_err()
+            .contains("meetingAsrRouteMismatch"));
     }
 
     #[test]
