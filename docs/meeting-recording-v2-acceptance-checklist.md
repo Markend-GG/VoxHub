@@ -117,6 +117,7 @@ Phase 0 已按当前基线核查代码与自动测试。除 V2-1 现有代码证
 - 本地 ASR 分支不会创建百炼 client 或进入上传；`本地 ASR + 云端说话人处理` 会在消费 selection token 和上传前明确拒绝。云端任务提交结果未知时拒绝自动重提，取消、重试和恢复均以持久化 job / task 边界防止重复任务。
 - 新 transcript revision 先进入 staging，只有结果完整、job / model / provider task 校验一致且持久化成功后才原子激活；失败保留实时原文、旧总结和当前人工发言人名称。processing hold 在任务终态前保护受管音频不被 retention 删除。
 - 自动验证边界：本轮最终回归 `cargo test meeting --lib`（184 passed，10 ignored）、MSVC `cargo check`、`tsc --noEmit`、`npm run build` 和 `git diff --check` 均通过；这些证据用于证明代码可编译、状态机与核心路由契约没有回归。Rust 输出只有既有 warning；已有真实百炼短链路、本地模型短链路和 30 / 60 / 120 分钟基准不在本轮重复计费或重复运行。
+- 当前源码桌面二进制已使用 MSVC `cargo build --bin openless` 重新构建成功，产物为 `D:\openless-deps\cargo-target-openless-msvc\debug\openless.exe`。构建时检测到已安装版 OpenLess 正在运行，因此未启动第二个 Tauri 实例；该证据只证明当前源码可生成桌面可执行文件，不替代真正的启动、交互、录音和恢复人工验收。
 - 人工验证边界：真正 Tauri 的开始 / 暂停 / 继续 / 停止、停止体感、原生文件选择器、导入进度 / 取消 / 失败 / 重试、真正退出与重启、模型下载生命周期、播放 / 总结 / 导出 / 删除、一小时现场会议、多人质量、真实公网断网与云端取消、macOS 真机均保持 `partial` 或 `missing`，由下方桌面清单执行；没有新增 `deferred`。
 
 ## V2-1 Realtime ASR
