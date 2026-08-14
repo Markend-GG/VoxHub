@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -1710,22 +1711,11 @@ function MeetingAudioImportSection({
           )}
         </div>
       )}
-      {(record.speakerProfiles?.length ?? 0) > 0 && (
-        <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
-          <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>
-            {t('meetings.postProcessing.speakers')}
-          </span>
-          {record.speakerProfiles?.map(profile => (
-            <SpeakerRenameRow
-              key={profile.id}
-              speakerId={profile.id}
-              displayName={profile.displayName}
-              disabled={busy}
-              onRename={onRenameSpeaker}
-            />
-          ))}
-        </div>
-      )}
+      <SpeakerRenameSection
+        speakerProfiles={record.speakerProfiles}
+        disabled={busy}
+        onRename={onRenameSpeaker}
+      />
     </section>
   );
 }
@@ -1852,23 +1842,74 @@ function PostProcessingSection({
           )}
         </div>
       )}
-      {(record.speakerProfiles?.length ?? 0) > 0 && (
-        <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
-          <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>
-            {t('meetings.postProcessing.speakers')}
-          </span>
-          {record.speakerProfiles?.map(profile => (
-            <SpeakerRenameRow
-              key={profile.id}
-              speakerId={profile.id}
-              displayName={profile.displayName}
-              disabled={busy}
-              onRename={onRenameSpeaker}
-            />
-          ))}
-        </div>
-      )}
+      <SpeakerRenameSection
+        speakerProfiles={record.speakerProfiles}
+        disabled={busy}
+        onRename={onRenameSpeaker}
+      />
     </section>
+  );
+}
+
+function SpeakerRenameSection({
+  speakerProfiles,
+  disabled,
+  onRename,
+}: {
+  speakerProfiles: MeetingRecord['speakerProfiles'];
+  disabled: boolean;
+  onRename: (speakerId: string, displayName: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const contentId = useId();
+  if (!speakerProfiles?.length) return null;
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={contentId}
+        onClick={() => setExpanded(value => !value)}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+          minHeight: 28,
+          padding: '4px 2px',
+          border: 'none',
+          background: 'transparent',
+          color: 'var(--ol-ink-2)',
+          fontFamily: 'inherit',
+          fontSize: 12,
+          fontWeight: 500,
+          cursor: 'pointer',
+        }}
+      >
+        <Icon name="user" size={13} />
+        <span>{t('meetings.postProcessing.speakers')}</span>
+        <span style={{ color: 'var(--ol-ink-3)', fontVariantNumeric: 'tabular-nums' }}>
+          ({speakerProfiles.length})
+        </span>
+        <Icon name={expanded ? 'chevDown' : 'chevRight'} size={13} />
+      </button>
+      <div
+        id={contentId}
+        hidden={!expanded}
+        style={{ display: expanded ? 'grid' : 'none', gap: 8, marginTop: 6 }}
+      >
+        {speakerProfiles.map(profile => (
+          <SpeakerRenameRow
+            key={profile.id}
+            speakerId={profile.id}
+            displayName={profile.displayName}
+            disabled={disabled}
+            onRename={onRename}
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 
