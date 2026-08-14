@@ -2182,6 +2182,76 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[tokio::test]
+    #[ignore = "requires configured Bailian credentials and explicit cloud benchmark WAV/model"]
+    async fn configured_bailian_benchmarks_one_post_meeting_model() {
+        let path = std::env::var_os("OPENLESS_MEETING_CLOUD_ASR_BENCH_WAV")
+            .map(std::path::PathBuf::from)
+            .expect("OPENLESS_MEETING_CLOUD_ASR_BENCH_WAV must point to a PCM WAV");
+        let model_id = std::env::var("OPENLESS_MEETING_CLOUD_ASR_BENCH_MODEL")
+            .expect("OPENLESS_MEETING_CLOUD_ASR_BENCH_MODEL must be set");
+        assert!(
+            matches!(model_id.as_str(), FUN_ASR_MODEL_ID | PARAFORMER_V2_MODEL_ID),
+            "cloud benchmark model is not supported"
+        );
+        let probe = crate::asr::meeting_audio_import::probe_pcm_wav(&path)
+            .expect("cloud benchmark WAV must be readable");
+        let managed_dir = std::env::temp_dir().join(format!(
+            "meeting-cloud-asr-benchmark-{}",
+            Uuid::new_v4()
+        ));
+        let partial_path = managed_dir.join("part-0001.wav.partial");
+        let final_path = managed_dir.join("part-0001.wav");
+        let store_path = managed_dir.join("meetings.json");
+        let started_at = std::time::Instant::now();
+        let result = async {
+            crate::asr::meeting_audio_import::normalize_pcm_wav(
+                &probe,
+                &partial_path,
+                &final_path,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .map_err(|_| "cloud benchmark WAV normalization failed")?;
+            let source = MeetingAudioSource::from_path(&final_path)
+                .map_err(|_| "normalized cloud benchmark WAV must be readable")?;
+            let info = source
+                .inspect()
+                .map_err(|_| "cloud benchmark WAV must be valid")?;
+            let persisted = run_configured_cloud_worker_fixture(
+                &store_path,
+                &final_path,
+                info.duration_ms,
+                &model_id,
+                MeetingDiarizationMode::Off,
+                None,
+                None,
+                format!("meeting-cloud-benchmark-{model_id}"),
+            )
+            .await?;
+            let state = persisted
+                .post_processing
+                .as_ref()
+                .ok_or("cloud benchmark state is missing")?;
+            if state.status != MeetingPostProcessingStatus::Completed
+                || persisted.active_transcript_revision != Some(1)
+                || persisted.processing_hold.is_some()
+                || persisted.transcript_segments.is_empty()
+            {
+                return Err("cloud benchmark result is inconsistent");
+            }
+            Ok::<(u64, usize), &str>((info.duration_ms, persisted.transcript_segments.len()))
+        }
+        .await;
+        let elapsed_ms = started_at.elapsed().as_millis();
+        let _ = std::fs::remove_dir_all(managed_dir);
+        let (duration_ms, segment_count) = result.unwrap();
+        eprintln!(
+            "meeting_cloud_asr_benchmark model={model_id} duration_ms={duration_ms} elapsed_ms={elapsed_ms} segments={segment_count}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
     #[ignore = "requires configured Bailian credentials, OPENLESS_MEETING_DIARIZATION_TEST_WAV, and an installed local diarization package"]
     async fn configured_bailian_runs_both_models_with_local_diarization() {
         let path = std::env::var_os("OPENLESS_MEETING_DIARIZATION_TEST_WAV")
