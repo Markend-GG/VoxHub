@@ -8,9 +8,12 @@
 
 ---
 
-状态：`planning`（已进入计划，未实现）  
-日期：2026-08-14  
-当前开发分支：`codex/meeting-post-asr-routing-20260812`  
+状态：`planning`（已进入计划，未实现）
+
+日期：2026-08-14
+
+当前开发分支：`codex/meeting-post-asr-routing-20260812`
+
 关联验收：`docs/meeting-recording-v3-2-system-audio-capture-acceptance-checklist.md`
 
 ## 1. 已确认的实施假设
@@ -354,11 +357,15 @@ Windows 首个可人工验收版预计 8～12 开发日；达到可发布候选�
 
 ## 16. 参考资料
 
-- Microsoft Learn: WASAPI Loopback Recording  
+- Microsoft Learn: WASAPI Loopback Recording
+
   `https://learn.microsoft.com/windows/win32/coreaudio/loopback-recording`
-- Microsoft Windows classic sample: Application loopback audio capture  
+- Microsoft Windows classic sample: Application loopback audio capture
+
   `https://learn.microsoft.com/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/`
-- Apple ScreenCaptureKit documentation  
+- Apple ScreenCaptureKit documentation
+
   `https://developer.apple.com/documentation/screencapturekit/`
-- Apple `SCStreamConfiguration.capturesAudio`  
+- Apple `SCStreamConfiguration.capturesAudio`
+
   `https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/capturesaudio`

@@ -1,7 +1,9 @@
 # 会议录音 V3-2 系统声音采集 Acceptance Checklist
 
-状态：`missing`（已完成计划，尚未实现）  
-日期：2026-08-14  
+状态：`missing`（已完成计划，尚未实现）
+
+日期：2026-08-14
+
 关联计划：`docs/meeting-recording-v3-2-system-audio-capture-plan.md`
 
 ## 状态定义
