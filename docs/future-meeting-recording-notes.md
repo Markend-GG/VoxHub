@@ -65,9 +65,11 @@
 ### 6. 系统声音采集
 
 - V1 只录麦克风。
-- V3 / future 将系统声音采集作为独立方向：支持 system audio capture（系统声音采集），用于 Zoom、Teams、腾讯会议等线上会议中采集对方声音。
+- 2026-08-14 用户已明确要求继续开发该能力，已从未拆解 future 方向进入独立 V3-2 计划：`docs/meeting-recording-v3-2-system-audio-capture-plan.md`。
+- V3-2 支持 system audio capture（系统声音采集），用于腾讯会议、飞书会议、微信语音等线上会议中采集对方声音。
 - Windows/macOS 的系统音频采集方案需要单独设计，不能假设与麦克风采集同形。
 - 需要明确麦克风与系统声音的混音、回声、延迟对齐、权限失败和设备切换策略。
+- 当前状态仍为 `missing`（未实现）；验收状态见 `docs/meeting-recording-v3-2-system-audio-capture-acceptance-checklist.md`。
 
 ### 7. 悬浮入口与独立实时展示
 
@@ -135,7 +137,7 @@
 - V2-2：停止会议后默认用 `fun-asr`、可改选 `paraformer-v2` 重新识别完整音频；说话人处理可关闭、使用云端结果或执行本地 diarization 与 transcript alignment（原文对齐）。
 - V2-3：用户从本机导入音频生成会议记录；后端按 ASR 模型 descriptor（描述符）动态路由云端接口或本地引擎，并按兼容矩阵叠加关闭 / 云端 / 本地说话人处理；复用 V2-2 状态机、revision（修订版本）和音频生命周期。
 - 已进入独立 V1 spec：会议桌宠的可见录音状态、暂停 / 继续 / 停止控制、拖动和安全隐藏。
-- V3 / future：realtime speaker labels（实时说话人标签）、subtitle-grade streaming（字幕级低延迟流式刷新）、system audio capture（系统声音采集）、从悬浮入口新建会议、独立实时原文展示、长会议总结质量增强、Word/PDF 导出、第三方任务系统集成、高级文本后处理、会议纪要融入日报，以及 MCP / CLI 只读获取会议记录。
+- V3 / future：realtime speaker labels（实时说话人标签）、subtitle-grade streaming（字幕级低延迟流式刷新）、从悬浮入口新建会议、独立实时原文展示、长会议总结质量增强、Word/PDF 导出、第三方任务系统集成、高级文本后处理、会议纪要融入日报，以及 MCP / CLI 只读获取会议记录。system audio capture（系统声音采集）已进入独立 V3-2 计划，不再是未拆解备忘项。
 
 ## 当前结论
 
@@ -155,7 +157,7 @@ V1 优先保证：
 - [ ] 为 VAD 分段管线写技术预研，比较本地切分和 provider 分段。
 - [x] 为说话人分离写 V2-2 阶段计划，明确固定云端链路、本地完整管线、文件流式上传、状态恢复和验收矩阵。
 - [ ] 为实时标点和字幕级流式体验写 UI/数据流设计。
-- [ ] 为系统声音采集写平台能力调研，分别覆盖 Windows 和 macOS。
+- [x] 为系统声音采集写平台能力调研和 V3-2 实施计划，分别覆盖 Windows 和 macOS；功能实现仍为 `missing`。
 - [x] 为会议期间的桌宠状态、暂停 / 继续 / 停止控制、拖动和安全隐藏写独立 V1 spec。
 - [ ] 为从悬浮入口新建会议和悬浮实时原文展示写后续交互设计。
 - [ ] 为 Word/PDF 导出写后续导出格式设计。

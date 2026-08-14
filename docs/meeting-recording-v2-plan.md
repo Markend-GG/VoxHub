@@ -25,12 +25,15 @@
 - `docs/meeting-recording-v2-2-diarization-plan.md`
 - `docs/meeting-recording-v2-3-audio-import-plan.md`
 - `docs/meeting-recording-v2-acceptance-checklist.md`
+- `docs/meeting-recording-v3-2-system-audio-capture-plan.md`
+- `docs/meeting-recording-v3-2-system-audio-capture-acceptance-checklist.md`
 
 ## 0. 最新进展同步（2026-08-14）
 
 - V2-1：会议独立 ASR 设置、draft/final（临时 / 最终识别）、原文 metadata（元数据）、provider session（服务商会话）防污染和本场实际 realtime ASR 配置快照已进入代码，并通过 TypeScript、前端 build、MSVC `cargo check` 及相关 Rust 自动测试；真实百炼会议和 Tauri 人工验收尚未完成，因此仍标记为 `partial`（部分完成）。
 - V2-2：会后 ASR 模型选择、会议音频文件流式上传、云端 `fun-asr` / `paraformer-v2` 任务框架、revision（原文修订版本）、任务恢复和音频生命周期已进入代码；本机百炼凭据已用无隐私短音频分别完成两个模型的真实临时 OSS 上传、异步任务、时间轴和 `speakerId` 解析。2026-08-14 又完成两个云端模型的 30 / 60 / 120 分钟生产链路基准：`fun-asr` 端到端耗时 54.214 / 102.043 / 216.035 秒，峰值工作集 86.63 / 87.18 / 87.62 MiB；`paraformer-v2` 为 47.351 / 92.988 / 179.633 秒，峰值工作集 87.51 / 86.71 / 96.25 MiB。基准包含规范化、流式上传、异步任务、轮询、结果解析、revision 激活和重新读盘；当前状态结构不能可靠拆分纯上传与纯服务端耗时，因此只记录端到端耗时。本地说话人组合包也已完成真实 segmentation、embedding、clustering 短链路推理及 30 / 60 / 120 分钟合成双声线资源基准；catalog（模型目录）声明建议最长 120 分钟、峰值约 1.5 GiB 且建议至少 4 GiB 可用内存，后端在读取整段 waveform（波形）前强制拒绝超过 120 分钟的任务并提示改用云端。真实会议质量、真实公网中断、Tauri UI 和真正应用重启验证尚未完成，因此相关功能验收项仍为 `partial`。
 - V2-3：音频文件导入、受管 WAV、可信 selection token（选择令牌）、按模型能力注册表动态路由云端 / 本地 ASR、取消 / 重试 / 恢复、兼容组合校验和会议详情复用已经进入代码并完成自动测试；Windows 已用系统离线 TTS 生成的无隐私中文音频，完成百炼双模型云端文件 ASR 及双模型 30 / 60 / 120 分钟生产链路基准、本地 diarization-first + SenseVoice 的 30 / 60 / 120 分钟资源基准，以及本地 SenseVoice 关闭说话人处理的 30 / 60 / 120 分钟真实多窗口导入基准。磁盘不足、进程强杀恢复和 WAV 损坏输入也已有确定性自动测试。云端和本地路径均已证明 120 分钟合成输入可完成，但真实人声质量、完整 Tauri 导入 IPC 与 UI、真正应用重启仍未验证，因此 MR-V2-201～212 仍不能整体标记为 `done`。
+- V3-2：2026-08-14 用户已明确要求继续开发 system audio capture（系统声音采集），已新建独立 Windows-first 实施计划和验收清单。当前仅完成计划，功能状态为 `missing`，不改写 V2 验收结论。
 - 状态权威统一放在 `docs/meeting-recording-v2-acceptance-checklist.md`；阶段计划写完不等于功能已经实现。
 
 ## 1. 背景
@@ -161,11 +164,18 @@ V2 的核心问题不是继续扩展总结模板，也不是一次性做完整�
 
 目标：支持线上会议采集对方声音，但必须独立设计 Windows / macOS 音频能力。
 
+当前状态：2026-08-14 已进入独立计划，尚未实现。Windows 首版以 WASAPI endpoint loopback 采集所选输出设备的系统混音，并与麦克风通过会议专用 mixer 生成一条标准受管 WAV；macOS 待 Windows 稳定后使用 ScreenCaptureKit 单独实现和验收。
+
 范围：
 
 - Windows 与 macOS 分别调研 system audio capture（系统声音采集）方案。
 - 明确 mic（麦克风）与 system audio（系统声音）的混音、回声、延迟对齐、权限失败、设备切换策略。
 - 不默认把系统声音混进 V2-1 的麦克风录音。
+
+详细任务和验收见：
+
+- `docs/meeting-recording-v3-2-system-audio-capture-plan.md`
+- `docs/meeting-recording-v3-2-system-audio-capture-acceptance-checklist.md`
 
 ### V3-3：悬浮入口与独立实时展示
 
