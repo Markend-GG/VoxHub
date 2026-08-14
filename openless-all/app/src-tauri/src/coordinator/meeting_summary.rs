@@ -306,6 +306,14 @@ fn validate_summary_mode(record: &MeetingRecord, mode: MeetingSummaryMode) -> Re
     }
 }
 
+#[cfg(test)]
+pub(super) fn validate_summary_mode_for_test(
+    record: &MeetingRecord,
+    mode: MeetingSummaryMode,
+) -> Result<(), String> {
+    validate_summary_mode(record, mode)
+}
+
 pub(super) fn prepare_summary_record(record: &mut MeetingRecord) -> Result<(), String> {
     if record
         .transcript_segments

@@ -3002,6 +3002,55 @@ mod tests {
     }
 
     #[test]
+    fn auto_summary_waits_for_completed_post_processing_and_uses_active_revision() {
+        let mut candidate = record();
+        prepare_post_processing_after_stop(&mut candidate, "2026-08-12T10:00:01Z").unwrap();
+        let state = candidate.post_processing.as_mut().unwrap();
+        state.status = MeetingPostProcessingStatus::Applying;
+        state.provider_task_id = Some("task-1".to_string());
+        let job_id = state.job_id.clone();
+
+        assert_eq!(candidate.active_transcript_revision, Some(0));
+        assert_eq!(candidate.transcript_segments[0].text, "开始会议");
+        assert_eq!(
+            super::super::meeting_summary::validate_summary_mode_for_test(
+                &candidate,
+                super::super::meeting_summary::MeetingSummaryMode::Generate,
+            ),
+            Err("meeting post-processing is not completed".to_string())
+        );
+
+        assert!(apply_cloud_result_transition(
+            &mut candidate,
+            &job_id,
+            FUN_ASR_MODEL_ID,
+            "task-1",
+            &cloud_transcript(false),
+            "2026-08-12T10:02:00Z",
+        )
+        .unwrap());
+
+        assert_eq!(candidate.active_transcript_revision, Some(1));
+        assert_eq!(candidate.transcript_segments[0].text, "第一位发言");
+        assert_eq!(
+            candidate.post_processing.as_ref().unwrap().status,
+            MeetingPostProcessingStatus::Completed
+        );
+        assert_eq!(
+            super::super::meeting_summary::validate_summary_mode_for_test(
+                &candidate,
+                super::super::meeting_summary::MeetingSummaryMode::Generate,
+            ),
+            Ok(())
+        );
+
+        super::super::meeting_summary::prepare_summary_record(&mut candidate).unwrap();
+        assert_eq!(candidate.status, MeetingStatus::Summarizing);
+        assert_eq!(candidate.active_transcript_revision, Some(1));
+        assert_eq!(candidate.transcript_segments[0].text, "第一位发言");
+    }
+
+    #[test]
     fn cloud_diarization_maps_provider_ids_to_stable_profiles_and_turns() {
         let (segments, profiles, turns) = normalize_cloud_transcript(
             FUN_ASR_MODEL_ID,
