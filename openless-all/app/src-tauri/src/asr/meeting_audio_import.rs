@@ -590,6 +590,129 @@ mod tests {
     }
 
     #[test]
+    fn probe_rejects_corrupt_wav_structure_matrix() {
+        let dir = temp_dir();
+        let path = dir.join("corrupt.wav");
+        let valid = wav(1, 16_000, &[[1, 0]]);
+
+        let mut missing_fmt = Vec::new();
+        missing_fmt.extend_from_slice(b"RIFF");
+        missing_fmt.extend_from_slice(&14u32.to_le_bytes());
+        missing_fmt.extend_from_slice(b"WAVEdata");
+        missing_fmt.extend_from_slice(&2u32.to_le_bytes());
+        missing_fmt.extend_from_slice(&1i16.to_le_bytes());
+
+        let mut missing_data = valid[..36].to_vec();
+        missing_data[4..8].copy_from_slice(&28u32.to_le_bytes());
+
+        let mut short_fmt = valid.clone();
+        short_fmt[16..20].copy_from_slice(&8u32.to_le_bytes());
+        short_fmt[4..8].copy_from_slice(&28u32.to_le_bytes());
+
+        let mut oversized_chunk = valid.clone();
+        oversized_chunk[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let cases = [
+            ("zero length", Vec::new(), "empty or corrupt"),
+            ("truncated RIFF", b"RIFF\0\0\0\0WAV".to_vec(), "empty or corrupt"),
+            ("invalid RIFF length", valid[..20].to_vec(), "RIFF length is invalid"),
+            ("missing fmt", missing_fmt, "fmt chunk is missing"),
+            ("missing data", missing_data, "data chunk is missing"),
+            ("short fmt", short_fmt, "fmt chunk is invalid"),
+            ("oversized chunk", oversized_chunk, "chunk length is invalid"),
+        ];
+
+        for (name, bytes, expected_error) in cases {
+            std::fs::write(&path, bytes).unwrap();
+            let error = probe_pcm_wav(&path).unwrap_err().to_string();
+            assert!(
+                error.contains(expected_error),
+                "{name} returned unexpected error: {error}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn probe_rejects_invalid_pcm_format_matrix() {
+        let dir = temp_dir();
+        let path = dir.join("invalid-format.wav");
+        let valid = wav(1, 16_000, &[[1, 0]]);
+        let cases: [(&str, fn(&mut Vec<u8>), &str); 10] = [
+            (
+                "zero channels",
+                |bytes| bytes[22..24].copy_from_slice(&0u16.to_le_bytes()),
+                "mono or stereo",
+            ),
+            (
+                "three channels",
+                |bytes| bytes[22..24].copy_from_slice(&3u16.to_le_bytes()),
+                "mono or stereo",
+            ),
+            (
+                "8-bit samples",
+                |bytes| bytes[34..36].copy_from_slice(&8u16.to_le_bytes()),
+                "16-bit samples",
+            ),
+            (
+                "24-bit samples",
+                |bytes| bytes[34..36].copy_from_slice(&24u16.to_le_bytes()),
+                "16-bit samples",
+            ),
+            (
+                "sample rate below minimum",
+                |bytes| bytes[24..28].copy_from_slice(&7_999u32.to_le_bytes()),
+                "sample rate is unsupported",
+            ),
+            (
+                "sample rate above maximum",
+                |bytes| bytes[24..28].copy_from_slice(&192_001u32.to_le_bytes()),
+                "sample rate is unsupported",
+            ),
+            (
+                "invalid block align",
+                |bytes| bytes[32..34].copy_from_slice(&4u16.to_le_bytes()),
+                "format fields are inconsistent",
+            ),
+            (
+                "invalid byte rate",
+                |bytes| bytes[28..32].copy_from_slice(&1u32.to_le_bytes()),
+                "format fields are inconsistent",
+            ),
+            (
+                "empty data",
+                |bytes| {
+                    bytes.truncate(44);
+                    bytes[4..8].copy_from_slice(&36u32.to_le_bytes());
+                    bytes[40..44].copy_from_slice(&0u32.to_le_bytes());
+                },
+                "data length is invalid",
+            ),
+            (
+                "partial stereo frame",
+                |bytes| {
+                    bytes[22..24].copy_from_slice(&2u16.to_le_bytes());
+                    bytes[28..32].copy_from_slice(&64_000u32.to_le_bytes());
+                    bytes[32..34].copy_from_slice(&4u16.to_le_bytes());
+                },
+                "data length is invalid",
+            ),
+        ];
+
+        for (name, mutate, expected_error) in cases {
+            let mut bytes = valid.clone();
+            mutate(&mut bytes);
+            std::fs::write(&path, bytes).unwrap();
+            let error = probe_pcm_wav(&path).unwrap_err().to_string();
+            assert!(
+                error.contains(expected_error),
+                "{name} returned unexpected error: {error}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn normalize_downmixes_and_resamples_without_touching_source() {
         let dir = temp_dir();
         let source = dir.join("stereo-8k.wav");
