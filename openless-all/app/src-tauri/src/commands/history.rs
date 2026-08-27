@@ -169,10 +169,17 @@ pub async fn read_audio_recording(session_id: String) -> Result<String, String> 
             format!("read wav failed: {e}")
         }
     })?;
-    log::info!("[history] read_audio_recording id={session_id} bytes={} head={:?}", data.len(), &data.get(..16));
+    log::info!(
+        "[history] read_audio_recording id={session_id} bytes={} head={:?}",
+        data.len(),
+        &data.get(..16)
+    );
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
     let data_url = format!("data:audio/wav;base64,{b64}");
-    log::info!("[history] read_audio_recording data_url_len={}", data_url.len());
+    log::info!(
+        "[history] read_audio_recording data_url_len={}",
+        data_url.len()
+    );
     Ok(data_url)
 }
 
@@ -231,9 +238,7 @@ fn export_recording_to_destination(
         }
     }
 
-    let destination = file_path
-        .into_path()
-        .map_err(export_recording_failed)?;
+    let destination = file_path.into_path().map_err(export_recording_failed)?;
     copy_recording_to_path(source, &destination)?;
     Ok(destination.to_string_lossy().into_owned())
 }
@@ -260,7 +265,8 @@ fn copy_recording_to_path(
     destination: &std::path::Path,
 ) -> Result<(), String> {
     let mut source_file = open_recording_source(source)?;
-    let mut destination_file = std::fs::File::create(destination).map_err(export_recording_failed)?;
+    let mut destination_file =
+        std::fs::File::create(destination).map_err(export_recording_failed)?;
     std::io::copy(&mut source_file, &mut destination_file)
         .map(|_| ())
         .map_err(export_recording_failed)
@@ -281,7 +287,9 @@ fn copy_recording_to_mobile_url(
         Ok(file) => file,
         Err(error) => {
             #[cfg(target_os = "ios")]
-            let _ = app.fs().stop_accessing_security_scoped_resource(destination.clone());
+            let _ = app
+                .fs()
+                .stop_accessing_security_scoped_resource(destination.clone());
             return Err(export_recording_failed(error));
         }
     };
@@ -412,7 +420,8 @@ async fn retranscribe_archived_wav_in_chunks(
         transcript.push_str(text);
     }
 
-    let asr_call_label = asr_call_label.ok_or_else(|| "recording is empty or corrupt".to_string())?;
+    let asr_call_label =
+        asr_call_label.ok_or_else(|| "recording is empty or corrupt".to_string())?;
     Ok((transcript, asr_call_label))
 }
 
@@ -543,7 +552,10 @@ mod retranscribe_tests {
         assert_eq!(entry.final_text, "重转出来的文本");
         assert_eq!(entry.error_code, None, "重转成功应清除失败标记");
         // ASR 归因换成本次重转的构建时快照。
-        assert_eq!(entry.asr_provider.as_deref(), Some("bailian-qwen3-realtime"));
+        assert_eq!(
+            entry.asr_provider.as_deref(),
+            Some("bailian-qwen3-realtime")
+        );
         assert_eq!(entry.asr_model.as_deref(), Some("qwen3-asr-flash-realtime"));
         assert_eq!(entry.asr_ms, Some(480));
         // 重转没有润色环节：旧 LLM 元数据不得残留在新转写结果上。

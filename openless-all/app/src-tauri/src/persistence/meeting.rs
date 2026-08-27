@@ -443,6 +443,8 @@ mod tests {
             duration_ms: None,
             transcript_segments: Vec::new(),
             summary: MeetingSummary::default(),
+            organized_draft: None,
+            organized_draft_state: None,
             audio: MeetingAudioMeta {
                 state: MeetingAudioState::Unavailable,
                 retained: false,

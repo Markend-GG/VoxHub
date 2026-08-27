@@ -1028,8 +1028,7 @@ mod tests {
         let (tx, mut rx) = oneshot::channel();
         asr.state.lock().final_tx = Some(tx);
         let keep_going = asr.handle_text_message(
-            &json!({"type": "transcript.response.error", "error": {"message": "boom"}})
-                .to_string(),
+            &json!({"type": "transcript.response.error", "error": {"message": "boom"}}).to_string(),
         );
         assert!(!keep_going);
         assert_eq!(rx.try_recv().unwrap().unwrap().text, "已识别内容。");
@@ -1040,7 +1039,9 @@ mod tests {
         let asr = create_test_asr();
         let (tx, mut rx) = oneshot::channel();
         asr.state.lock().final_tx = Some(tx);
-        asr.handle_text_message(&json!({"type": "error", "error": {"message": "boom"}}).to_string());
+        asr.handle_text_message(
+            &json!({"type": "error", "error": {"message": "boom"}}).to_string(),
+        );
         let err = rx.try_recv().unwrap().unwrap_err();
         assert!(matches!(err, StepfunASRError::TaskFailed(m) if m == "boom"));
     }

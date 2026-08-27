@@ -397,7 +397,8 @@ impl StylePackStore {
             author: pack.author.clone(),
             version: pack.version.clone(),
             base_mode: pack.base_mode,
-            selection_prompt: (!pack.selection_prompt.trim().is_empty()).then(|| pack.selection_prompt.clone()),
+            selection_prompt: (!pack.selection_prompt.trim().is_empty())
+                .then(|| pack.selection_prompt.clone()),
             tags: pack.tags.clone(),
             prompt_file: "prompt.md".into(),
             examples_file: "examples.json".into(),
@@ -653,7 +654,10 @@ pub fn sync_style_pack_preferences(prefs: &mut UserPreferences, packs: &[StylePa
         prefs.default_mode = active_pack.base_mode;
         changed = true;
     }
-    if !packs.iter().any(|pack| pack.id == prefs.selection_polish_style_pack_id && pack.enabled) {
+    if !packs
+        .iter()
+        .any(|pack| pack.id == prefs.selection_polish_style_pack_id && pack.enabled)
+    {
         prefs.selection_polish_style_pack_id = active_pack.id.clone();
         changed = true;
     }

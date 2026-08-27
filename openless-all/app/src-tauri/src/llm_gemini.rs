@@ -61,6 +61,11 @@ impl GeminiConfig {
         self.thinking_enabled = enabled;
         self
     }
+
+    pub fn with_request_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.request_timeout_secs = timeout_secs;
+        self
+    }
 }
 
 pub struct GeminiProvider {
@@ -561,6 +566,14 @@ fn extract_assistant_content(body: &str) -> Result<String, LLMError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_form_requests_can_override_default_timeout() {
+        let config = GeminiConfig::new("key", "gemini-2.5-flash", "https://example.com/v1beta")
+            .with_request_timeout_secs(180);
+
+        assert_eq!(config.request_timeout_secs, 180);
+    }
 
     #[test]
     fn disabled_thinking_config_uses_channel_level_budget_zero() {

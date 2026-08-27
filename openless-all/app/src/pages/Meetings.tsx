@@ -9,7 +9,9 @@ import {
   type MutableRefObject,
   type ReactNode,
 } from 'react';
-import { Volume2 } from 'lucide-react';
+import { Volume2, VolumeX } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import type { TFunction } from 'i18next';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
@@ -22,6 +24,7 @@ import {
   chooseMeetingAudioFile,
   deleteMeetingRecord,
   exportMeetingMarkdown,
+  generateMeetingOrganizedDraft,
   generateMeetingSummary,
   getActiveMeetingRecording,
   getMeeting,
@@ -34,9 +37,11 @@ import {
   prepareMeetingAudioPlayback,
   renameMeetingSpeaker,
   retryMeetingAudioImport,
+  retryMeetingOrganizedDraft,
   retryMeetingPostProcessing,
   resumeMeetingRecording,
   retranscribeMeeting,
+  regenerateMeetingOrganizedDraft,
   showMeetingCompanion,
   startMeetingAudioImport,
   startMeetingRecording,
@@ -53,6 +58,8 @@ import type {
   MeetingErrorEvent,
   MeetingImportEvent,
   MeetingListItem,
+  MeetingOrganizedDraftEvent,
+  MeetingOrganizedDraftItem,
   MeetingAsrModelRef,
   MeetingPostProcessingEvent,
   MeetingRecord,
@@ -70,13 +77,21 @@ import type {
   UserPreferences,
 } from '../lib/types';
 import { normalizeMeetingCloseRequest } from '../lib/types';
+import {
+  MEETING_CONTENT_TABS,
+  meetingTranscriptView,
+  moveMeetingContentTab,
+  organizedDraftView,
+  type MeetingContentTab,
+  type MeetingTabNavigationKey,
+} from '../lib/meetingContent';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill, type PillTone } from './_atoms';
 import { Modal } from '../components/ui/Modal';
 import { SelectLite } from '../components/ui/SelectLite';
 
-type ActionLoading = 'start' | 'import' | 'pause' | 'resume' | 'stop' | 'summary' | 'save' | 'delete' | 'export' | 'retranscribe' | 'postProcessing' | null;
+type ActionLoading = 'start' | 'import' | 'pause' | 'resume' | 'stop' | 'summary' | 'organized' | 'save' | 'delete' | 'export' | 'retranscribe' | 'postProcessing' | null;
 type ActiveControlMode = 'recording' | 'paused';
 const PLAYBACK_SPEEDS = [0.75, 1, 1.25, 1.5, 2] as const;
 type PlaybackSpeed = typeof PLAYBACK_SPEEDS[number];
@@ -119,6 +134,7 @@ export function Meetings({
   const [meetings, setMeetings] = useState<MeetingListItem[]>([]);
   const [meetingDetails, setMeetingDetails] = useState<Record<string, MeetingRecord>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [activeContentTab, setActiveContentTab] = useState<MeetingContentTab>('summary');
   const [activeSnapshot, setActiveSnapshot] = useState<MeetingRecordingSnapshot | null>(null);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
@@ -130,6 +146,7 @@ export function Meetings({
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailRetryNonce, setDetailRetryNonce] = useState(0);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [retranscribeJobByMeetingId, setRetranscribeJobByMeetingId] = useState<Record<string, string>>({});
   const [eventError, setEventError] = useState<MeetingErrorEvent | null>(null);
   const [draftByMeetingId, setDraftByMeetingId] = useState<Record<string, MeetingTranscriptDraftEvent>>({});
   const [editDraft, setEditDraft] = useState<MeetingEditDraft | null>(null);
@@ -143,6 +160,7 @@ export function Meetings({
   const [meetingFileAsrModels, setMeetingFileAsrModels] = useState<MeetingAsrModelDescriptor[]>([]);
   const [speakerDiarizationModels, setSpeakerDiarizationModels] = useState<SpeakerDiarizationModelDescriptor[]>([]);
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
+  const detailScrollRef = useRef<HTMLDivElement | null>(null);
   const transcriptStickToBottomRef = useRef(true);
   const meetingsRef = useRef<MeetingListItem[]>([]);
   const meetingDetailsRef = useRef<Record<string, MeetingRecord>>({});
@@ -275,6 +293,7 @@ export function Meetings({
     let unlistenSegment: (() => void) | undefined;
     let unlistenError: (() => void) | undefined;
     let unlistenSummary: (() => void) | undefined;
+    let unlistenOrganizedDraft: (() => void) | undefined;
     let unlistenPostProcessing: (() => void) | undefined;
     let unlistenImport: (() => void) | undefined;
     let unlistenRecordDeleted: (() => void) | undefined;
@@ -373,6 +392,11 @@ export function Meetings({
           }
           if (payload.error) setEventError(payload.error);
         });
+        const organizedDraftHandle = await listen<MeetingOrganizedDraftEvent>('meeting:organized-draft', event => {
+          if (cancelled) return;
+          cacheMeetingRecord(event.payload.meeting);
+          setSelectedId(prev => prev ?? event.payload.meetingId);
+        });
         const postProcessingHandle = await listen<MeetingPostProcessingEvent>('meeting:post-processing-state', event => {
           if (cancelled) return;
           cacheMeetingRecord(event.payload.meeting);
@@ -414,6 +438,7 @@ export function Meetings({
           segmentHandle();
           errorHandle();
           summaryHandle();
+          organizedDraftHandle();
           postProcessingHandle();
           importHandle();
           recordDeletedHandle();
@@ -424,6 +449,7 @@ export function Meetings({
           unlistenSegment = segmentHandle;
           unlistenError = errorHandle;
           unlistenSummary = summaryHandle;
+          unlistenOrganizedDraft = organizedDraftHandle;
           unlistenPostProcessing = postProcessingHandle;
           unlistenImport = importHandle;
           unlistenRecordDeleted = recordDeletedHandle;
@@ -441,6 +467,7 @@ export function Meetings({
       unlistenSegment?.();
       unlistenError?.();
       unlistenSummary?.();
+      unlistenOrganizedDraft?.();
       unlistenPostProcessing?.();
       unlistenImport?.();
       unlistenRecordDeleted?.();
@@ -459,6 +486,11 @@ export function Meetings({
     return visibleSelected ?? filteredMeetings[0] ?? null;
   }, [filteredMeetings, selectedId]);
 
+  useEffect(() => {
+    setActiveContentTab('summary');
+    detailScrollRef.current?.scrollTo({ top: 0 });
+  }, [selectedMeeting?.id]);
+
   const cachedDetail = selectedMeeting ? meetingDetails[selectedMeeting.id] : null;
   const detailMeeting = activeSnapshot && selectedMeeting?.id === activeSnapshot.meeting.id
     ? activeSnapshot.meeting
@@ -472,7 +504,18 @@ export function Meetings({
     ? activeControlMode.mode
     : null;
   const selectedDraft = detailMeeting ? draftByMeetingId[detailMeeting.id] ?? null : null;
-  const transcriptCount = detailMeeting?.transcriptSegments.length ?? 0;
+  const selectedTranscriptView = useMemo(
+    () => detailMeeting ? meetingTranscriptView(detailMeeting) : null,
+    [detailMeeting],
+  );
+  const transcriptCount = selectedTranscriptView?.segments.length ?? 0;
+  const selectedRetranscribeState = detailMeeting?.postProcessing
+    && retranscribeJobByMeetingId[detailMeeting.id] === detailMeeting.postProcessing.jobId
+    ? detailMeeting.postProcessing
+    : null;
+  const selectedRetranscribeFeedback = selectedRetranscribeState
+    ? retranscribeFeedback(selectedRetranscribeState, t)
+    : null;
 
   useEffect(() => {
     const meetingId = selectedMeeting?.id;
@@ -796,9 +839,11 @@ export function Meetings({
     setEventError(null);
     try {
       const updated = await retranscribeMeeting(record.id);
+      const jobId = updated.postProcessing?.jobId;
+      if (!jobId) throw new Error('meeting post-processing job was not created');
       cacheMeetingRecord(updated);
       setSelectedId(updated.id);
-      setActionError(t('meetings.retranscribeSuccess'));
+      setRetranscribeJobByMeetingId(prev => ({ ...prev, [updated.id]: jobId }));
     } catch (error) {
       console.error('[meetings] retranscribe failed', error);
       setActionError(t('meetings.retranscribeFailed', { err: errorMessage(error) }));
@@ -893,6 +938,28 @@ export function Meetings({
       setRewriteConfirmId(null);
     } catch (error) {
       console.error('[meetings] generate summary failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runOrganizedDraft = async (
+    id: string,
+    mode: 'generate' | 'retry' | 'regenerate',
+  ) => {
+    setActionLoading('organized');
+    setActionError(null);
+    try {
+      const record = mode === 'retry'
+        ? await retryMeetingOrganizedDraft(id)
+        : mode === 'regenerate'
+          ? await regenerateMeetingOrganizedDraft(id)
+          : await generateMeetingOrganizedDraft(id);
+      cacheMeetingRecord(record);
+      setSelectedId(record.id);
+    } catch (error) {
+      console.error('[meetings] organized draft action failed', error);
       setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
     } finally {
       setActionLoading(null);
@@ -1000,7 +1067,7 @@ export function Meetings({
         )}
 
         {(!mobile || mobileDetailOpen) && (
-          <Card padding={20} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+          <Card padding={20} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', position: 'relative' }}>
             {detailMeeting ? (
               <>
                 {mobile && (
@@ -1031,9 +1098,37 @@ export function Meetings({
                   onResume={() => void runResume(detailMeeting.id)}
                   onStop={() => void runStop(detailMeeting.id)}
                 />
-                <div className="ol-thinscroll" style={{ flex: 1, minHeight: 0, overflow: 'auto', paddingRight: 2 }}>
+                <MeetingContentTabs
+                  activeTab={activeContentTab}
+                  onChange={setActiveContentTab}
+                />
+                <div
+                  ref={detailScrollRef}
+                  className="ol-thinscroll"
+                  style={{
+                    flex: 1,
+                    minHeight: 0,
+                    overflow: 'auto',
+                    paddingTop: 14,
+                    paddingRight: 2,
+                    paddingBottom: canPlayMeetingAudio(detailMeeting, activeSnapshot) ? 84 : 2,
+                  }}
+                >
+                  {canPlayMeetingAudio(detailMeeting, activeSnapshot) && (
+                    <MeetingAudioPlayer
+                      meetingId={detailMeeting.id}
+                      mobile={mobile}
+                      scrollRootRef={detailScrollRef}
+                      onMissing={() => markMeetingAudioMissing(detailMeeting.id)}
+                    />
+                  )}
                   {actionError && (
                     <ErrorBanner tone="error">{actionError}</ErrorBanner>
+                  )}
+                  {selectedRetranscribeFeedback && (
+                    <ErrorBanner tone={selectedRetranscribeFeedback.tone}>
+                      {selectedRetranscribeFeedback.message}
+                    </ErrorBanner>
                   )}
                   {eventError && (!eventError.meetingId || eventError.meetingId === detailMeeting.id) && (
                     <ErrorBanner tone="error">
@@ -1062,56 +1157,77 @@ export function Meetings({
                       {t('meetings.audioPlayback.missing')}
                     </ErrorBanner>
                   )}
-                  {detailMeeting.importState && detailMeeting.importConfig ? (
-                    <MeetingAudioImportSection
+                  {activeContentTab === 'summary' && (
+                    <section
+                      id="meeting-tabpanel-summary"
+                      role="tabpanel"
+                      aria-labelledby="meeting-tab-summary"
+                    >
+                      {detailMeeting.importState && detailMeeting.importConfig ? (
+                        <MeetingAudioImportSection
+                          record={detailMeeting}
+                          models={meetingFileAsrModels}
+                          speakerModels={speakerDiarizationModels}
+                          actionLoading={actionLoading}
+                          onRetry={options => void runRetryAudioImport(detailMeeting, options)}
+                          onCancel={() => void runCancelAudioImport(detailMeeting.id)}
+                          onRenameSpeaker={(speakerId, displayName) => void runRenameSpeaker(detailMeeting.id, speakerId, displayName)}
+                        />
+                      ) : (
+                        <PostProcessingSection
+                          record={detailMeeting}
+                          models={postMeetingAsrModels}
+                          actionLoading={actionLoading}
+                          onRetry={(modelRef, speakerCount) => void runRetryPostProcessing(detailMeeting, modelRef, speakerCount)}
+                          onCancel={() => void runCancelPostProcessing(detailMeeting.id)}
+                          onUseRealtime={() => void runUseRealtimeTranscript(detailMeeting.id)}
+                          onRenameSpeaker={(speakerId, displayName) => void runRenameSpeaker(detailMeeting.id, speakerId, displayName)}
+                        />
+                      )}
+                      <SummarySection
+                        record={detailMeeting}
+                        draft={editDraft?.id === detailMeeting.id ? editDraft : null}
+                        onDraftChange={setEditDraft}
+                        actionLoading={actionLoading}
+                        onRetry={() => void runRetrySummary(detailMeeting.id)}
+                        onRewrite={() => void runGenerateSummary(detailMeeting.id)}
+                        rewriteConfirming={rewriteConfirmId === detailMeeting.id}
+                        onCancelRewrite={() => setRewriteConfirmId(null)}
+                      />
+                    </section>
+                  )}
+                  {activeContentTab === 'organized' && (
+                    <OrganizedDraftSection
                       record={detailMeeting}
-                      models={meetingFileAsrModels}
-                      speakerModels={speakerDiarizationModels}
+                      mobile={mobile}
                       actionLoading={actionLoading}
-                      onRetry={options => void runRetryAudioImport(detailMeeting, options)}
-                      onCancel={() => void runCancelAudioImport(detailMeeting.id)}
-                      onRenameSpeaker={(speakerId, displayName) => void runRenameSpeaker(detailMeeting.id, speakerId, displayName)}
-                    />
-                  ) : (
-                    <PostProcessingSection
-                      record={detailMeeting}
-                      models={postMeetingAsrModels}
-                      actionLoading={actionLoading}
-                      onRetry={(modelRef, speakerCount) => void runRetryPostProcessing(detailMeeting, modelRef, speakerCount)}
-                      onCancel={() => void runCancelPostProcessing(detailMeeting.id)}
-                      onUseRealtime={() => void runUseRealtimeTranscript(detailMeeting.id)}
-                      onRenameSpeaker={(speakerId, displayName) => void runRenameSpeaker(detailMeeting.id, speakerId, displayName)}
+                      onGenerate={() => void runOrganizedDraft(detailMeeting.id, 'generate')}
+                      onRetry={() => void runOrganizedDraft(detailMeeting.id, 'retry')}
+                      onRegenerate={() => void runOrganizedDraft(detailMeeting.id, 'regenerate')}
                     />
                   )}
-                  {canPlayMeetingAudio(detailMeeting, activeSnapshot) && (
-                    <MeetingAudioPlayer
-                      meetingId={detailMeeting.id}
-                      onMissing={() => markMeetingAudioMissing(detailMeeting.id)}
+                  {activeContentTab === 'transcript' && (
+                    <TranscriptList
+                      record={detailMeeting}
+                      segments={selectedTranscriptView?.segments ?? []}
+                      draft={selectedDraft}
+                      mobile={mobile}
+                      historical={selectedTranscriptView?.historical ?? false}
+                      emptyMessage={selectedTranscriptView?.kind === 'imported_empty'
+                        ? t('meetings.transcript.importedEmpty')
+                        : t('meetings.transcript.empty')}
+                      scrollRef={transcriptScrollRef}
+                      onScroll={() => {
+                        const el = transcriptScrollRef.current;
+                        if (!el) return;
+                        transcriptStickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+                      }}
+                      actionLoading={actionLoading}
+                      canRetranscribe={editDraft?.id !== detailMeeting.id && canRetranscribeMeeting(detailMeeting, activeSnapshot)}
+                      retranscribing={isMeetingPostProcessingActive(detailMeeting)}
+                      onRetranscribe={() => void runRetranscribe(detailMeeting)}
                     />
                   )}
-                  <SummarySection
-                    record={detailMeeting}
-                    draft={editDraft?.id === detailMeeting.id ? editDraft : null}
-                    onDraftChange={setEditDraft}
-                    actionLoading={actionLoading}
-                    onRetry={() => void runRetrySummary(detailMeeting.id)}
-                    onRewrite={() => void runGenerateSummary(detailMeeting.id)}
-                    rewriteConfirming={rewriteConfirmId === detailMeeting.id}
-                    onCancelRewrite={() => setRewriteConfirmId(null)}
-                  />
-                  <TranscriptList
-                    record={detailMeeting}
-                    draft={selectedDraft}
-                    scrollRef={transcriptScrollRef}
-                    onScroll={() => {
-                      const el = transcriptScrollRef.current;
-                      if (!el) return;
-                      transcriptStickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-                    }}
-                    actionLoading={actionLoading}
-                    canRetranscribe={editDraft?.id !== detailMeeting.id && canRetranscribeMeeting(detailMeeting, activeSnapshot)}
-                    onRetranscribe={() => void runRetranscribe(detailMeeting)}
-                  />
                 </div>
               </>
             ) : (
@@ -1577,6 +1693,7 @@ function MeetingAudioImportSection({
     && !busy,
   );
   const progress = state.progress == null ? null : Math.round(state.progress * 100);
+  const processingError = meetingPostProcessingError(state.errorCode, state.errorMessage, t);
 
   return (
     <section style={{ padding: '12px 0', borderBottom: '0.5px solid var(--ol-line)', marginBottom: 12 }}>
@@ -1602,8 +1719,8 @@ function MeetingAudioImportSection({
           <div style={{ marginTop: 4, fontSize: 10.5, color: 'var(--ol-ink-4)' }}>{progress}%</div>
         </div>
       )}
-      {state.errorMessage && (
-        <div style={{ marginTop: 10 }}><ErrorBanner tone="error">{state.errorMessage}</ErrorBanner></div>
+      {processingError && (
+        <div style={{ marginTop: 10 }}><ErrorBanner tone="error">{processingError}</ErrorBanner></div>
       )}
       {summaryFailure && (
         <div style={{ marginTop: 10 }}>
@@ -1768,6 +1885,7 @@ function PostProcessingSection({
     && state.expectedSpeakerCount != null
     && detectedSpeakerCount > 0
     && detectedSpeakerCount !== state.expectedSpeakerCount;
+  const processingError = meetingPostProcessingError(state.errorCode, state.errorMessage, t);
 
   return (
     <section style={{ padding: '12px 0', borderBottom: '0.5px solid var(--ol-line)', marginBottom: 12 }}>
@@ -1785,9 +1903,9 @@ function PostProcessingSection({
         <span>{t('meetings.postProcessing.revision')}: {state.processingRevision}</span>
         <span>{t('meetings.postProcessing.diarizationLabel')}: {t(`meetings.postProcessing.diarization.${state.diarizationMode}`)}</span>
       </div>
-      {state.errorMessage && (
+      {processingError && (
         <div style={{ marginTop: 10 }}>
-          <ErrorBanner tone="error">{state.errorMessage}</ErrorBanner>
+          <ErrorBanner tone="error">{processingError}</ErrorBanner>
         </div>
       )}
       {speakerCountMismatch && (
@@ -2206,47 +2324,248 @@ function MeetingDetailHeader({
   );
 }
 
+function MeetingContentTabs({
+  activeTab,
+  onChange,
+}: {
+  activeTab: MeetingContentTab;
+  onChange: (tab: MeetingContentTab) => void;
+}) {
+  const { t } = useTranslation();
+  const tabRefs = useRef<Partial<Record<MeetingContentTab, HTMLButtonElement | null>>>({});
+  const handleKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    tab: MeetingContentTab,
+  ) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = moveMeetingContentTab(tab, event.key as MeetingTabNavigationKey);
+    onChange(next);
+    tabRefs.current[next]?.focus();
+  };
+  return (
+    <div
+      role="tablist"
+      aria-label={t('meetings.tabs.label')}
+      style={{
+        display: 'flex',
+        gap: 18,
+        minHeight: 38,
+        borderBottom: '0.5px solid var(--ol-line-soft)',
+        flexShrink: 0,
+      }}
+    >
+      {MEETING_CONTENT_TABS.map(tab => {
+        const selected = activeTab === tab;
+        return (
+          <button
+            key={tab}
+            ref={node => { tabRefs.current[tab] = node; }}
+            id={`meeting-tab-${tab}`}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            aria-controls={`meeting-tabpanel-${tab}`}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onChange(tab)}
+            onKeyDown={event => handleKeyDown(event, tab)}
+            style={{
+              position: 'relative',
+              minWidth: 0,
+              padding: '0 2px 10px',
+              border: 0,
+              background: 'transparent',
+              color: selected ? 'var(--ol-ink)' : 'var(--ol-ink-4)',
+              fontFamily: 'inherit',
+              fontSize: 12.5,
+              fontWeight: selected ? 650 : 500,
+              cursor: 'default',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {t(`meetings.tabs.${tab}`)}
+            {selected && (
+              <span
+                aria-hidden="true"
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  right: 0,
+                  bottom: -1,
+                  height: 2,
+                  borderRadius: 2,
+                  background: 'var(--ol-blue)',
+                }}
+              />
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function OrganizedDraftSection({
+  record,
+  mobile,
+  actionLoading,
+  onGenerate,
+  onRetry,
+  onRegenerate,
+}: {
+  record: MeetingRecord;
+  mobile: boolean;
+  actionLoading: ActionLoading;
+  onGenerate: () => void;
+  onRetry: () => void;
+  onRegenerate: () => void;
+}) {
+  const { t } = useTranslation();
+  const view = organizedDraftView(record);
+  const draft = record.organizedDraft ?? null;
+  const busy = actionLoading === 'organized' || view.state === 'pending' || view.state === 'running';
+  const action = view.state === 'missing'
+    ? { label: t('meetings.organized.actions.generate'), onClick: onGenerate }
+    : view.state === 'failed'
+      ? { label: t('meetings.organized.actions.retry'), onClick: onRetry }
+      : ['completed', 'stale'].includes(view.state)
+        ? { label: t('meetings.organized.actions.regenerate'), onClick: onRegenerate }
+        : null;
+  const tone = view.state === 'failed'
+    ? 'error'
+    : view.state === 'stale'
+      ? 'warning'
+      : null;
+
+  return (
+    <section
+      id="meeting-tabpanel-organized"
+      role="tabpanel"
+      aria-labelledby="meeting-tab-organized"
+      style={{ minHeight: 220 }}
+    >
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 650, color: 'var(--ol-ink-2)' }}>
+            {t('meetings.organized.title')}
+          </div>
+          {draft && (
+            <div style={{ marginTop: 4, fontSize: 11, color: 'var(--ol-ink-4)' }}>
+              {t('meetings.organized.generatedAt', { time: formatDateTime(draft.generatedAt) })}
+            </div>
+          )}
+        </div>
+        {action && (
+          <Btn
+            icon="refresh"
+            variant={view.state === 'failed' || view.state === 'stale' ? 'blue' : 'ghost'}
+            size="sm"
+            disabled={actionLoading !== null || busy}
+            onClick={action.onClick}
+          >
+            {actionLoading === 'organized'
+              ? t('meetings.organized.actions.processing')
+              : action.label}
+          </Btn>
+        )}
+      </div>
+
+      {tone ? (
+        <ErrorBanner tone={tone}>
+          {t(`meetings.organized.state.${view.state}`)}
+          {record.organizedDraftState?.errorMessage
+            ? ` ${record.organizedDraftState.errorMessage}`
+            : ''}
+        </ErrorBanner>
+      ) : view.state !== 'completed' && (
+        <div style={{ marginBottom: 12, padding: '12px 14px', border: '0.5px solid var(--ol-line)', borderRadius: 8, background: 'var(--ol-surface-2)', color: 'var(--ol-ink-4)', fontSize: 12.5, lineHeight: 1.6 }}>
+          {t(`meetings.organized.state.${view.state}`)}
+        </div>
+      )}
+
+      {draft && ['pending', 'running', 'failed'].includes(view.state) && (
+        <div style={{ marginBottom: 10, fontSize: 11.5, color: 'var(--ol-ink-4)' }}>
+          {t('meetings.organized.showingPrevious')}
+        </div>
+      )}
+
+      {draft && (
+        <div style={{ borderTop: '0.5px solid var(--ol-line-soft)' }}>
+          {draft.items.map((item, index) => (
+            <MeetingTextRow
+              key={`${item.sourceSegmentIds.join('-')}-${index}`}
+              speakerLabel={item.speakerLabel}
+              startMs={item.startMs}
+              endMs={item.endMs}
+              text={item.text}
+              mobile={mobile}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function TranscriptList({
   record,
+  segments,
   draft,
+  mobile,
+  historical,
+  emptyMessage,
   scrollRef,
   onScroll,
   actionLoading,
   canRetranscribe,
+  retranscribing,
   onRetranscribe,
 }: {
   record: MeetingRecord;
+  segments: TranscriptSegment[];
   draft: MeetingTranscriptDraftEvent | null;
+  mobile: boolean;
+  historical: boolean;
+  emptyMessage: string;
   scrollRef: MutableRefObject<HTMLDivElement | null>;
   onScroll: () => void;
   actionLoading: ActionLoading;
   canRetranscribe: boolean;
+  retranscribing: boolean;
   onRetranscribe: () => void;
 }) {
   const { t } = useTranslation();
-  const hasTranscriptRows = record.transcriptSegments.length > 0;
-  const rowCount = record.transcriptSegments.length + (draft ? 1 : 0);
+  const hasTranscriptRows = segments.length > 0;
+  const rowCount = segments.length + (draft ? 1 : 0);
   const virtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 92,
-    getItemKey: index => record.transcriptSegments[index]?.id ?? 'draft',
+    getItemKey: index => segments[index]?.id ?? 'draft',
     overscan: 6,
   });
   const virtualRows = virtualizer.getVirtualItems();
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 260 }}>
+    <div
+      id="meeting-tabpanel-transcript"
+      role="tabpanel"
+      aria-labelledby="meeting-tab-transcript"
+      style={{ display: 'flex', flexDirection: 'column', minHeight: 260 }}
+    >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexShrink: 0 }}>
         <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
           {t('meetings.transcriptTitle')}
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {historical && (
+            <Pill size="sm" tone="outline">{t('meetings.transcript.historical')}</Pill>
+          )}
           <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
-            {t('meetings.segmentCount', { count: record.transcriptSegments.length })}
+            {t('meetings.segmentCount', { count: segments.length })}
           </span>
           {canRetranscribe && (
-            <Btn icon="refresh" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onRetranscribe}>
-              {actionLoading === 'retranscribe' ? t('meetings.actions.retranscribing') : t('meetings.actions.retranscribe')}
+            <Btn icon="refresh" variant="ghost" size="sm" disabled={actionLoading !== null || retranscribing} onClick={onRetranscribe}>
+              {actionLoading === 'retranscribe' || retranscribing ? t('meetings.actions.retranscribing') : t('meetings.actions.retranscribe')}
             </Btn>
           )}
         </div>
@@ -2259,12 +2578,12 @@ function TranscriptList({
       >
         {!hasTranscriptRows && !draft ? (
           <div style={{ padding: 18, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)', color: 'var(--ol-ink-4)', fontSize: 12.5, lineHeight: 1.55 }}>
-            {t('meetings.noTranscript')}
+            {emptyMessage}
           </div>
         ) : (
           <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
             {virtualRows.map(virtualRow => {
-              const segment = record.transcriptSegments[virtualRow.index];
+              const segment = segments[virtualRow.index];
               const speakerLabel = segment?.speakerId
                 ? record.speakerProfiles?.find(profile => profile.id === segment.speakerId)?.displayName
                   ?? segment.speakerLabel
@@ -2283,7 +2602,13 @@ function TranscriptList({
                     paddingBottom: 8,
                   }}
                 >
-                  {segment ? <TranscriptRow segment={segment} speakerLabel={speakerLabel} /> : draft ? <TranscriptDraftRow draft={draft} /> : null}
+                  {segment ? (
+                    <TranscriptRow
+                      segment={segment}
+                      speakerLabel={speakerLabel}
+                      mobile={mobile}
+                    />
+                  ) : draft ? <TranscriptDraftRow draft={draft} /> : null}
                 </div>
               );
             })}
@@ -2591,30 +2916,79 @@ function TodoList({ todos }: { todos: MeetingRecord['summary']['todos'] }) {
   );
 }
 
-function TranscriptRow({ segment, speakerLabel }: { segment: TranscriptSegment; speakerLabel?: string }) {
+function MeetingTextRow({
+  speakerLabel,
+  startMs,
+  endMs,
+  text,
+  mobile,
+  technicalMeta,
+}: {
+  speakerLabel: string;
+  startMs: number;
+  endMs: number | null;
+  text: string;
+  mobile: boolean;
+  technicalMeta?: ReactNode;
+}) {
   const { t } = useTranslation();
   return (
     <div style={{
-      padding: '11px 12px',
-      border: '0.5px solid var(--ol-line)',
-      borderRadius: 10,
-      background: 'var(--ol-surface-2)',
+      display: 'grid',
+      gridTemplateColumns: mobile ? '1fr' : '132px minmax(0, 1fr)',
+      gap: mobile ? 7 : 18,
+      padding: '14px 2px',
+      borderBottom: '0.5px solid var(--ol-line-soft)',
     }}>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 7 }}>
-        <Pill size="sm" tone="outline">{speakerLabel || t('meetings.unknownSpeaker')}</Pill>
-        <Pill size="sm" tone="default">{formatTimestamp(segment.startMs)}</Pill>
-        <Pill size="sm" tone="outline">{sourceLabel(segment.source, t)}</Pill>
-        {segment.metadata?.needsReview && (
-          <Pill size="sm" tone="outline">{t('meetings.postProcessing.needsReview')}</Pill>
-        )}
-        {segment.metadata?.overlapping && (
-          <Pill size="sm" tone="outline">{t('meetings.postProcessing.overlappingSpeech')}</Pill>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 12, fontWeight: 650, color: 'var(--ol-ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {speakerLabel || t('meetings.unknownSpeaker')}
+        </div>
+        <div style={{ marginTop: 4, fontSize: 10.5, color: 'var(--ol-ink-4)', fontFamily: 'var(--ol-font-mono)', whiteSpace: 'nowrap' }}>
+          {formatTimestamp(startMs)}{endMs != null ? ` - ${formatTimestamp(endMs)}` : ''}
+        </div>
+        {technicalMeta && (
+          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center', marginTop: 7 }}>
+            {technicalMeta}
+          </div>
         )}
       </div>
-      <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink)', whiteSpace: 'pre-wrap' }}>
-        {segment.text}
+      <div style={{ minWidth: 0, fontSize: 13, lineHeight: 1.75, color: 'var(--ol-ink)', whiteSpace: 'pre-wrap' }}>
+        {text}
       </div>
     </div>
+  );
+}
+
+function TranscriptRow({
+  segment,
+  speakerLabel,
+  mobile,
+}: {
+  segment: TranscriptSegment;
+  speakerLabel?: string;
+  mobile: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <MeetingTextRow
+      speakerLabel={speakerLabel || t('meetings.unknownSpeaker')}
+      startMs={segment.startMs}
+      endMs={segment.endMs}
+      text={segment.text}
+      mobile={mobile}
+      technicalMeta={(
+        <>
+          <Pill size="sm" tone="outline">{sourceLabel(segment.source, t)}</Pill>
+          {segment.metadata?.needsReview && (
+            <Pill size="sm" tone="outline">{t('meetings.postProcessing.needsReview')}</Pill>
+          )}
+          {segment.metadata?.overlapping && (
+            <Pill size="sm" tone="outline">{t('meetings.postProcessing.overlappingSpeech')}</Pill>
+          )}
+        </>
+      )}
+    />
   );
 }
 
@@ -2641,15 +3015,24 @@ function TranscriptDraftRow({ draft }: { draft: MeetingTranscriptDraftEvent }) {
   );
 }
 
-function ErrorBanner({ children, tone }: { children: ReactNode; tone: 'error' | 'warning' }) {
+function ErrorBanner({ children, tone }: { children: ReactNode; tone: 'error' | 'warning' | 'success' }) {
   const warning = tone === 'warning';
+  const success = tone === 'success';
   return (
     <div style={{
       marginBottom: 12,
       padding: '9px 10px',
       borderRadius: 8,
-      background: warning ? 'rgba(245,158,11,0.10)' : 'rgba(239,68,68,0.08)',
-      color: warning ? 'var(--ol-warn, #b45309)' : 'var(--ol-red, #ef4444)',
+      background: success
+        ? 'rgba(22,163,74,0.09)'
+        : warning
+          ? 'rgba(245,158,11,0.10)'
+          : 'rgba(239,68,68,0.08)',
+      color: success
+        ? 'var(--ol-green, #15803d)'
+        : warning
+          ? 'var(--ol-warn, #b45309)'
+          : 'var(--ol-red, #ef4444)',
       fontSize: 12,
       lineHeight: 1.45,
       flexShrink: 0,
@@ -2661,13 +3044,19 @@ function ErrorBanner({ children, tone }: { children: ReactNode; tone: 'error' | 
 
 function MeetingAudioPlayer({
   meetingId,
+  mobile,
+  scrollRootRef,
   onMissing,
 }: {
   meetingId: string;
+  mobile: boolean;
+  scrollRootRef: MutableRefObject<HTMLDivElement | null>;
   onMissing: () => void;
 }) {
   const { t } = useTranslation();
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const fullPlayerRef = useRef<HTMLDivElement | null>(null);
+  const volumeMenuRef = useRef<HTMLDivElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
@@ -2681,6 +3070,8 @@ function MeetingAudioPlayer({
   const [currentTime, setCurrentTime] = useState(0);
   const [speed, setSpeed] = useState<PlaybackSpeed>(1);
   const [volume, setVolume] = useState(1);
+  const [fullPlayerVisible, setFullPlayerVisible] = useState(true);
+  const [volumeMenuOpen, setVolumeMenuOpen] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -2708,6 +3099,29 @@ function MeetingAudioPlayer({
     setDuration(0);
     setCurrentTime(0);
   }, [meetingId]);
+
+  useEffect(() => {
+    const target = fullPlayerRef.current;
+    const root = scrollRootRef.current;
+    if (!target || !root || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      entries => setFullPlayerVisible(entries[0]?.isIntersecting ?? true),
+      { root, threshold: 0.15 },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [meetingId, scrollRootRef]);
+
+  useEffect(() => {
+    if (!volumeMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && volumeMenuRef.current?.contains(target)) return;
+      setVolumeMenuOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [volumeMenuOpen]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.playbackRate = speed;
@@ -2842,18 +3256,66 @@ function MeetingAudioPlayer({
     setVolume(Math.min(2, Math.max(0, next)));
   };
 
+  const speedOptions = PLAYBACK_SPEEDS.map(value => ({
+    value: String(value),
+    label: formatPlaybackSpeed(value),
+  }));
+  const timeLabel = `${formatPlaybackTime(currentTime)} / ${formatPlaybackTime(duration)}`;
+  const playLabel = status === 'loading'
+    ? t('meetings.audioPlayback.loading')
+    : isPlaying
+      ? t('meetings.audioPlayback.pause')
+      : t('meetings.audioPlayback.play');
+  const progress = (compact: boolean, gridColumn?: string) => (
+    <input
+      type="range"
+      min={0}
+      max={duration > 0 ? duration : 0}
+      step={0.1}
+      value={duration > 0 ? Math.min(currentTime, duration) : 0}
+      onChange={event => seekTo(event.target.value)}
+      disabled={status !== 'ready' || duration <= 0}
+      aria-label={t('meetings.audioPlayback.progress')}
+      style={{
+        width: '100%',
+        minWidth: compact ? 84 : 120,
+        height: 20,
+        accentColor: 'var(--ol-blue)',
+        gridColumn,
+      }}
+    />
+  );
+  const playButton = (compact: boolean) => (
+    <button
+      type="button"
+      onClick={togglePlayback}
+      disabled={status === 'loading'}
+      aria-label={playLabel}
+      title={playLabel}
+      style={{
+        width: compact ? 32 : 36,
+        height: compact ? 32 : 36,
+        display: 'inline-grid',
+        placeItems: 'center',
+        flexShrink: 0,
+        border: '0.5px solid var(--ol-line-strong)',
+        borderRadius: '50%',
+        background: isPlaying ? 'var(--ol-blue)' : 'var(--ol-surface)',
+        color: isPlaying ? '#fff' : 'var(--ol-ink-2)',
+        cursor: status === 'loading' ? 'not-allowed' : 'default',
+      }}
+    >
+      <Icon name={isPlaying ? 'pause' : 'play'} size={compact ? 13 : 14} />
+    </button>
+  );
+
   return (
-    <div style={{
-      marginBottom: 14,
-      padding: 12,
-      border: '0.5px solid var(--ol-line)',
-      borderRadius: 8,
-      background: 'var(--ol-surface-2)',
-    }}>
+    <>
       <audio
         ref={audioRef}
         crossOrigin="anonymous"
         preload="metadata"
+        style={{ display: 'none' }}
         onLoadedMetadata={syncTiming}
         onDurationChange={syncTiming}
         onTimeUpdate={syncTiming}
@@ -2861,95 +3323,144 @@ function MeetingAudioPlayer({
         onPause={() => setIsPlaying(false)}
         onEnded={() => setIsPlaying(false)}
       />
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
+      <div
+        ref={fullPlayerRef}
+        style={{
+          marginBottom: 14,
+          padding: mobile ? 11 : 12,
+          border: '0.5px solid var(--ol-line)',
+          borderRadius: 8,
+          background: 'var(--ol-surface-2)',
+        }}
+      >
+        <div style={{ marginBottom: 9, fontSize: 11.5, fontWeight: 650, color: 'var(--ol-ink-2)' }}>
           {t('meetings.audioPlayback.title')}
-        </span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('meetings.audioPlayback.speed')}</span>
-          <div style={{ display: 'flex', border: '0.5px solid var(--ol-line)', borderRadius: 8, overflow: 'hidden', background: 'var(--ol-surface)' }}>
-            {PLAYBACK_SPEEDS.map(value => (
-              <button
-                key={value}
-                type="button"
-                aria-pressed={speed === value}
-                onClick={() => setSpeed(value)}
-                style={{
-                  minWidth: 44,
-                  height: 28,
-                  padding: '0 8px',
-                  border: 0,
-                  borderLeft: value === PLAYBACK_SPEEDS[0] ? 0 : '0.5px solid var(--ol-line-soft)',
-                  background: speed === value ? 'rgba(37,99,235,0.10)' : 'transparent',
-                  color: speed === value ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
-                  fontSize: 11,
-                  fontFamily: 'var(--ol-font-mono)',
-                  cursor: 'default',
-                }}
-              >
-                {formatPlaybackSpeed(value)}
-              </button>
-            ))}
+        </div>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: mobile
+            ? 'auto minmax(0, 1fr) auto'
+            : 'auto minmax(140px, 1fr) auto auto auto',
+          gap: mobile ? '9px 10px' : 10,
+          alignItems: 'center',
+        }}>
+          {playButton(false)}
+          {progress(false, mobile ? '2 / 4' : undefined)}
+          <span style={{ gridColumn: mobile ? '1 / 2' : undefined, fontSize: 10.5, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)', whiteSpace: 'nowrap' }}>
+            {timeLabel}
+          </span>
+          <SelectLite
+            value={String(speed)}
+            onChange={value => setSpeed(Number(value) as PlaybackSpeed)}
+            options={speedOptions}
+            ariaLabel={t('meetings.audioPlayback.speed')}
+            style={{ minWidth: 72, width: 72, height: 30, padding: '0 8px', fontSize: 11 }}
+          />
+          <div ref={volumeMenuRef} style={{ position: 'relative', justifySelf: 'end' }}>
+            <button
+              type="button"
+              aria-label={t('meetings.audioPlayback.volume')}
+              aria-expanded={volumeMenuOpen}
+              title={t('meetings.audioPlayback.volume')}
+              onClick={() => setVolumeMenuOpen(open => !open)}
+              style={{
+                width: 32,
+                height: 30,
+                display: 'inline-grid',
+                placeItems: 'center',
+                borderRadius: 7,
+                border: '0.5px solid var(--ol-line-strong)',
+                background: 'var(--ol-surface)',
+                color: 'var(--ol-ink-3)',
+                cursor: 'default',
+              }}
+            >
+              {volume === 0 ? <VolumeX size={15} /> : <Volume2 size={15} />}
+            </button>
+            {volumeMenuOpen && (
+              <div style={{
+                position: 'absolute',
+                right: 0,
+                top: 34,
+                zIndex: 30,
+                width: 184,
+                padding: 10,
+                display: 'grid',
+                gridTemplateColumns: '1fr auto',
+                gap: 8,
+                alignItems: 'center',
+                border: '0.5px solid var(--ol-line-strong)',
+                borderRadius: 8,
+                background: 'var(--ol-surface)',
+                boxShadow: 'var(--ol-shadow-2)',
+              }}>
+                <input
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={volume}
+                  onChange={event => changeVolume(event.target.value)}
+                  aria-label={t('meetings.audioPlayback.volume')}
+                  style={{ width: '100%', accentColor: 'var(--ol-blue)' }}
+                />
+                <span style={{ width: 38, textAlign: 'right', fontSize: 10.5, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)' }}>
+                  {Math.round(volume * 100)}%
+                </span>
+              </div>
+            )}
           </div>
         </div>
+        {status === 'missing' && (
+          <div style={{ marginTop: 8, fontSize: 11, color: 'var(--ol-ink-4)' }}>
+            {t('meetings.audioPlayback.missing')}
+          </div>
+        )}
+        {status === 'error' && (
+          <div style={{ marginTop: 8, fontSize: 11, color: 'var(--ol-red, #ef4444)' }}>
+            {t('meetings.audioPlayback.loadFailed', { err: errorText ?? '-' })}
+          </div>
+        )}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'auto minmax(120px, 1fr) auto', alignItems: 'center', gap: 10 }}>
-        <Btn
-          icon={isPlaying ? 'pause' : 'play'}
-          variant={isPlaying ? 'blue' : 'ghost'}
-          size="sm"
-          onClick={togglePlayback}
-          disabled={status === 'loading'}
+      {!fullPlayerVisible && status !== 'missing' && createPortal(
+        <div
+          aria-label={t('meetings.audioPlayback.miniPlayer')}
+          style={{
+            position: 'fixed',
+            left: mobile ? 10 : undefined,
+            right: mobile ? 10 : 20,
+            bottom: mobile
+              ? 'calc(68px + env(safe-area-inset-bottom, 0px))'
+              : 'max(12px, env(safe-area-inset-bottom, 0px))',
+            zIndex: 2400,
+            width: mobile ? 'auto' : 'min(520px, calc(100vw - 40px))',
+            display: 'grid',
+            gridTemplateColumns: 'auto minmax(90px, 1fr) auto auto',
+            gap: 9,
+            alignItems: 'center',
+            padding: '9px 10px',
+            border: '0.5px solid var(--ol-line-strong)',
+            borderRadius: 8,
+            background: 'var(--ol-surface)',
+            boxShadow: 'var(--ol-shadow-3)',
+          }}
         >
-          {status === 'loading'
-            ? t('meetings.audioPlayback.loading')
-            : isPlaying
-              ? t('meetings.audioPlayback.pause')
-              : t('meetings.audioPlayback.play')}
-        </Btn>
-        <input
-          type="range"
-          min={0}
-          max={duration > 0 ? duration : 0}
-          step={0.1}
-          value={duration > 0 ? Math.min(currentTime, duration) : 0}
-          onChange={event => seekTo(event.target.value)}
-          disabled={status !== 'ready' || duration <= 0}
-          aria-label={t('meetings.audioPlayback.progress')}
-          style={{ width: '100%', accentColor: 'var(--ol-blue)' }}
-        />
-        <span style={{ fontSize: 11, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)', whiteSpace: 'nowrap' }}>
-          {formatPlaybackTime(currentTime)} / {formatPlaybackTime(duration)}
-        </span>
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 8 }}>
-        <Volume2 size={14} aria-hidden="true" style={{ color: 'var(--ol-ink-4)', flexShrink: 0 }} />
-        <input
-          type="range"
-          min={0}
-          max={2}
-          step={0.1}
-          value={volume}
-          onChange={event => changeVolume(event.target.value)}
-          aria-label={t('meetings.audioPlayback.volume')}
-          title={t('meetings.audioPlayback.volume')}
-          style={{ width: 112, accentColor: 'var(--ol-blue)' }}
-        />
-        <span style={{ width: 36, textAlign: 'right', fontSize: 11, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)' }}>
-          {Math.round(volume * 100)}%
-        </span>
-      </div>
-      {status === 'missing' && (
-        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--ol-ink-4)' }}>
-          {t('meetings.audioPlayback.missing')}
-        </div>
+          {playButton(true)}
+          {progress(true)}
+          <span style={{ fontSize: 10.5, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)', whiteSpace: 'nowrap' }}>
+            {timeLabel}
+          </span>
+          <SelectLite
+            value={String(speed)}
+            onChange={value => setSpeed(Number(value) as PlaybackSpeed)}
+            options={speedOptions}
+            ariaLabel={t('meetings.audioPlayback.speed')}
+            style={{ minWidth: 66, width: 66, height: 30, padding: '0 7px', fontSize: 10.5 }}
+          />
+        </div>,
+        document.body,
       )}
-      {status === 'error' && (
-        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--ol-red, #ef4444)' }}>
-          {t('meetings.audioPlayback.loadFailed', { err: errorText ?? '-' })}
-        </div>
-      )}
-    </div>
+    </>
   );
 }
 
@@ -3039,10 +3550,60 @@ function canDeleteMeeting(record: MeetingRecord, snapshot: MeetingRecordingSnaps
 
 function canRetranscribeMeeting(record: MeetingRecord, snapshot: MeetingRecordingSnapshot | null): boolean {
   if (snapshot) return false;
-  return record.audio.state === 'retained'
+  return !record.importConfig
+    && record.audio.state === 'retained'
     && record.status !== 'recording'
     && record.status !== 'paused'
     && record.status !== 'summarizing';
+}
+
+function isMeetingPostProcessingActive(record: MeetingRecord): boolean {
+  return Boolean(record.postProcessing && isPostProcessingStatusActive(record.postProcessing.status));
+}
+
+function isPostProcessingStatusActive(
+  status: NonNullable<MeetingRecord['postProcessing']>['status'],
+): boolean {
+  return [
+    'pending',
+    'preparing_audio',
+    'uploading',
+    'running',
+    'local_analyzing',
+    'applying',
+  ].includes(status);
+}
+
+function meetingPostProcessingError(
+  errorCode: string | null | undefined,
+  errorMessage: string | null | undefined,
+  t: TFunction,
+): string | null {
+  if (errorCode === 'meetingAudioNoSpeech') {
+    return t('meetings.postProcessing.noSpeech');
+  }
+  return errorMessage ?? null;
+}
+
+function retranscribeFeedback(
+  state: NonNullable<MeetingRecord['postProcessing']>,
+  t: TFunction,
+): { tone: 'error' | 'warning' | 'success'; message: string } | null {
+  if (isPostProcessingStatusActive(state.status)) {
+    return { tone: 'warning', message: t('meetings.retranscribeStarted') };
+  }
+  if (state.status === 'completed') {
+    return { tone: 'success', message: t('meetings.retranscribeSuccess') };
+  }
+  if (state.status === 'failed') {
+    return {
+      tone: 'error',
+      message: t('meetings.retranscribeFailed', {
+        err: meetingPostProcessingError(state.errorCode, state.errorMessage, t) ?? '-',
+      }),
+    };
+  }
+  return null;
 }
 
 function canPlayMeetingAudio(record: MeetingRecord, snapshot: MeetingRecordingSnapshot | null): boolean {

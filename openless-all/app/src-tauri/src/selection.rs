@@ -112,9 +112,7 @@ pub(crate) fn capture_selection_insertion_target() -> SelectionInsertionTarget {
 /// 非 Windows（macOS / Linux）尚未实现等效的前台窗口/焦点控件校验，无法保证
 /// 云端等待期间结果不会落到用户切换后的应用或控件上，因此一律 fail-closed：
 /// 不把选区文本发给 provider，选区润色在非 Windows 平台不可用。
-pub(crate) fn selection_insertion_target_is_captured(
-    target: &SelectionInsertionTarget,
-) -> bool {
+pub(crate) fn selection_insertion_target_is_captured(target: &SelectionInsertionTarget) -> bool {
     #[cfg(target_os = "windows")]
     {
         target.windows.is_some()
@@ -960,10 +958,7 @@ mod tests {
 
         let mut another_control = captured;
         another_control.focused_window += 100;
-        assert!(!windows_selection_targets_match(
-            captured,
-            another_control
-        ));
+        assert!(!windows_selection_targets_match(captured, another_control));
     }
 
     #[cfg(target_os = "windows")]

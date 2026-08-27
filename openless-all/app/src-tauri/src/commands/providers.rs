@@ -809,8 +809,7 @@ async fn validate_asr_transcription(
                 request.json(&body)
             }
         };
-        match request.send().await
-        {
+        match request.send().await {
             Ok(resp) => break resp,
             Err(e) if e.is_timeout() => return Err("providerRequestTimeout".to_string()),
             Err(e) if (e.is_connect() || e.is_request()) && attempt < MAX_ATTEMPTS => {
@@ -1304,9 +1303,12 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
         let target_server = tokio::spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_millis(500), target_listener.accept())
-                .await
-                .is_ok()
+            tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                target_listener.accept(),
+            )
+            .await
+            .is_ok()
         });
 
         let error = send_dashscope_multimodal_validation(
@@ -1319,7 +1321,10 @@ mod tests {
 
         redirect_server.await.unwrap();
         assert_eq!(error, "providerHttpStatus:302");
-        assert!(!target_server.await.unwrap(), "validation followed redirect");
+        assert!(
+            !target_server.await.unwrap(),
+            "validation followed redirect"
+        );
     }
 
     #[test]

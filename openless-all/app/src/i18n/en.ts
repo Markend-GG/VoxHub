@@ -441,6 +441,37 @@ export const en: typeof zhCN = {
     summaryLoading: 'Generating summary…',
     summaryFailed: 'Summary generation failed. Transcript is kept.',
     summaryEmpty: 'No summary yet. A summary is generated after stopping; failed summaries can be retried.',
+    tabs: {
+      label: 'Meeting content',
+      summary: 'Meeting summary',
+      organized: 'Clean transcript',
+      transcript: 'Meeting transcript',
+    },
+    transcript: {
+      empty: 'No realtime transcript is available yet. Realtime speech recognition appears here during recording.',
+      importedEmpty: 'This meeting was imported from audio and has no realtime transcript revision.',
+      historical: 'Historical transcript',
+    },
+    organized: {
+      title: 'Post-meeting clean transcript',
+      generatedAt: 'Generated {{time}}',
+      showingPrevious: 'The last successful result remains visible until the new job completes.',
+      actions: {
+        generate: 'Generate clean transcript',
+        retry: 'Retry',
+        regenerate: 'Regenerate',
+        processing: 'Processing…',
+      },
+      state: {
+        waiting_transcript: 'The clean transcript will be generated after the final transcript is ready.',
+        missing: 'This meeting has no clean transcript yet. Generate one with the currently active LLM.',
+        pending: 'The cleanup job is queued.',
+        running: 'Removing speech disfluencies while preserving the original meaning.',
+        failed: 'Clean transcript generation failed. You can retry, and any previous successful result is preserved.',
+        stale: 'The final transcript changed, so this clean transcript is out of date.',
+        completed: 'The clean transcript is ready.',
+      },
+    },
     startConfig: {
       title: 'Meeting configuration',
       realtimeAsr: 'Realtime meeting ASR',
@@ -508,6 +539,7 @@ export const en: typeof zhCN = {
       speakerCountMismatch: 'Expected {{expected}} speakers, but detected {{detected}}. The result was kept for review.',
       needsReview: 'Needs review',
       overlappingSpeech: 'Overlapping speech',
+      noSpeech: 'No valid speech was detected in the recording. Check the microphone or virtual audio device.',
       status: {
         pending: 'Waiting',
         preparing_audio: 'Preparing audio',
@@ -585,6 +617,7 @@ export const en: typeof zhCN = {
       speed: 'Speed',
       volume: 'Volume',
       progress: 'Playback progress',
+      miniPlayer: 'Meeting audio mini player',
       missing: 'Meeting audio was cleaned up or does not exist.',
       loadFailed: 'Failed to load meeting audio: {{err}}',
     },
@@ -616,7 +649,8 @@ export const en: typeof zhCN = {
     },
     exportSuccess: 'Exported to {{path}}',
     exportFailed: 'Export failed: {{err}}',
-    retranscribeSuccess: 'Transcript retranscribed. Rewrite the summary if needed.',
+    retranscribeStarted: 'Retranscription started with the post-meeting ASR route.',
+    retranscribeSuccess: 'Retranscription completed and the new transcript revision is active.',
     retranscribeFailed: 'Retranscribe failed: {{err}}',
     rewriteConfirm: 'Rewriting will overwrite the AI-generated title, overview, key decisions, todos, and risks/open questions. Click Confirm rewrite again to continue.',
     closeGuard: {

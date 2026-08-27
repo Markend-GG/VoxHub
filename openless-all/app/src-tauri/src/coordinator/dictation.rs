@@ -736,9 +736,7 @@ pub(super) async fn handle_pressed_edge(
         inner
             .hotkey_press_generation
             .store(press_id, Ordering::SeqCst);
-        inner
-            .hotkey_press_began_session
-            .store(0, Ordering::SeqCst);
+        inner.hotkey_press_began_session.store(0, Ordering::SeqCst);
 
         // 防抖：相邻 < HOTKEY_DEBOUNCE 的边沿直接丢弃，记到 log 方便排查。
         // 与 `hotkey_trigger_held` 互补：held 防 press-without-release，本检查防
@@ -1053,8 +1051,13 @@ pub(super) async fn handle_released(inner: &Arc<Inner>, released_at: std::time::
     }
     if mode == HotkeyMode::Auto {
         // 使用物理按下/松开的事件时刻，避免 bridge 排队时把处理延迟误算为按住时长。
-        let held_long = inner.hotkey_press_at.lock().take()
-            .map(|pressed_at| released_at.saturating_duration_since(pressed_at) >= AUTO_HOLD_THRESHOLD)
+        let held_long = inner
+            .hotkey_press_at
+            .lock()
+            .take()
+            .map(|pressed_at| {
+                released_at.saturating_duration_since(pressed_at) >= AUTO_HOLD_THRESHOLD
+            })
             .unwrap_or(false);
         match phase {
             // 长按松手 = 按住说话，松手即停；短按 = 切换式，锁存保持录音，下次按下再停。
@@ -1066,9 +1069,7 @@ pub(super) async fn handle_released(inner: &Arc<Inner>, released_at: std::time::
                 request_stop_during_starting(inner, "auto hold release edge");
             }
             SessionPhase::Listening | SessionPhase::Starting => {
-                log::info!(
-                    "[coord] auto short-tap latched (toggle semantics); next press stops"
-                );
+                log::info!("[coord] auto short-tap latched (toggle semantics); next press stops");
             }
             _ => {}
         }
@@ -3458,9 +3459,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 // 处理最后一次重试结果时也复查一次取消标志，覆盖「重试刚返回
                 // Exhausted 与用户同时按 Esc」的窄竞态，避免误走失败提示。
                 if inner.state.lock().cancelled {
-                    log::info!(
-                        "[coord] cancel after silent ASR retry — discarding transcript"
-                    );
+                    log::info!("[coord] cancel after silent ASR retry — discarding transcript");
                     restore_prepared_windows_ime_session(inner, current_session_id);
                     finish_cancelled_processing(inner, current_session_id);
                     return Ok(());
@@ -3646,10 +3645,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let llm_thinking_enabled = prefs.llm_thinking_enabled;
     // 风格包原有 Prompt 就是录音 / ASR 后处理的完整规则；不要在全局设置再叠一层，
     // 否则会让同一个风格包的导出、复用和运行结果不一致。
-    let style_system_prompt = crate::types::style_pack_prompt(
-        &pack,
-        crate::types::StylePromptKind::DictationAsr,
-    );
+    let style_system_prompt =
+        crate::types::style_pack_prompt(&pack, crate::types::StylePromptKind::DictationAsr);
     let raw_uses_llm = mode == PolishMode::Raw && super::raw_style_pack_uses_llm(&pack);
     let translation_target = prefs.translation_target_language.trim().to_string();
     let translation_active =

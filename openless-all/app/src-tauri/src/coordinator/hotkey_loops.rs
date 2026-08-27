@@ -644,7 +644,9 @@ fn cancel_less_computer_voice_session(inner: &Arc<Inner>) {
     if !voice_agent || !matches!(phase, SessionPhase::Starting | SessionPhase::Listening) {
         return;
     }
-    let _ = inner.less_computer_combo_pending_press.swap(0, Ordering::SeqCst);
+    let _ = inner
+        .less_computer_combo_pending_press
+        .swap(0, Ordering::SeqCst);
     log::info!("[less-computer] 触发键与其他键组合按下 —— 取消本次按下开出的会话");
     cancel_session(inner);
     if let Some(app) = inner.app.lock().clone() {
@@ -653,7 +655,10 @@ fn cancel_less_computer_voice_session(inner: &Arc<Inner>) {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn less_computer_combo_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHotkeyEvent>) {
+pub(super) fn less_computer_combo_bridge_loop(
+    inner: Arc<Inner>,
+    rx: mpsc::Receiver<ComboHotkeyEvent>,
+) {
     while let Ok(evt) = rx.recv() {
         if inner.shortcut_recording_active.load(Ordering::SeqCst) {
             continue;

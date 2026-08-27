@@ -441,6 +441,37 @@ export const zhTW: typeof zhCN = {
     summaryLoading: '總結生成中…',
     summaryFailed: '總結生成失敗，原文已保留。',
     summaryEmpty: '暫無總結。停止會議後會自動生成；失敗後可重試。',
+    tabs: {
+      label: '會議內容',
+      summary: '會議總結',
+      organized: '整理稿',
+      transcript: '會議原文',
+    },
+    transcript: {
+      empty: '暫無即時原文。錄音過程中的即時轉寫會顯示在這裡。',
+      importedEmpty: '此會議由音訊匯入，沒有即時轉寫版本。',
+      historical: '歷史轉寫',
+    },
+    organized: {
+      title: '會後整理稿',
+      generatedAt: '產生於 {{time}}',
+      showingPrevious: '新任務完成前繼續顯示上一份成功結果。',
+      actions: {
+        generate: '產生整理稿',
+        retry: '重試',
+        regenerate: '重新產生',
+        processing: '處理中…',
+      },
+      state: {
+        waiting_transcript: '等待最終轉寫確定後自動產生整理稿。',
+        missing: '此會議尚無整理稿，可使用目前啟用的 LLM 產生。',
+        pending: '整理任務已建立，正在等待處理。',
+        running: '正在移除口語化表達並保留原意。',
+        failed: '整理稿產生失敗，可重試；已有成功結果不會被刪除。',
+        stale: '最終轉寫已更新，目前整理稿已過期。',
+        completed: '整理稿已產生。',
+      },
+    },
     startConfig: {
       title: '本場會議設定',
       realtimeAsr: '會議即時 ASR',
@@ -508,6 +539,7 @@ export const zhTW: typeof zhCN = {
       speakerCountMismatch: '預計 {{expected}} 位發言人，本次偵測到 {{detected}} 位。結果已保留，請人工確認。',
       needsReview: '待確認',
       overlappingSpeech: '重疊說話',
+      noSpeech: '錄音中未偵測到有效語音，請檢查麥克風或虛擬音訊裝置。',
       status: {
         pending: '等待處理',
         preparing_audio: '準備音訊',
@@ -585,6 +617,7 @@ export const zhTW: typeof zhCN = {
       speed: '倍速',
       volume: '音量',
       progress: '播放進度',
+      miniPlayer: '會議音訊迷你播放器',
       missing: '會議音頻已清理或不存在。',
       loadFailed: '載入會議音頻失敗：{{err}}',
     },
@@ -616,7 +649,8 @@ export const zhTW: typeof zhCN = {
     },
     exportSuccess: '已匯出到 {{path}}',
     exportFailed: '匯出失敗：{{err}}',
-    retranscribeSuccess: '已重新轉寫原文，可按需重寫總結。',
+    retranscribeStarted: '已開始使用會後 ASR 重新轉寫。',
+    retranscribeSuccess: '重新轉寫已完成，新轉寫版本已生效。',
     retranscribeFailed: '重新轉寫失敗：{{err}}',
     rewriteConfirm: '重寫總結會覆蓋 AI 生成的標題、概覽、關鍵決定、待辦和風險/開放問題。請再次點擊「確認重寫」。',
     closeGuard: {

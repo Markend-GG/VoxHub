@@ -198,10 +198,8 @@ pub(super) async fn run_selection_polish(inner: &Arc<Inner>) -> Result<(), Strin
     // 与 `repolish` 同样读取当前 style pack、词表和语言偏好；但前台上下文必须
     // 来自选区捕获时的源应用，避免在 provider 等待期间重新读取/校验目标窗口。
     // 选区润色只读取风格包的书面文本 Prompt；旧包缺少该字段时回退为安全默认。
-    let selection_style_prompt = crate::types::style_pack_prompt(
-        &pack,
-        crate::types::StylePromptKind::Selection,
-    );
+    let selection_style_prompt =
+        crate::types::style_pack_prompt(&pack, crate::types::StylePromptKind::Selection);
     log::info!(
         "[style-pack] runtime dispatch scope=selection pack={} kind={:?} mode={:?} prompt_chars={}",
         pack.id,
@@ -296,7 +294,10 @@ pub(super) async fn run_selection_polish(inner: &Arc<Inner>) -> Result<(), Strin
             finish_selection_polish_capsule(
                 inner,
                 CapsuleState::Done,
-                selection_polish_success_message(InsertStatus::Inserted, prefs.selection_polish_output_mode),
+                selection_polish_success_message(
+                    InsertStatus::Inserted,
+                    prefs.selection_polish_output_mode,
+                ),
             );
             return Ok(());
         }

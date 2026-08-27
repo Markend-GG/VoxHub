@@ -555,10 +555,11 @@ pub async fn marketplace_install(
         .map_err(|e| format!("set scope failed: {e}"))?;
 
     // 绑定 origin —— 后续编辑+发布走 derivative / supersede 分支。
-    match coord
-        .style_packs()
-        .set_origin(&scoped_pack.id, Some(pack_id.clone()), origin_author_login)
-    {
+    match coord.style_packs().set_origin(
+        &scoped_pack.id,
+        Some(pack_id.clone()),
+        origin_author_login,
+    ) {
         Ok(pack) => {
             log::info!("[marketplace-install] stage=origin-ok pack_id={pack_id}");
             log::info!("[marketplace-install] stage=done pack_id={pack_id}");

@@ -239,6 +239,9 @@ macro_rules! app_invoke_handler_desktop {
             meeting_companion::open_meeting_from_companion,
             commands::generate_meeting_summary,
             commands::retry_meeting_summary,
+            commands::generate_meeting_organized_draft,
+            commands::retry_meeting_organized_draft,
+            commands::regenerate_meeting_organized_draft,
             commands::export_meeting_markdown,
             commands::prepare_meeting_audio_playback,
             commands::retranscribe_meeting,
@@ -475,6 +478,9 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::rename_meeting_speaker,
             $crate::commands::generate_meeting_summary,
             $crate::commands::retry_meeting_summary,
+            $crate::commands::generate_meeting_organized_draft,
+            $crate::commands::retry_meeting_organized_draft,
+            $crate::commands::regenerate_meeting_organized_draft,
             $crate::commands::export_meeting_markdown,
             $crate::commands::prepare_meeting_audio_playback,
             $crate::commands::retranscribe_meeting,
@@ -1088,11 +1094,7 @@ fn build_microphone_tray_menu<M: Manager<tauri::Wry>>(
     // CoreAudio device enumeration can block inside AudioUnitSetProperty while AppKit is
     // finishing launch. Tray menus must be built on the main thread, so only consume the
     // cache here; the watcher below owns every potentially blocking enumeration.
-    let devices = app
-        .state::<TrayMicrophoneDeviceCache>()
-        .0
-        .lock()
-        .clone();
+    let devices = app.state::<TrayMicrophoneDeviceCache>().0.lock().clone();
     let selected_available =
         selected.trim().is_empty() || devices.iter().any(|device| device.name == selected);
 
@@ -2459,8 +2461,9 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
     if let Some(w) = app.get_webview_window("qa") {
         return Some(w);
     }
-    let built = WebviewWindowBuilder::new(app, "qa", WebviewUrl::App("index.html?window=qa".into()))
-        .title("OpenLess QA")
+    let built =
+        WebviewWindowBuilder::new(app, "qa", WebviewUrl::App("index.html?window=qa".into()))
+            .title("OpenLess QA")
             .inner_size(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT)
             .decorations(false)
             .transparent(true)
@@ -2657,7 +2660,11 @@ pub(crate) fn show_selection_polish_preview<R: tauri::Runtime>(app: &AppHandle<R
     if let Err(error) = window.set_focus() {
         log::warn!("[selection-polish] focus preview failed: {error}");
     }
-    let _ = app.emit_to("selection-polish-preview", "selection-polish-preview:shown", ());
+    let _ = app.emit_to(
+        "selection-polish-preview",
+        "selection-polish-preview:shown",
+        (),
+    );
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]

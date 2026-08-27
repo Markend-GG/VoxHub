@@ -84,13 +84,13 @@ mod qa;
 mod remote_input;
 mod report;
 mod rewrite;
-mod settings;
-#[cfg(not(mobile))]
-mod sherpa_asr;
 #[cfg(all(not(mobile), debug_assertions))]
 mod selection_polish;
 #[cfg(not(mobile))]
 mod selection_polish_preview;
+mod settings;
+#[cfg(not(mobile))]
+mod sherpa_asr;
 mod style_packs;
 mod whitelist;
 
@@ -118,13 +118,13 @@ pub use settings::*;
 // sherpa_onnx_asr_* 命令整组 `#[cfg(target_os = "windows")]`（见 lib.rs 的
 // generate_handler! 清单）。非 Windows 平台这组 glob 重导出无人引用，会触发
 // unused_imports；这是平台 cfg 的正常结果，不是真正的死代码。
-#[cfg(not(mobile))]
-#[allow(unused_imports)]
-pub use sherpa_asr::*;
 #[cfg(all(not(mobile), debug_assertions))]
 pub use selection_polish::*;
 #[cfg(not(mobile))]
 pub use selection_polish_preview::*;
+#[cfg(not(mobile))]
+#[allow(unused_imports)]
+pub use sherpa_asr::*;
 pub use style_packs::*;
 pub use whitelist::*;
 
@@ -307,7 +307,10 @@ mod tests {
             volcengine_resource_id: Some("resource".into()),
             ..snapshot()
         };
-        assert!(!asr_configured_for_provider("volcengine", &volcengine_no_access));
+        assert!(!asr_configured_for_provider(
+            "volcengine",
+            &volcengine_no_access
+        ));
 
         // ApiKey 模式：只需独立 api_key 槽 + resource_id，无需 app_key。
         let volcengine_api_key = CredentialsSnapshot {
@@ -316,7 +319,10 @@ mod tests {
             volcengine_auth_mode: Some("api_key".into()),
             ..snapshot()
         };
-        assert!(asr_configured_for_provider("volcengine", &volcengine_api_key));
+        assert!(asr_configured_for_provider(
+            "volcengine",
+            &volcengine_api_key
+        ));
         // ApiKey 模式缺 api_key（旧 access_key 槽有值也不满足）→ 未配置。
         let volcengine_api_key_missing = CredentialsSnapshot {
             volcengine_access_key: Some("old-access-token".into()),
@@ -324,7 +330,10 @@ mod tests {
             volcengine_auth_mode: Some("api_key".into()),
             ..snapshot()
         };
-        assert!(!asr_configured_for_provider("volcengine", &volcengine_api_key_missing));
+        assert!(!asr_configured_for_provider(
+            "volcengine",
+            &volcengine_api_key_missing
+        ));
 
         let whisper_key_only = CredentialsSnapshot {
             asr_api_key: Some("key".into()),

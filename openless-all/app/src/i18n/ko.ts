@@ -443,6 +443,37 @@ export const ko: typeof zhCN = {
     summaryLoading: '요약 생성 중…',
     summaryFailed: '요약 생성에 실패했습니다. 원문은 보존됩니다.',
     summaryEmpty: '아직 요약이 없습니다. 회의 중지 후 자동 생성되며 실패 후 다시 시도할 수 있습니다.',
+    tabs: {
+      label: '회의 내용',
+      summary: '회의 요약',
+      organized: '정리본',
+      transcript: '회의 원문',
+    },
+    transcript: {
+      empty: '아직 실시간 원문이 없습니다. 녹음 중 실시간 전사가 여기에 표시됩니다.',
+      importedEmpty: '이 회의는 오디오에서 가져왔으며 실시간 전사 버전이 없습니다.',
+      historical: '이전 전사',
+    },
+    organized: {
+      title: '회의 후 정리본',
+      generatedAt: '{{time}} 생성',
+      showingPrevious: '새 작업이 완료될 때까지 이전에 성공한 결과를 계속 표시합니다.',
+      actions: {
+        generate: '정리본 생성',
+        retry: '다시 시도',
+        regenerate: '다시 생성',
+        processing: '처리 중…',
+      },
+      state: {
+        waiting_transcript: '최종 전사가 확정되면 정리본을 자동으로 생성합니다.',
+        missing: '아직 정리본이 없습니다. 현재 활성화된 LLM으로 생성할 수 있습니다.',
+        pending: '정리 작업이 대기 중입니다.',
+        running: '원래 의미를 유지하면서 구어적인 표현을 정리하고 있습니다.',
+        failed: '정리본 생성에 실패했습니다. 다시 시도할 수 있으며 이전 성공 결과는 보존됩니다.',
+        stale: '최종 전사가 변경되어 현재 정리본이 이전 버전입니다.',
+        completed: '정리본이 준비되었습니다.',
+      },
+    },
     startConfig: {
       title: '이번 회의 설정',
       realtimeAsr: '회의 실시간 ASR',
@@ -510,6 +541,7 @@ export const ko: typeof zhCN = {
       speakerCountMismatch: '{{expected}}명을 예상했지만 {{detected}}명이 감지되었습니다. 검토할 수 있도록 결과를 유지했습니다.',
       needsReview: '검토 필요',
       overlappingSpeech: '겹치는 발화',
+      noSpeech: '녹음에서 유효한 음성이 감지되지 않았습니다. 마이크 또는 가상 오디오 장치를 확인하세요.',
       status: {
         pending: '처리 대기',
         preparing_audio: '오디오 준비 중',
@@ -587,6 +619,7 @@ export const ko: typeof zhCN = {
       speed: '속도',
       volume: '볼륨',
       progress: '재생 위치',
+      miniPlayer: '회의 오디오 미니 플레이어',
       missing: '회의 오디오가 정리되었거나 존재하지 않습니다.',
       loadFailed: '회의 오디오 로드 실패: {{err}}',
     },
@@ -618,7 +651,8 @@ export const ko: typeof zhCN = {
     },
     exportSuccess: '{{path}}에 내보냈습니다',
     exportFailed: '내보내기 실패: {{err}}',
-    retranscribeSuccess: '원문을 다시 전사했습니다. 필요하면 요약을 다시 작성하세요.',
+    retranscribeStarted: '회의 후 ASR 경로로 다시 전사를 시작했습니다.',
+    retranscribeSuccess: '다시 전사가 완료되어 새 전사 리비전이 적용되었습니다.',
     retranscribeFailed: '다시 전사 실패: {{err}}',
     rewriteConfirm: '다시 쓰면 AI가 생성한 제목, 개요, 주요 결정, 할 일, 위험/열린 질문이 덮어써집니다. 계속하려면 “다시 쓰기 확인”을 한 번 더 클릭하세요.',
     closeGuard: {

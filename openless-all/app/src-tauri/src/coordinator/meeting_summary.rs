@@ -61,7 +61,7 @@ pub(super) fn prepare_and_spawn_auto_meeting_summary(
 
     if let Err(error) = prepare_summary_record(&mut prepared) {
         complete_import_summary(&mut prepared, Some(&error));
-        persist_summary_record(&store, &prepared)?;
+        prepared = persist_summary_record(&store, &prepared)?;
         apply_import_summary_retention(inner, &store, &mut prepared)?;
         *record = prepared;
         emit_meeting_summary_failed(inner, record, "emptyTranscript", &error);
@@ -69,7 +69,7 @@ pub(super) fn prepare_and_spawn_auto_meeting_summary(
         return Ok(());
     }
 
-    persist_summary_record(&store, &prepared)?;
+    prepared = persist_summary_record(&store, &prepared)?;
     *record = prepared;
     emit_meeting_summary(inner, record, None);
     spawn_prepared_meeting_summary(inner, record.id.clone());
@@ -117,12 +117,12 @@ async fn run_meeting_summary_job(
 
     validate_summary_mode(&record, mode)?;
     if let Err(error) = prepare_summary_record(&mut record) {
-        persist_summary_record(&store, &record)?;
+        record = persist_summary_record(&store, &record)?;
         emit_meeting_summary_failed(inner, &record, "emptyTranscript", &error);
         return Ok(record);
     }
 
-    persist_summary_record(&store, &record)?;
+    record = persist_summary_record(&store, &record)?;
     emit_meeting_summary(inner, &record, None);
 
     finish_summarizing_record(inner, &store, record, llm).await
@@ -175,7 +175,7 @@ async fn finish_summarizing_record(
         Ok(parsed) => {
             apply_parsed_summary(&mut record, parsed);
             complete_import_summary(&mut record, None);
-            persist_summary_record(&store, &record)?;
+            record = persist_summary_record(&store, &record)?;
             apply_import_summary_retention(inner, store, &mut record)?;
             emit_meeting_summary(inner, &record, None);
             super::meeting_audio_import::emit_import_event(inner, &record);
@@ -185,7 +185,7 @@ async fn finish_summarizing_record(
             record.status = MeetingStatus::SummaryFailed;
             record.updated_at = Utc::now().to_rfc3339();
             complete_import_summary(&mut record, Some(&error));
-            persist_summary_record(&store, &record)?;
+            record = persist_summary_record(&store, &record)?;
             apply_import_summary_retention(inner, store, &mut record)?;
             emit_meeting_summary_failed(inner, &record, summary_error_code(&error), &error);
             super::meeting_audio_import::emit_import_event(inner, &record);
@@ -604,12 +604,27 @@ fn apply_parsed_summary(record: &mut MeetingRecord, parsed: ParsedMeetingSummary
     record.updated_at = Utc::now().to_rfc3339();
 }
 
-fn persist_summary_record(store: &MeetingStore, record: &MeetingRecord) -> Result<(), String> {
+fn persist_summary_record(
+    store: &MeetingStore,
+    record: &MeetingRecord,
+) -> Result<MeetingRecord, String> {
+    let snapshot = record.clone();
     store
-        .update(record.clone())
+        .update_if(&record.id, |current| {
+            apply_summary_persistence(current, &snapshot)
+        })
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "meeting not found".to_string())?;
-    Ok(())
+        .ok_or_else(|| "meeting not found".to_string())
+}
+
+fn apply_summary_persistence(current: &mut MeetingRecord, snapshot: &MeetingRecord) -> bool {
+    current.title = snapshot.title.clone();
+    current.status = snapshot.status.clone();
+    current.summary = snapshot.summary.clone();
+    current.import_state = snapshot.import_state.clone();
+    current.processing_hold = snapshot.processing_hold.clone();
+    current.updated_at = snapshot.updated_at.clone();
+    true
 }
 
 fn emit_meeting_summary(
@@ -762,6 +777,8 @@ mod tests {
             duration_ms: Some(1_800_000),
             transcript_segments: segments,
             summary: MeetingSummary::default(),
+            organized_draft: None,
+            organized_draft_state: None,
             audio: MeetingAudioMeta {
                 state: MeetingAudioState::Retained,
                 retained: true,
@@ -804,6 +821,47 @@ mod tests {
         assert!(prompt.system.contains("只输出 JSON"));
         assert!(prompt.user.contains("[seg-000001][未区分][00:00:12]"));
         assert!(prompt.user.contains("确认 V1-4 做总结生成。"));
+    }
+
+    #[test]
+    fn summary_persistence_preserves_concurrent_organized_draft_fields() {
+        let mut current = record_with_segments(vec![segment("seg-000001", "确认下一步")]);
+        current.organized_draft = Some(crate::types::MeetingOrganizedDraft {
+            source_transcript_revision: Some(1),
+            provider_id: "provider".to_string(),
+            model_id: Some("model".to_string()),
+            items: Vec::new(),
+            generated_at: "2026-08-25T09:00:00Z".to_string(),
+        });
+        current.organized_draft_state = Some(crate::types::MeetingOrganizedDraftState {
+            status: crate::types::MeetingOrganizedDraftStatus::Completed,
+            job_id: "job-1".to_string(),
+            processing_revision: 1,
+            source_transcript_revision: Some(1),
+            attempt: 1,
+            error_code: None,
+            error_message: None,
+            created_at: "2026-08-25T08:59:00Z".to_string(),
+            updated_at: "2026-08-25T09:00:00Z".to_string(),
+            started_at: Some("2026-08-25T08:59:00Z".to_string()),
+            completed_at: Some("2026-08-25T09:00:00Z".to_string()),
+        });
+        let mut summary_snapshot = record_with_segments(current.transcript_segments.clone());
+        summary_snapshot.title = "Updated summary title".to_string();
+        summary_snapshot.summary.overview = "Updated overview".to_string();
+
+        apply_summary_persistence(&mut current, &summary_snapshot);
+
+        assert_eq!(current.title, "Updated summary title");
+        assert_eq!(current.summary.overview, "Updated overview");
+        assert_eq!(
+            current.organized_draft.as_ref().unwrap().provider_id,
+            "provider"
+        );
+        assert_eq!(
+            current.organized_draft_state.as_ref().unwrap().job_id,
+            "job-1"
+        );
     }
 
     #[test]

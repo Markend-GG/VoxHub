@@ -75,6 +75,11 @@ impl OpenAICompatibleConfig {
         self
     }
 
+    pub fn with_request_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.request_timeout_secs = timeout_secs;
+        self
+    }
+
     pub fn with_extra_headers(mut self, extra_headers: HashMap<String, String>) -> Self {
         self.extra_headers = extra_headers;
         self
@@ -949,6 +954,11 @@ impl CodexOAuthConfig {
 
     pub fn with_thinking_enabled(mut self, enabled: bool) -> Self {
         self.reasoning_effort = Some(if enabled { "medium" } else { "low" }.to_string());
+        self
+    }
+
+    pub fn with_request_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.request_timeout_secs = timeout_secs;
         self
     }
 }
@@ -2121,6 +2131,22 @@ mod tests {
     use std::net::TcpListener;
 
     #[test]
+    fn long_form_requests_can_override_default_timeout() {
+        let openai = OpenAICompatibleConfig::new(
+            "custom",
+            "Custom",
+            "https://example.com/v1",
+            "key",
+            "model",
+        )
+        .with_request_timeout_secs(180);
+        let codex = CodexOAuthConfig::new("gpt-5.5").with_request_timeout_secs(180);
+
+        assert_eq!(openai.request_timeout_secs, 180);
+        assert_eq!(codex.request_timeout_secs, 180);
+    }
+
+    #[test]
     fn chat_completions_url_preserves_query_and_fragment() {
         assert_eq!(
             chat_completions_url(
@@ -2668,7 +2694,13 @@ mod tests {
 
     #[test]
     fn chat_body_omits_temperature_for_openai_gpt5_family() {
-        for model in ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5.5", "openai/gpt-5"] {
+        for model in [
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-5-nano",
+            "gpt-5.5",
+            "openai/gpt-5",
+        ] {
             let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
                 "openai",
                 "OpenAI",
@@ -3307,7 +3339,10 @@ mod tests {
             structured.contains("高置信度") && structured.contains("低置信度"),
             "Structured prompt 缺少置信度分级"
         );
-        assert!(structured.contains("根目录"), "Structured prompt 缺少根目录纠错示例");
+        assert!(
+            structured.contains("根目录"),
+            "Structured prompt 缺少根目录纠错示例"
+        );
     }
 
     #[test]

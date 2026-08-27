@@ -443,6 +443,37 @@ export const ja: typeof zhCN = {
     summaryLoading: '要約を生成中…',
     summaryFailed: '要約生成に失敗しました。原文は保持されています。',
     summaryEmpty: '要約はまだありません。会議停止後に自動生成され、失敗後は再試行できます。',
+    tabs: {
+      label: '会議コンテンツ',
+      summary: '会議要約',
+      organized: '整文版',
+      transcript: '会議原文',
+    },
+    transcript: {
+      empty: 'リアルタイム原文はまだありません。録音中のリアルタイム文字起こしがここに表示されます。',
+      importedEmpty: 'この会議は音声からインポートされたため、リアルタイム文字起こし版はありません。',
+      historical: '過去の文字起こし',
+    },
+    organized: {
+      title: '会議後の整文版',
+      generatedAt: '{{time}} に生成',
+      showingPrevious: '新しい処理が完了するまで、前回成功した結果を表示します。',
+      actions: {
+        generate: '整文版を生成',
+        retry: '再試行',
+        regenerate: '再生成',
+        processing: '処理中…',
+      },
+      state: {
+        waiting_transcript: '最終文字起こしの確定後に整文版を自動生成します。',
+        missing: '整文版はまだありません。現在有効な LLM で生成できます。',
+        pending: '整文ジョブは待機中です。',
+        running: '原意を保ちながら口語的なよどみを整理しています。',
+        failed: '整文版の生成に失敗しました。再試行でき、前回成功した結果は保持されます。',
+        stale: '最終文字起こしが更新されたため、現在の整文版は古くなっています。',
+        completed: '整文版の生成が完了しました。',
+      },
+    },
     startConfig: {
       title: 'この会議の設定',
       realtimeAsr: '会議リアルタイム ASR',
@@ -510,6 +541,7 @@ export const ja: typeof zhCN = {
       speakerCountMismatch: '想定は {{expected}} 人ですが、{{detected}} 人を検出しました。結果は確認用に保持されています。',
       needsReview: '要確認',
       overlappingSpeech: '発話の重なり',
+      noSpeech: '録音から有効な音声を検出できませんでした。マイクまたは仮想オーディオデバイスを確認してください。',
       status: {
         pending: '処理待ち',
         preparing_audio: '音声を準備中',
@@ -587,6 +619,7 @@ export const ja: typeof zhCN = {
       speed: '速度',
       volume: '音量',
       progress: '再生位置',
+      miniPlayer: '会議音声ミニプレーヤー',
       missing: '会議音声は削除済み、または存在しません。',
       loadFailed: '会議音声の読み込みに失敗：{{err}}',
     },
@@ -618,7 +651,8 @@ export const ja: typeof zhCN = {
     },
     exportSuccess: '{{path}} に書き出しました',
     exportFailed: '書き出しに失敗：{{err}}',
-    retranscribeSuccess: '原文を再文字起こししました。必要に応じて要約を書き直してください。',
+    retranscribeStarted: '会議後 ASR 経路で再文字起こしを開始しました。',
+    retranscribeSuccess: '再文字起こしが完了し、新しい文字起こしリビジョンが有効になりました。',
     retranscribeFailed: '再文字起こしに失敗：{{err}}',
     rewriteConfirm: '書き直すと、AI生成のタイトル、概要、重要な決定、TODO、リスク/未解決事項が上書きされます。続行するにはもう一度「書き直しを確定」をクリックしてください。',
     closeGuard: {

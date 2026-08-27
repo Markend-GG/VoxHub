@@ -544,13 +544,13 @@ fn load_android_credentials_from_source_with_crypto(
         ReadOutcome::Legacy(bytes) => (bytes, true),
         ReadOutcome::Plaintext(bytes) => (bytes, false),
     };
-    let root = serde_json::from_slice::<CredsRoot>(&bytes)
-        .context("parse Android credential payload")?;
+    let root =
+        serde_json::from_slice::<CredsRoot>(&bytes).context("parse Android credential payload")?;
     let cleaned = android_persistable_credentials(&root);
     let contained_marketplace_token = lookup_marketplace_github_token(&root).is_some();
     if needs_rewrite && contained_marketplace_token {
-        let sanitized = serde_json::to_vec(&cleaned)
-            .context("encode bearer-free Android legacy payload")?;
+        let sanitized =
+            serde_json::to_vec(&cleaned).context("encode bearer-free Android legacy payload")?;
         super::android_credentials::rewrite_legacy_without_bearer(source_path, &sanitized)
             .map_err(anyhow::Error::new)
             .context("scrub Marketplace bearer before Android Keystore migration")?;
@@ -1615,7 +1615,11 @@ impl CredentialsVault {
         let _guard = credentials_lock().lock();
         let temperature = parse_llm_temperature(value)?;
         let mut root = load_credentials_for_update()?;
-        let entry = root.providers.llm.entry(root.active.llm.clone()).or_default();
+        let entry = root
+            .providers
+            .llm
+            .entry(root.active.llm.clone())
+            .or_default();
         entry.temperature = temperature;
         save_credentials(&root)
     }
@@ -1664,18 +1668,18 @@ impl CredentialsVault {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
+    use super::load_android_credentials_from_source_with_crypto;
     use super::{
         android_persistable_credentials, chunk_json_payload, credentials_cache,
         get_android_marketplace_token_at, load_android_credentials_from_path,
         load_android_credentials_from_path_with_crypto, load_android_credentials_into_cache_with,
         lookup_account, lookup_asr_account_for_provider, lookup_marketplace_github_token,
-        parse_extra_headers_json,
-        parse_llm_temperature, reset_credentials_cache_for_tests, write_account,
-        write_marketplace_github_token, CredentialAccount, CredsActive, CredsAsrEntry,
-        CredsProviders, CredsRoot, MarketplaceGithubToken, KEYRING_CHUNK_MAX_UTF16_UNITS,
+        parse_extra_headers_json, parse_llm_temperature, reset_credentials_cache_for_tests,
+        write_account, write_marketplace_github_token, CredentialAccount, CredsActive,
+        CredsAsrEntry, CredsProviders, CredsRoot, MarketplaceGithubToken,
+        KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
-    #[cfg(not(windows))]
-    use super::load_android_credentials_from_source_with_crypto;
     use anyhow::anyhow;
     use parking_lot::Mutex;
     use std::collections::HashMap;
@@ -1843,8 +1847,13 @@ mod tests {
 
         // 清空即移除该字段，且只影响对应 provider 的 entry。
         write_account(&mut root, CredentialAccount::AsrAdvancedConfig, None);
-        assert_eq!(lookup_account(&root, CredentialAccount::AsrAdvancedConfig), None);
-        assert!(root.providers.asr["openai-compatible"].advancedConfig.is_none());
+        assert_eq!(
+            lookup_account(&root, CredentialAccount::AsrAdvancedConfig),
+            None
+        );
+        assert!(root.providers.asr["openai-compatible"]
+            .advancedConfig
+            .is_none());
 
         // 旧条目（无 advancedConfig 字段）反序列化为 None，不破坏既有数据。
         let legacy: CredsAsrEntry = serde_json::from_str(r#"{"apiKey":"k"}"#).unwrap();
@@ -1970,9 +1979,11 @@ mod tests {
         assert!(std::fs::read_to_string(&destination_path)
             .unwrap()
             .contains("openless-android-credentials"));
-        assert!(load_android_credentials_from_path_with_crypto(&destination_path, &mut crypto)
-            .unwrap()
-            .is_some());
+        assert!(
+            load_android_credentials_from_path_with_crypto(&destination_path, &mut crypto)
+                .unwrap()
+                .is_some()
+        );
         std::fs::remove_dir_all(root_dir).unwrap();
     }
 
@@ -2034,9 +2045,8 @@ mod tests {
         )
         .unwrap();
         let mut crypto = super::super::android_credentials::TestCrypto::default();
-        crypto.fail_next_seal = Some(
-            super::super::android_credentials::CryptoErrorKind::TemporarilyUnavailable,
-        );
+        crypto.fail_next_seal =
+            Some(super::super::android_credentials::CryptoErrorKind::TemporarilyUnavailable);
 
         assert!(load_android_credentials_from_path_with_crypto(&path, &mut crypto).is_err());
         let sanitized = std::fs::read(&path).unwrap();

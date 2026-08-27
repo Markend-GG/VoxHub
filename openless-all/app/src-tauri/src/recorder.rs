@@ -446,7 +446,8 @@ fn classify_default_config_err(msg: String) -> RecorderError {
     let lower = msg.to_lowercase();
     if is_no_device_error(&lower) {
         RecorderError::NoInputDevice
-    } else if lower.contains("permission") || lower.contains("denied") || lower.contains("authoriz") {
+    } else if lower.contains("permission") || lower.contains("denied") || lower.contains("authoriz")
+    {
         RecorderError::PermissionDenied
     } else {
         RecorderError::EngineFailed(format!("default_input_config: {msg}"))
@@ -459,7 +460,8 @@ fn classify_build_stream_err(err: cpal::BuildStreamError) -> RecorderError {
     let lower = msg.to_lowercase();
     if is_no_device_error(&lower) {
         RecorderError::NoInputDevice
-    } else if lower.contains("permission") || lower.contains("denied") || lower.contains("authoriz") {
+    } else if lower.contains("permission") || lower.contains("denied") || lower.contains("authoriz")
+    {
         RecorderError::PermissionDenied
     } else {
         RecorderError::EngineFailed(format!("build_input_stream: {msg}"))

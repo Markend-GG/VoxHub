@@ -439,6 +439,37 @@ export const zhCN = {
     summaryLoading: '总结生成中…',
     summaryFailed: '总结生成失败，原文已保留。',
     summaryEmpty: '暂无总结。停止会议后会自动生成；失败后可重试。',
+    tabs: {
+      label: '会议内容',
+      summary: '会议总结',
+      organized: '整理稿',
+      transcript: '会议原文',
+    },
+    transcript: {
+      empty: '暂无实时原文。录音过程中的实时转写会显示在这里。',
+      importedEmpty: '该会议由音频导入，没有实时转写版本。',
+      historical: '历史转写',
+    },
+    organized: {
+      title: '会后整理稿',
+      generatedAt: '生成于 {{time}}',
+      showingPrevious: '新任务完成前继续显示上一份成功结果。',
+      actions: {
+        generate: '生成整理稿',
+        retry: '重试',
+        regenerate: '重新生成',
+        processing: '处理中…',
+      },
+      state: {
+        waiting_transcript: '等待最终转写确定后自动生成整理稿。',
+        missing: '该会议还没有整理稿，可使用当前启用的 LLM 生成。',
+        pending: '整理任务已创建，正在等待处理。',
+        running: '正在去除口语化表达并保留原意。',
+        failed: '整理稿生成失败，可重试；已有的成功结果不会被删除。',
+        stale: '最终转写已更新，当前整理稿已过期。',
+        completed: '整理稿已生成。',
+      },
+    },
     startConfig: {
       title: '本场会议配置',
       realtimeAsr: '会议实时 ASR',
@@ -516,6 +547,7 @@ export const zhCN = {
       speakerCountMismatch: '预计 {{expected}} 位发言人，本次检测到 {{detected}} 位。结果已保留，请人工确认。',
       needsReview: '待确认',
       overlappingSpeech: '重叠说话',
+      noSpeech: '录音中未检测到有效语音，请检查麦克风或虚拟音频设备。',
       status: {
         pending: '等待处理',
         preparing_audio: '准备音频',
@@ -593,6 +625,7 @@ export const zhCN = {
       speed: '倍速',
       volume: '音量',
       progress: '播放进度',
+      miniPlayer: '会议音频迷你播放器',
       missing: '会议音频已清理或不存在。',
       loadFailed: '加载会议音频失败：{{err}}',
     },
@@ -624,7 +657,8 @@ export const zhCN = {
     },
     exportSuccess: '已导出到 {{path}}',
     exportFailed: '导出失败：{{err}}',
-    retranscribeSuccess: '已重新转写原文，可按需重写总结。',
+    retranscribeStarted: '已开始使用会后 ASR 重新转写。',
+    retranscribeSuccess: '重新转写已完成，新转写版本已生效。',
     retranscribeFailed: '重新转写失败：{{err}}',
     rewriteConfirm: '重写总结会覆盖 AI 生成的标题、概览、关键决定、待办和风险/开放问题。请再次点击“确认重写”。',
     closeGuard: {

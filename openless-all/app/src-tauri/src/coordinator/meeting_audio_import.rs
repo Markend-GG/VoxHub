@@ -237,6 +237,8 @@ where
         duration_ms: Some(probe.duration_ms),
         transcript_segments: Vec::new(),
         summary: MeetingSummary::default(),
+        organized_draft: None,
+        organized_draft_state: None,
         audio: MeetingAudioMeta {
             state: MeetingAudioState::Temporary,
             retained: false,
@@ -1789,6 +1791,8 @@ mod tests {
             duration_ms: Some(1_000),
             transcript_segments: Vec::new(),
             summary: MeetingSummary::default(),
+            organized_draft: None,
+            organized_draft_state: None,
             audio: MeetingAudioMeta {
                 state: MeetingAudioState::Temporary,
                 retained: false,

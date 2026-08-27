@@ -17,6 +17,13 @@ const SAMPLE_RATE: u32 = 16_000;
 const BITS_PER_SAMPLE: u16 = 16;
 const BLOCK_ALIGN: u16 = CHANNELS * (BITS_PER_SAMPLE / 8);
 const BYTE_RATE: u32 = SAMPLE_RATE * BLOCK_ALIGN as u32;
+const SPEECH_FRAME_SAMPLES: usize = 320;
+const ACTIVE_FRAME_RMS: f32 = 0.003;
+const ACTIVE_FRAME_PEAK: f32 = 0.01;
+const MIN_SPEECH_PEAK: f32 = 0.01;
+const MIN_ACTIVE_FRAMES: u64 = 10;
+const MIN_ACTIVE_FRAME_RATIO: f32 = 0.005;
+const MIN_CONSECUTIVE_ACTIVE_FRAMES: u64 = 10;
 
 pub type MeetingAudioByteStream = Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send + 'static>>;
 
@@ -33,6 +40,61 @@ pub struct MeetingAudioInfo {
     pub duration_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeetingSpeechEnergy {
+    pub peak: f32,
+    pub total_frames: u64,
+    pub active_frames: u64,
+    pub longest_active_frames: u64,
+}
+
+impl MeetingSpeechEnergy {
+    pub fn active_frame_ratio(self) -> f32 {
+        if self.total_frames == 0 {
+            return 0.0;
+        }
+        self.active_frames as f32 / self.total_frames as f32
+    }
+
+    pub fn has_speech(self) -> bool {
+        self.peak >= MIN_SPEECH_PEAK
+            && self.active_frames >= MIN_ACTIVE_FRAMES
+            && (self.active_frame_ratio() >= MIN_ACTIVE_FRAME_RATIO
+                || self.longest_active_frames >= MIN_CONSECUTIVE_ACTIVE_FRAMES)
+    }
+}
+
+#[derive(Debug)]
+pub enum MeetingAudioValidationError {
+    Read(anyhow::Error),
+    NoSpeech(MeetingSpeechEnergy),
+}
+
+impl std::fmt::Display for MeetingAudioValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(error) => write!(formatter, "{error:#}"),
+            Self::NoSpeech(energy) => write!(
+                formatter,
+                "no valid speech energy: peak={:.1} dB, activeFrames={}/{}, longestActiveFrames={}",
+                amplitude_db(energy.peak),
+                energy.active_frames,
+                energy.total_frames,
+                energy.longest_active_frames,
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MeetingAudioValidationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(error) => Some(error.as_ref()),
+            Self::NoSpeech(_) => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct StreamState {
     parts: Vec<WavPart>,
@@ -47,6 +109,63 @@ struct StreamState {
 struct WavPart {
     path: PathBuf,
     pcm_bytes: u64,
+}
+
+#[derive(Default)]
+struct SpeechEnergyAccumulator {
+    peak: f32,
+    total_frames: u64,
+    active_frames: u64,
+    longest_active_frames: u64,
+    current_active_frames: u64,
+    frame_sum_squares: f64,
+    frame_peak: f32,
+    frame_samples: usize,
+}
+
+impl SpeechEnergyAccumulator {
+    fn push(&mut self, sample: i16) {
+        let normalized = sample as f32 / 32_768.0;
+        let absolute = normalized.abs();
+        self.peak = self.peak.max(absolute);
+        self.frame_peak = self.frame_peak.max(absolute);
+        self.frame_sum_squares += f64::from(normalized) * f64::from(normalized);
+        self.frame_samples += 1;
+        if self.frame_samples == SPEECH_FRAME_SAMPLES {
+            self.finish_frame();
+        }
+    }
+
+    fn finish_frame(&mut self) {
+        if self.frame_samples == 0 {
+            return;
+        }
+        let rms = (self.frame_sum_squares / self.frame_samples as f64).sqrt() as f32;
+        let active = rms >= ACTIVE_FRAME_RMS && self.frame_peak >= ACTIVE_FRAME_PEAK;
+        self.total_frames += 1;
+        if active {
+            self.active_frames += 1;
+            self.current_active_frames += 1;
+            self.longest_active_frames = self
+                .longest_active_frames
+                .max(self.current_active_frames);
+        } else {
+            self.current_active_frames = 0;
+        }
+        self.frame_sum_squares = 0.0;
+        self.frame_peak = 0.0;
+        self.frame_samples = 0;
+    }
+
+    fn finish(mut self) -> MeetingSpeechEnergy {
+        self.finish_frame();
+        MeetingSpeechEnergy {
+            peak: self.peak,
+            total_frames: self.total_frames,
+            active_frames: self.active_frames,
+            longest_active_frames: self.longest_active_frames,
+        }
+    }
 }
 
 impl MeetingAudioSource {
@@ -238,6 +357,49 @@ impl MeetingAudioSource {
         Ok((info, samples))
     }
 
+    pub fn validate_speech_energy(
+        &self,
+        cancelled: &AtomicBool,
+    ) -> std::result::Result<MeetingSpeechEnergy, MeetingAudioValidationError> {
+        let energy = self
+            .analyze_speech_energy(cancelled)
+            .map_err(MeetingAudioValidationError::Read)?;
+        if energy.has_speech() {
+            Ok(energy)
+        } else {
+            Err(MeetingAudioValidationError::NoSpeech(energy))
+        }
+    }
+
+    fn analyze_speech_energy(&self, cancelled: &AtomicBool) -> Result<MeetingSpeechEnergy> {
+        let mut accumulator = SpeechEnergyAccumulator::default();
+        let mut buffer = vec![0u8; PCM_CHUNK_BYTES];
+        for path in self.paths() {
+            if cancelled.load(Ordering::Acquire) {
+                anyhow::bail!("meeting audio speech analysis cancelled");
+            }
+            let pcm_bytes = inspect_wav(path)?;
+            let mut file = std::fs::File::open(path)
+                .with_context(|| format!("read meeting WAV failed: {}", path.display()))?;
+            std::io::Seek::seek(&mut file, io::SeekFrom::Start(WAV_HEADER_BYTES))
+                .with_context(|| format!("seek meeting WAV failed: {}", path.display()))?;
+            let mut remaining = pcm_bytes;
+            while remaining > 0 {
+                if cancelled.load(Ordering::Acquire) {
+                    anyhow::bail!("meeting audio speech analysis cancelled");
+                }
+                let chunk_len = remaining.min(buffer.len() as u64) as usize;
+                std::io::Read::read_exact(&mut file, &mut buffer[..chunk_len])
+                    .with_context(|| format!("read meeting WAV PCM failed: {}", path.display()))?;
+                for bytes in buffer[..chunk_len].chunks_exact(2) {
+                    accumulator.push(i16::from_le_bytes([bytes[0], bytes[1]]));
+                }
+                remaining -= chunk_len as u64;
+            }
+        }
+        Ok(accumulator.finish())
+    }
+
     pub fn read_pcm_range(
         &self,
         start_ms: u64,
@@ -399,6 +561,10 @@ fn wav_header(pcm_bytes: u32) -> [u8; WAV_HEADER_BYTES as usize] {
     header
 }
 
+fn amplitude_db(value: f32) -> f32 {
+    20.0 * value.max(f32::MIN_POSITIVE).log10()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +687,69 @@ mod tests {
     }
 
     #[test]
+    fn speech_validation_rejects_silence() {
+        let dir = temp_dir();
+        let path = dir.join("audio.wav");
+        std::fs::write(&path, encode_wav_16k_mono(&vec![0; 16_000])).unwrap();
+        let error = MeetingAudioSource::from_path(&path)
+            .unwrap()
+            .validate_speech_energy(&AtomicBool::new(false))
+            .unwrap_err();
+        assert!(matches!(error, MeetingAudioValidationError::NoSpeech(_)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn speech_validation_rejects_very_low_noise() {
+        let dir = temp_dir();
+        let path = dir.join("audio.wav");
+        let samples = (0..16_000)
+            .map(|index| ((index * 37 % 101) as i16) - 50)
+            .collect::<Vec<_>>();
+        std::fs::write(&path, encode_wav_16k_mono(&samples)).unwrap();
+        let error = MeetingAudioSource::from_path(&path)
+            .unwrap()
+            .validate_speech_energy(&AtomicBool::new(false))
+            .unwrap_err();
+        let MeetingAudioValidationError::NoSpeech(energy) = error else {
+            panic!("expected no-speech validation error");
+        };
+        assert!(energy.peak < MIN_SPEECH_PEAK);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn speech_validation_accepts_short_speech_inside_long_silence() {
+        let dir = temp_dir();
+        let path = dir.join("audio.wav");
+        let mut samples = vec![0; 16_000 * 60];
+        samples.extend(tone_samples(4_800, 8_000));
+        samples.extend(vec![0; 16_000 * 60]);
+        std::fs::write(&path, encode_wav_16k_mono(&samples)).unwrap();
+        let energy = MeetingAudioSource::from_path(&path)
+            .unwrap()
+            .validate_speech_energy(&AtomicBool::new(false))
+            .unwrap();
+        assert!(energy.longest_active_frames >= MIN_CONSECUTIVE_ACTIVE_FRAMES);
+        assert!(energy.active_frame_ratio() < MIN_ACTIVE_FRAME_RATIO);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn speech_validation_accepts_normal_speech_energy() {
+        let dir = temp_dir();
+        let path = dir.join("audio.wav");
+        std::fs::write(&path, encode_wav_16k_mono(&tone_samples(16_000, 12_000))).unwrap();
+        let energy = MeetingAudioSource::from_path(&path)
+            .unwrap()
+            .validate_speech_energy(&AtomicBool::new(false))
+            .unwrap();
+        assert!(energy.peak > 0.3);
+        assert!(energy.has_speech());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn segmented_source_reads_bounded_pcm_range_across_parts() {
         let dir = temp_dir();
         let first = vec![1i16; 16_000];
@@ -541,5 +770,15 @@ mod tests {
             .chunks_exact(2)
             .all(|sample| { i16::from_le_bytes([sample[0], sample[1]]) == 2 }));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn tone_samples(sample_count: usize, amplitude: i16) -> Vec<i16> {
+        (0..sample_count)
+            .map(|index| {
+                let phase = 2.0 * std::f32::consts::PI * 440.0 * index as f32
+                    / SAMPLE_RATE as f32;
+                (phase.sin() * amplitude as f32) as i16
+            })
+            .collect()
     }
 }

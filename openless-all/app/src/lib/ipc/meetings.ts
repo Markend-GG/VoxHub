@@ -340,6 +340,18 @@ export function retryMeetingSummary(id: string): Promise<MeetingRecord> {
     }))
 }
 
+export function generateMeetingOrganizedDraft(id: string): Promise<MeetingRecord> {
+    return invokeOrMock("generate_meeting_organized_draft", { id }, () => mockOrganizedDraft(id))
+}
+
+export function retryMeetingOrganizedDraft(id: string): Promise<MeetingRecord> {
+    return invokeOrMock("retry_meeting_organized_draft", { id }, () => mockOrganizedDraft(id))
+}
+
+export function regenerateMeetingOrganizedDraft(id: string): Promise<MeetingRecord> {
+    return invokeOrMock("regenerate_meeting_organized_draft", { id }, () => mockOrganizedDraft(id))
+}
+
 export function exportMeetingMarkdown(id: string, targetPath: string): Promise<void> {
     return invokeOrMock("export_meeting_markdown", { id, targetPath }, () => undefined)
 }
@@ -365,6 +377,41 @@ export function hideMainWindowAfterMeetingGuard(): Promise<void> {
 
 export function exitAppAfterMeetingGuard(): Promise<void> {
     return invokeOrMock("exit_app_after_meeting_guard", undefined, () => undefined)
+}
+
+function mockOrganizedDraft(id: string): MeetingRecord {
+    const generatedAt = new Date().toISOString()
+    return {
+        ...mockMeetings[0],
+        id,
+        organizedDraft: {
+            sourceTranscriptRevision: mockMeetings[0].activeTranscriptRevision ?? null,
+            providerId: "mock-llm",
+            modelId: "mock-model",
+            generatedAt,
+            items: mockMeetings[0].transcriptSegments.map((segment) => ({
+                sourceSegmentIds: [segment.id],
+                speakerId: segment.speakerId,
+                speakerLabel: segment.speakerLabel,
+                startMs: segment.startMs,
+                endMs: segment.endMs,
+                text: segment.text,
+            })),
+        },
+        organizedDraftState: {
+            status: "completed",
+            jobId: "mock-organized-draft-job",
+            processingRevision: 1,
+            sourceTranscriptRevision: mockMeetings[0].activeTranscriptRevision ?? null,
+            attempt: 1,
+            errorCode: null,
+            errorMessage: null,
+            createdAt: generatedAt,
+            updatedAt: generatedAt,
+            startedAt: generatedAt,
+            completedAt: generatedAt,
+        },
+    }
 }
 
 function mockMeetingAudioWav(): Uint8Array {

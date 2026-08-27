@@ -1000,9 +1000,18 @@ mod tests {
 
     #[test]
     fn auth_mode_from_str_roundtrips() {
-        assert_eq!(VolcengineAuthMode::from_str("api_key"), VolcengineAuthMode::ApiKey);
-        assert_eq!(VolcengineAuthMode::from_str("app_id_token"), VolcengineAuthMode::AppIdToken);
-        assert_eq!(VolcengineAuthMode::from_str(""), VolcengineAuthMode::AppIdToken); // 默认回退
+        assert_eq!(
+            VolcengineAuthMode::from_str("api_key"),
+            VolcengineAuthMode::ApiKey
+        );
+        assert_eq!(
+            VolcengineAuthMode::from_str("app_id_token"),
+            VolcengineAuthMode::AppIdToken
+        );
+        assert_eq!(
+            VolcengineAuthMode::from_str(""),
+            VolcengineAuthMode::AppIdToken
+        ); // 默认回退
         assert_eq!(VolcengineAuthMode::ApiKey.as_str(), "api_key");
         assert_eq!(VolcengineAuthMode::AppIdToken.as_str(), "app_id_token");
     }

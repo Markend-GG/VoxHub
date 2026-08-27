@@ -702,6 +702,60 @@ pub struct MeetingSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct MeetingOrganizedDraftItem {
+    pub source_segment_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
+    pub speaker_label: String,
+    pub start_ms: u64,
+    pub end_ms: Option<u64>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingOrganizedDraft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_transcript_revision: Option<u32>,
+    pub provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub items: Vec<MeetingOrganizedDraftItem>,
+    pub generated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingOrganizedDraftStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingOrganizedDraftState {
+    pub status: MeetingOrganizedDraftStatus,
+    pub job_id: String,
+    pub processing_revision: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_transcript_revision: Option<u32>,
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct MeetingAudioMeta {
     pub state: MeetingAudioState,
     pub retained: bool,
@@ -1022,6 +1076,10 @@ pub struct MeetingRecord {
     pub duration_ms: Option<u64>,
     pub transcript_segments: Vec<TranscriptSegment>,
     pub summary: MeetingSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organized_draft: Option<MeetingOrganizedDraft>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organized_draft_state: Option<MeetingOrganizedDraftState>,
     pub audio: MeetingAudioMeta,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realtime_asr: Option<MeetingRealtimeAsrSnapshot>,
@@ -1170,6 +1228,14 @@ pub struct MeetingSummaryEvent {
     pub status: MeetingStatus,
     pub meeting: Option<MeetingRecord>,
     pub error: Option<MeetingErrorEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingOrganizedDraftEvent {
+    pub meeting_id: String,
+    pub state: MeetingOrganizedDraftState,
+    pub meeting: MeetingRecord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -5079,6 +5145,8 @@ mod tests {
             duration_ms: None,
             transcript_segments: vec![],
             summary: MeetingSummary::default(),
+            organized_draft: None,
+            organized_draft_state: None,
             audio: MeetingAudioMeta {
                 state: MeetingAudioState::Temporary,
                 retained: false,
@@ -5135,6 +5203,8 @@ mod tests {
         .unwrap();
 
         assert!(record.realtime_asr.is_none());
+        assert!(record.organized_draft.is_none());
+        assert!(record.organized_draft_state.is_none());
     }
 
     #[test]

@@ -275,9 +275,7 @@ impl XfyunStreamingASR {
             let len = buf.len() as u64;
             self.state.lock().bytes_sent += len;
             let Some(tx) = self.audio_tx.lock().as_ref().cloned() else {
-                return Err(XfyunASRError::ConnectionFailed(
-                    "websocket not open".into(),
-                ));
+                return Err(XfyunASRError::ConnectionFailed("websocket not open".into()));
             };
             self.pending_sends.fetch_add(1, Ordering::SeqCst);
             if tx.send(buf).is_err() {
@@ -442,14 +440,10 @@ impl XfyunStreamingASR {
         state.last_result_text = trimmed.to_string();
         if is_final {
             // 最终结果：以 seg_id 去重覆盖，收尾按 seg_id 顺序拼接。
-            state
-                .final_segments
-                .insert(seg_id, trimmed.to_string());
+            state.final_segments.insert(seg_id, trimmed.to_string());
             state.partial_segments.remove(&seg_id);
         } else {
-            state
-                .partial_segments
-                .insert(seg_id, trimmed.to_string());
+            state.partial_segments.insert(seg_id, trimmed.to_string());
         }
     }
 
@@ -560,10 +554,7 @@ impl AudioConsumer for XfyunStreamingASR {
             st.pending_audio.extend_from_slice(pcm);
             let mut out = Vec::new();
             while st.pending_audio.len() >= TARGET_AUDIO_CHUNK_BYTES {
-                let chunk: Vec<u8> = st
-                    .pending_audio
-                    .drain(..TARGET_AUDIO_CHUNK_BYTES)
-                    .collect();
+                let chunk: Vec<u8> = st.pending_audio.drain(..TARGET_AUDIO_CHUNK_BYTES).collect();
                 st.bytes_sent += chunk.len() as u64;
                 out.push(chunk);
             }
@@ -675,11 +666,7 @@ mod tests {
     fn signa_matches_official_documentation_example() {
         // 官方文档示例：appid=595f23df，ts=1512041814，apiKey=d9f4aa7ea6d94faca62cd88a28fd5234
         // → signa = IrrzsJeOFk1NGfJHW6SkHUoN9CU=
-        let signa = compute_signa(
-            "595f23df",
-            "d9f4aa7ea6d94faca62cd88a28fd5234",
-            "1512041814",
-        );
+        let signa = compute_signa("595f23df", "d9f4aa7ea6d94faca62cd88a28fd5234", "1512041814");
         assert_eq!(signa, "IrrzsJeOFk1NGfJHW6SkHUoN9CU=");
     }
 
@@ -752,7 +739,10 @@ mod tests {
         {
             let st = asr.state.lock();
             assert_eq!(st.final_segments.get(&1).unwrap(), "最终");
-            assert!(st.partial_segments.is_empty(), "final 应清除同 seg 的 partial");
+            assert!(
+                st.partial_segments.is_empty(),
+                "final 应清除同 seg 的 partial"
+            );
         }
     }
 
@@ -835,8 +825,16 @@ mod tests {
             api_key: "key".into(),
         };
         assert!(ok.auth_ok());
-        assert!(!XfyunCredentials { app_id: "".into(), api_key: "key".into() }.auth_ok());
-        assert!(!XfyunCredentials { app_id: "app".into(), api_key: "  ".into() }.auth_ok());
+        assert!(!XfyunCredentials {
+            app_id: "".into(),
+            api_key: "key".into()
+        }
+        .auth_ok());
+        assert!(!XfyunCredentials {
+            app_id: "app".into(),
+            api_key: "  ".into()
+        }
+        .auth_ok());
     }
 
     #[test]

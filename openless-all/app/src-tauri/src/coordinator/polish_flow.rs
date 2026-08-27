@@ -235,21 +235,46 @@ pub(super) async fn polish_text(
 pub(super) async fn complete_text_with_active_llm(
     system_prompt: &str,
     user_prompt: &str,
+    working_languages: &[String],
+    chinese_script_preference: ChineseScriptPreference,
+    output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
+) -> anyhow::Result<String> {
+    complete_text_with_active_llm_with_timeout(
+        system_prompt,
+        user_prompt,
+        working_languages,
+        chinese_script_preference,
+        output_language_preference,
+        llm_thinking_enabled,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn complete_text_with_active_llm_with_timeout(
+    system_prompt: &str,
+    user_prompt: &str,
     _working_languages: &[String],
     _chinese_script_preference: ChineseScriptPreference,
     _output_language_preference: OutputLanguagePreference,
     llm_thinking_enabled: bool,
+    request_timeout_secs: Option<u64>,
 ) -> anyhow::Result<String> {
     let active_llm = CredentialsVault::get_active_llm();
     if active_llm == "gemini" {
         let (api_key, model, base_url) = read_gemini_credentials()?;
-        let provider = GeminiProvider::new(
-            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled),
-        );
+        let mut config =
+            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled);
+        if let Some(timeout_secs) = request_timeout_secs {
+            config = config.with_request_timeout_secs(timeout_secs);
+        }
+        let provider = GeminiProvider::new(config);
         return Ok(provider.complete_text(system_prompt, user_prompt).await?);
     }
 
-    let provider = build_active_llm_provider(llm_thinking_enabled)?;
+    let provider =
+        build_active_llm_provider_with_timeout(llm_thinking_enabled, request_timeout_secs)?;
     Ok(provider.complete_text(system_prompt, user_prompt).await?)
 }
 

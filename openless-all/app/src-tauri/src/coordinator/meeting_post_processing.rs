@@ -15,7 +15,7 @@ use crate::asr::dashscope_multimodal::{
 use crate::asr::local::speaker_diarization_runtime::{
     run_local_diarization, LocalDiarizationOutput,
 };
-use crate::asr::MeetingAudioSource;
+use crate::asr::meeting_audio_source::{MeetingAudioSource, MeetingAudioValidationError};
 use crate::persistence::{
     meeting_recording_existing_path_for_id, CredentialAccount, CredentialsVault, MeetingStore,
 };
@@ -33,6 +33,7 @@ use crate::types::{
 use super::{
     derive_bailian_endpoint, prepare_and_spawn_auto_meeting_summary, BailianEndpointProtocol, Inner,
 };
+use super::meeting_organizer::prepare_and_spawn_auto_meeting_organized_draft;
 
 const POST_MEETING_PROVIDER_ID: &str = "bailian";
 const FUN_ASR_MODEL_ID: &str = "fun-asr";
@@ -478,20 +479,10 @@ async fn run_post_processing_job_with_context(
             "meetingAsrModelUnavailable: 当前平台暂不支持本地会议文件识别".to_string(),
         );
     }
-    let client = build_post_meeting_dashscope_client(&model_id)?;
     let request_options = cloud_diarization_options(&state)?;
-
-    let provider_task_id = if let Some(task_id) = resume_provider_task_id(&state)? {
-        update_post_processing_job_progress(
-            context,
-            meeting_id,
-            job_id,
-            MeetingPostProcessingStatus::Running,
-            Some(0.55),
-            None,
-        )?;
-        task_id
-    } else {
+    let resume_task_id = resume_provider_task_id(&state)?;
+    let mut prepared_source = None;
+    if resume_task_id.is_none() {
         update_post_processing_job_progress(
             context,
             meeting_id,
@@ -507,6 +498,27 @@ async fn run_post_processing_job_with_context(
         source
             .inspect()
             .map_err(|error| format!("meetingAudioInvalid: {error}"))?;
+        if !validate_meeting_audio_for_asr(context, meeting_id, job_id, &source, &cancelled)? {
+            return Ok(());
+        }
+        prepared_source = Some(source);
+    }
+
+    let client = build_post_meeting_dashscope_client(&model_id)?;
+    let provider_task_id = if let Some(task_id) = resume_task_id {
+        update_post_processing_job_progress(
+            context,
+            meeting_id,
+            job_id,
+            MeetingPostProcessingStatus::Running,
+            Some(0.55),
+            None,
+        )?;
+        task_id
+    } else {
+        let source = prepared_source
+            .take()
+            .ok_or_else(|| "meetingAudioInvalid: prepared audio is missing".to_string())?;
         ensure_job_not_cancelled(store, meeting_id, job_id, &cancelled)?;
         update_post_processing_job_progress(
             context,
@@ -730,6 +742,12 @@ async fn run_local_import_post_processing_job(
         .map_err(|error| format!("meetingAudioUnavailable: {error}"))?;
     let source = MeetingAudioSource::from_path(&path)
         .map_err(|error| format!("meetingAudioInvalid: {error}"))?;
+    source
+        .inspect()
+        .map_err(|error| format!("meetingAudioInvalid: {error}"))?;
+    if !validate_meeting_audio_for_asr(context, meeting_id, job_id, &source, &cancelled)? {
+        return Ok(());
+    }
     let (segments, profiles, turns) = super::meeting_audio_import::run_local_meeting_file_asr(
         local_asr.runtime,
         local_asr.language_hint,
@@ -806,7 +824,12 @@ fn finish_post_processing_success(
         .map(|config| config.generate_summary)
         .unwrap_or(true);
     if generate_summary {
-        prepare_and_spawn_auto_meeting_summary(inner, completed)?;
+        if let Err(error) = prepare_and_spawn_auto_meeting_summary(inner, completed) {
+            log::warn!("[meeting-post-processing] summary preparation failed: {error}");
+        }
+    }
+    if let Err(error) = prepare_and_spawn_auto_meeting_organized_draft(inner, completed) {
+        log::warn!("[meeting-post-processing] organized draft preparation failed: {error}");
     }
     if completed.import_state.is_some() {
         super::meeting_audio_import::emit_import_event(inner, completed);
@@ -861,6 +884,37 @@ fn post_processing_status_is_active(status: MeetingPostProcessingStatus) -> bool
             | MeetingPostProcessingStatus::LocalAnalyzing
             | MeetingPostProcessingStatus::Applying
     )
+}
+
+fn validate_meeting_audio_for_asr(
+    context: &PostProcessingJobContext<'_>,
+    meeting_id: &str,
+    job_id: &str,
+    source: &MeetingAudioSource,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<bool, String> {
+    match source.validate_speech_energy(cancelled.as_ref()) {
+        Ok(_) => Ok(true),
+        Err(MeetingAudioValidationError::NoSpeech(energy)) => {
+            fail_post_processing_job_with_details(
+                context,
+                meeting_id,
+                job_id,
+                "meetingAudioNoSpeech",
+                &format!(
+                    "peak={:.1} dB, activeFrames={}/{}, longestActiveFrames={}",
+                    20.0 * energy.peak.max(f32::MIN_POSITIVE).log10(),
+                    energy.active_frames,
+                    energy.total_frames,
+                    energy.longest_active_frames,
+                ),
+            )?;
+            Ok(false)
+        }
+        Err(MeetingAudioValidationError::Read(error)) => {
+            Err(format!("meetingAudioInvalid: {error:#}"))
+        }
+    }
 }
 
 fn build_post_meeting_dashscope_client(model_id: &str) -> Result<DashScopeMultimodalASR, String> {
@@ -1464,10 +1518,51 @@ fn fail_post_processing_job(
     Ok(())
 }
 
+fn fail_post_processing_job_with_details(
+    context: &PostProcessingJobContext<'_>,
+    meeting_id: &str,
+    job_id: &str,
+    error_code: &str,
+    error_message: &str,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    let updated = context
+        .store
+        .update_if(meeting_id, |record| {
+            fail_active_post_processing_job_with_details(
+                record,
+                job_id,
+                error_code,
+                error_message,
+                &now,
+            )
+        })
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "postMeetingAsrJobCancelled: 后处理任务已取消或被替换".to_string())?;
+    if let Some(inner) = context.inner {
+        emit_post_processing_event(inner, &updated);
+    }
+    Ok(())
+}
+
 fn fail_active_post_processing_job(
     record: &mut MeetingRecord,
     job_id: &str,
     error: &str,
+    now: &str,
+) -> bool {
+    let (code, message) = error
+        .split_once(':')
+        .map(|(code, message)| (code.trim(), message.trim()))
+        .unwrap_or(("postMeetingAsrFailed", error.trim()));
+    fail_active_post_processing_job_with_details(record, job_id, code, message, now)
+}
+
+fn fail_active_post_processing_job_with_details(
+    record: &mut MeetingRecord,
+    job_id: &str,
+    error_code: &str,
+    error_message: &str,
     now: &str,
 ) -> bool {
     let Some(state) = record.post_processing.as_mut() else {
@@ -1477,12 +1572,8 @@ fn fail_active_post_processing_job(
         return false;
     }
     state.status = MeetingPostProcessingStatus::Failed;
-    let (code, message) = error
-        .split_once(':')
-        .map(|(code, message)| (code.trim(), message.trim()))
-        .unwrap_or(("postMeetingAsrFailed", error.trim()));
-    state.error_code = Some(code.to_string());
-    state.error_message = Some(message.to_string());
+    state.error_code = Some(error_code.to_string());
+    state.error_message = Some(error_message.to_string());
     state.progress = None;
     state.started_at.get_or_insert_with(|| now.to_string());
     state.updated_at = now.to_string();
@@ -1529,6 +1620,196 @@ pub(crate) fn cancel_post_processing_for_deletion(
     record.processing_hold = None;
     record.updated_at = now.to_string();
     Some(request)
+}
+
+pub(super) fn retranscribe_meeting(
+    inner: &Arc<Inner>,
+    meeting_id: &str,
+) -> Result<MeetingRecord, String> {
+    let store = MeetingStore::new().map_err(|error| error.to_string())?;
+    let record = store
+        .get(meeting_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    if record.import_config.is_some() {
+        return Err("imported meeting must use the audio import retry flow".to_string());
+    }
+    if matches!(
+        record.status,
+        MeetingStatus::Recording | MeetingStatus::Paused | MeetingStatus::Summarizing
+    ) {
+        return Err("meeting is not available for retranscription".to_string());
+    }
+    if record.audio.state != crate::types::MeetingAudioState::Retained {
+        return Err("meeting audio is not available for retranscription".to_string());
+    }
+    if record
+        .post_processing
+        .as_ref()
+        .is_some_and(|state| post_processing_status_is_active(state.status))
+    {
+        return Err("post-processing job already active".to_string());
+    }
+
+    let expected_job = record
+        .post_processing
+        .as_ref()
+        .map(|state| (state.job_id.clone(), state.status));
+    let expected_active_revision = record.active_transcript_revision;
+    let old_attempt = record
+        .post_processing
+        .as_ref()
+        .map(|state| state.attempt)
+        .unwrap_or_default();
+    let next_revision = next_post_processing_revision(&record);
+    let mut next_config = retranscription_config(inner, &record)?;
+    next_config.processing_revision = next_revision;
+
+    let now = Utc::now().to_rfc3339();
+    let job_id = Uuid::new_v4().to_string();
+    let next_state = MeetingPostProcessingState {
+        status: MeetingPostProcessingStatus::Pending,
+        job_id: job_id.clone(),
+        model_ref: next_config.post_meeting_asr_model_ref.clone(),
+        resolved_runtime_kind: next_config.resolved_asr_runtime_kind,
+        diarization_mode: next_config.diarization_mode,
+        expected_speaker_count: next_config.expected_speaker_count,
+        processing_revision: next_revision,
+        provider_task_id: None,
+        progress: Some(0.0),
+        attempt: old_attempt.saturating_add(1),
+        error_code: None,
+        error_message: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        started_at: None,
+        completed_at: None,
+    };
+    let updated = store
+        .update_if(meeting_id, |record| {
+            apply_retranscription_transition(
+                record,
+                expected_job.as_ref(),
+                expected_active_revision,
+                next_config,
+                next_state,
+                &now,
+            )
+        })
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "meeting changed; refresh and retry retranscription".to_string())?;
+    emit_post_processing_event(inner, &updated);
+    spawn_post_processing_job(inner, meeting_id.to_string(), job_id);
+    Ok(updated)
+}
+
+fn retranscription_config(
+    inner: &Arc<Inner>,
+    record: &MeetingRecord,
+) -> Result<MeetingPostProcessingConfig, String> {
+    let mut config = if let Some(config) = record.post_processing_config.clone() {
+        config
+    } else {
+        let prefs = inner.prefs.get();
+        let realtime_provider_id = record
+            .realtime_asr
+            .as_ref()
+            .map(|snapshot| snapshot.resolved_provider_id.as_str())
+            .unwrap_or(prefs.active_asr_provider.as_str());
+        let realtime_model_id = record
+            .realtime_asr
+            .as_ref()
+            .and_then(|snapshot| snapshot.model_id.clone());
+        resolve_initial_post_processing_config(
+            &prefs,
+            None,
+            realtime_provider_id,
+            realtime_model_id,
+        )?
+    };
+    let descriptor = resolve_post_meeting_asr_model(&config.post_meeting_asr_model_ref)?;
+    config.post_meeting_asr_model_ref = MeetingAsrModelRef {
+        provider_id: descriptor.provider_id,
+        model_id: descriptor.model_id,
+    };
+    config.resolved_asr_runtime_kind = descriptor.runtime_kind;
+    if config.diarization_mode == MeetingDiarizationMode::Local {
+        let model_id = config
+            .local_diarization_model_id
+            .as_deref()
+            .ok_or_else(|| "local diarization model is required".to_string())?;
+        crate::asr::local::speaker_diarization::ensure_package_ready(model_id)
+            .map_err(|error| format!("localDiarizationModelNotReady: {error:#}"))?;
+    }
+    Ok(config)
+}
+
+fn next_post_processing_revision(record: &MeetingRecord) -> u32 {
+    record
+        .transcript_revisions
+        .iter()
+        .map(|revision| revision.revision)
+        .chain(record.active_transcript_revision)
+        .chain(
+            record
+                .post_processing_config
+                .as_ref()
+                .map(|config| config.processing_revision),
+        )
+        .chain(
+            record
+                .post_processing
+                .as_ref()
+                .map(|state| state.processing_revision),
+        )
+        .max()
+        .unwrap_or_default()
+        .saturating_add(1)
+}
+
+fn apply_retranscription_transition(
+    record: &mut MeetingRecord,
+    expected_job: Option<&(String, MeetingPostProcessingStatus)>,
+    expected_active_revision: Option<u32>,
+    next_config: MeetingPostProcessingConfig,
+    next_state: MeetingPostProcessingState,
+    now: &str,
+) -> bool {
+    let current_job_matches = match (record.post_processing.as_ref(), expected_job) {
+        (None, None) => true,
+        (Some(current), Some((expected_job_id, expected_status))) => {
+            current.job_id == *expected_job_id && current.status == *expected_status
+        }
+        _ => false,
+    };
+    if !current_job_matches
+        || record.active_transcript_revision != expected_active_revision
+        || record.import_config.is_some()
+        || record.audio.state != crate::types::MeetingAudioState::Retained
+        || matches!(
+            record.status,
+            MeetingStatus::Recording | MeetingStatus::Paused | MeetingStatus::Summarizing
+        )
+        || record
+            .post_processing
+            .as_ref()
+            .is_some_and(|state| post_processing_status_is_active(state.status))
+    {
+        return false;
+    }
+    for revision in &mut record.transcript_revisions {
+        if revision.status == TranscriptRevisionStatus::Staging {
+            revision.status = TranscriptRevisionStatus::Rejected;
+        }
+    }
+    record.post_processing_config = Some(next_config);
+    record.processing_hold = Some(ProcessingHold {
+        job_id: next_state.job_id.clone(),
+        acquired_at: now.to_string(),
+    });
+    record.post_processing = Some(next_state);
+    record.updated_at = now.to_string();
+    true
 }
 
 pub(super) fn retry_meeting_post_processing(
@@ -1786,7 +2067,12 @@ pub(super) fn use_realtime_transcript_and_summarize(
         provider_task_id,
     });
     emit_post_processing_event(inner, &updated);
-    prepare_and_spawn_auto_meeting_summary(inner, &mut updated)?;
+    if let Err(error) = prepare_and_spawn_auto_meeting_summary(inner, &mut updated) {
+        log::warn!("[meeting-post-processing] realtime summary preparation failed: {error}");
+    }
+    if let Err(error) = prepare_and_spawn_auto_meeting_organized_draft(inner, &mut updated) {
+        log::warn!("[meeting-post-processing] realtime organized draft preparation failed: {error}");
+    }
     let retention_count = inner.prefs.get().meeting_audio_retention_count;
     store
         .prune_audio_retention(retention_count)
@@ -1923,6 +2209,7 @@ fn emit_post_processing_event(inner: &Arc<Inner>, record: &MeetingRecord) {
 mod tests {
     use super::*;
     use crate::asr::dashscope_multimodal::DashScopeAsyncSentence;
+    use crate::asr::wav::encode_wav_16k_mono;
     use crate::types::{
         MeetingAudioMeta, MeetingAudioState, MeetingStatus, MeetingSummary, SpeakerProfile,
         TranscriptSegmentSource,
@@ -2530,6 +2817,8 @@ mod tests {
                 metadata: None,
             }],
             summary: MeetingSummary::default(),
+            organized_draft: None,
+            organized_draft_state: None,
             audio: MeetingAudioMeta {
                 state: MeetingAudioState::Retained,
                 retained: true,
@@ -2727,6 +3016,105 @@ mod tests {
             record.processing_hold.as_ref().unwrap().job_id,
             state.job_id
         );
+    }
+
+    #[test]
+    fn retranscription_transition_preserves_active_content_until_new_revision_succeeds() {
+        let mut candidate = record();
+        prepare_post_processing_after_stop(&mut candidate, "2026-08-12T10:00:01Z").unwrap();
+        let old_segments = candidate.transcript_segments.clone();
+        let old_job_id = candidate.post_processing.as_ref().unwrap().job_id.clone();
+        candidate.post_processing.as_mut().unwrap().status = MeetingPostProcessingStatus::Completed;
+        candidate.processing_hold = None;
+        let expected_job = Some((old_job_id, MeetingPostProcessingStatus::Completed));
+        let mut next_config = candidate.post_processing_config.clone().unwrap();
+        next_config.processing_revision = 2;
+        let mut next_state = candidate.post_processing.clone().unwrap();
+        next_state.status = MeetingPostProcessingStatus::Pending;
+        next_state.job_id = "job-retranscribe".to_string();
+        next_state.processing_revision = 2;
+        next_state.provider_task_id = None;
+        next_state.progress = Some(0.0);
+        next_state.attempt = 2;
+        next_state.error_code = None;
+        next_state.error_message = None;
+
+        assert!(apply_retranscription_transition(
+            &mut candidate,
+            expected_job.as_ref(),
+            Some(0),
+            next_config,
+            next_state,
+            "2026-08-12T10:05:00Z",
+        ));
+        assert_eq!(candidate.active_transcript_revision, Some(0));
+        assert_eq!(candidate.transcript_segments, old_segments);
+        assert_eq!(
+            candidate.post_processing.as_ref().unwrap().job_id,
+            "job-retranscribe"
+        );
+        assert_eq!(
+            candidate
+                .post_processing_config
+                .as_ref()
+                .unwrap()
+                .processing_revision,
+            2
+        );
+        assert_eq!(
+            candidate.processing_hold.as_ref().unwrap().job_id,
+            "job-retranscribe"
+        );
+    }
+
+    #[test]
+    fn legacy_meeting_without_revision_starts_at_revision_one() {
+        let mut candidate = record();
+        candidate.post_processing_config = None;
+        candidate.post_processing = None;
+        candidate.transcript_revisions.clear();
+        candidate.active_transcript_revision = None;
+
+        assert_eq!(next_post_processing_revision(&candidate), 1);
+    }
+
+    #[tokio::test]
+    async fn silent_audio_fails_before_remote_asr_submission() {
+        let dir = std::env::temp_dir().join(format!(
+            "meeting-post-processing-silent-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio_path = dir.join("audio.wav");
+        let store_path = dir.join("meetings.json");
+        std::fs::write(&audio_path, encode_wav_16k_mono(&vec![0; 32_000])).unwrap();
+
+        let mut candidate = record();
+        candidate.id = "meeting-silent".to_string();
+        candidate.duration_ms = Some(2_000);
+        prepare_post_processing_after_stop(&mut candidate, "2026-08-12T10:00:01Z").unwrap();
+        let old_segments = candidate.transcript_segments.clone();
+        let job_id = candidate.post_processing.as_ref().unwrap().job_id.clone();
+        let store = MeetingStore::new_for_path(store_path);
+        store.create(candidate).unwrap();
+
+        run_post_processing_job_for_test(
+            &store,
+            "meeting-silent",
+            &job_id,
+            audio_path,
+        )
+        .await
+        .unwrap();
+
+        let persisted = store.get("meeting-silent").unwrap().unwrap();
+        let state = persisted.post_processing.as_ref().unwrap();
+        assert_eq!(state.status, MeetingPostProcessingStatus::Failed);
+        assert_eq!(state.error_code.as_deref(), Some("meetingAudioNoSpeech"));
+        assert!(state.provider_task_id.is_none());
+        assert_eq!(persisted.active_transcript_revision, Some(0));
+        assert_eq!(persisted.transcript_segments, old_segments);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

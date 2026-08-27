@@ -16,8 +16,7 @@ use super::download::{
 pub const DEFAULT_PACKAGE_ID: &str = "sherpa-pyannote-3dspeaker-zh-v1";
 pub const DOWNLOAD_EVENT: &str = "speaker-diarization-model-download-progress";
 
-pub const SEGMENTATION_ARCHIVE_NAME: &str =
-    "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2";
+pub const SEGMENTATION_ARCHIVE_NAME: &str = "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2";
 pub const SEGMENTATION_ARCHIVE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2";
 pub const SEGMENTATION_ARCHIVE_SIZE: u64 = 6_958_444;
 pub const SEGMENTATION_ARCHIVE_SHA256: &str =
@@ -41,9 +40,9 @@ pub const MANIFEST_NAME: &str = "model-manifest.json";
 pub const TOTAL_DOWNLOAD_BYTES: u64 = SEGMENTATION_ARCHIVE_SIZE + EMBEDDING_SOURCE_SIZE;
 pub const SAMPLE_RATE: u32 = 16_000;
 pub const CLUSTERING_THRESHOLD: f32 = 0.90;
+pub const SUPPORTED_PLATFORMS: &[&str] = &["windows-x86_64"];
 pub const MAX_RECOMMENDED_DURATION_MS: u64 = 120 * 60 * 1_000;
 pub const MEMORY_TIER: &str = "~1.5 GiB / >= 4 GiB";
-pub const SUPPORTED_PLATFORMS: &[&str] = &["windows-x86_64"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -121,8 +120,9 @@ pub fn models_root() -> Result<PathBuf> {
     #[cfg(not(target_os = "windows"))]
     {
         let root = std::env::temp_dir().join("openless-speaker-diarization");
-        std::fs::create_dir_all(&root)
-            .with_context(|| format!("create speaker diarization root failed: {}", root.display()))?;
+        std::fs::create_dir_all(&root).with_context(|| {
+            format!("create speaker diarization root failed: {}", root.display())
+        })?;
         Ok(root)
     }
 }
@@ -145,7 +145,10 @@ pub fn embedding_model_path(id: &str) -> Result<PathBuf> {
     Ok(package_dir(id)?.join(EMBEDDING_MODEL_NAME))
 }
 
-pub fn package_descriptor(id: &str, downloading: bool) -> Result<SpeakerDiarizationModelDescriptor> {
+pub fn package_descriptor(
+    id: &str,
+    downloading: bool,
+) -> Result<SpeakerDiarizationModelDescriptor> {
     validate_package_id(id)?;
     let dir = package_dir(id)?;
     let partial_dir = partial_package_dir(id)?;
@@ -196,7 +199,10 @@ pub fn ensure_package_ready(id: &str) -> Result<()> {
 
 pub fn validate_package_dir(dir: &Path) -> Result<()> {
     if !dir.is_dir() {
-        anyhow::bail!("speaker diarization model package is missing: {}", dir.display());
+        anyhow::bail!(
+            "speaker diarization model package is missing: {}",
+            dir.display()
+        );
     }
     verify_file(
         &dir.join(SEGMENTATION_MODEL_NAME),
@@ -234,7 +240,16 @@ pub(crate) async fn run_package_download(
 ) -> Result<()> {
     validate_package_id(id)?;
     if ensure_package_ready(id).is_ok() {
-        emit_progress(app, id, "", 2, 2, TOTAL_DOWNLOAD_BYTES, DownloadPhase::Finished, None);
+        emit_progress(
+            app,
+            id,
+            "",
+            2,
+            2,
+            TOTAL_DOWNLOAD_BYTES,
+            DownloadPhase::Finished,
+            None,
+        );
         return Ok(());
     }
 
@@ -342,7 +357,10 @@ async fn download_package_file(
         emit_progress(
             app,
             id,
-            destination.file_name().and_then(|name| name.to_str()).unwrap_or(""),
+            destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(""),
             file_index,
             2,
             completed_before + expected_size,
@@ -353,7 +371,10 @@ async fn download_package_file(
     }
     if destination.exists() {
         std::fs::remove_file(destination).with_context(|| {
-            format!("remove invalid model asset failed: {}", destination.display())
+            format!(
+                "remove invalid model asset failed: {}",
+                destination.display()
+            )
         })?;
     }
     let app_for_progress = app.clone();
@@ -392,34 +413,49 @@ async fn download_package_file(
 }
 
 fn extract_segmentation_model(archive_path: &Path, destination: &Path) -> Result<()> {
-    let file = File::open(archive_path)
-        .with_context(|| format!("open segmentation archive failed: {}", archive_path.display()))?;
+    let file = File::open(archive_path).with_context(|| {
+        format!(
+            "open segmentation archive failed: {}",
+            archive_path.display()
+        )
+    })?;
     let decoder = bzip2::read::BzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
     let expected = Path::new(SEGMENTATION_ARCHIVE_ROOT).join(SEGMENTATION_ARCHIVE_MODEL_PATH);
-    for entry in archive.entries().context("read segmentation archive entries failed")? {
+    for entry in archive
+        .entries()
+        .context("read segmentation archive entries failed")?
+    {
         let mut entry = entry.context("read segmentation archive entry failed")?;
-        let path = entry.path().context("read segmentation archive path failed")?;
+        let path = entry
+            .path()
+            .context("read segmentation archive path failed")?;
         if path.as_ref() != expected {
             continue;
         }
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
-                format!("create segmentation destination failed: {}", parent.display())
+                format!(
+                    "create segmentation destination failed: {}",
+                    parent.display()
+                )
             })?;
         }
         let mut output = File::create(destination).with_context(|| {
-            format!("create segmentation model failed: {}", destination.display())
+            format!(
+                "create segmentation model failed: {}",
+                destination.display()
+            )
         })?;
         std::io::copy(&mut entry, &mut output).with_context(|| {
-            format!("extract segmentation model failed: {}", destination.display())
+            format!(
+                "extract segmentation model failed: {}",
+                destination.display()
+            )
         })?;
         return Ok(());
     }
-    anyhow::bail!(
-        "segmentation archive is missing {}",
-        expected.display()
-    )
+    anyhow::bail!("segmentation archive is missing {}", expected.display())
 }
 
 fn activate_staged_package(id: &str, staging: &Path) -> Result<()> {
@@ -427,7 +463,10 @@ fn activate_staged_package(id: &str, staging: &Path) -> Result<()> {
     let destination = package_dir(id)?;
     if destination.exists() {
         std::fs::remove_dir_all(&destination).with_context(|| {
-            format!("remove invalid speaker package failed: {}", destination.display())
+            format!(
+                "remove invalid speaker package failed: {}",
+                destination.display()
+            )
         })?;
     }
     std::fs::rename(staging, &destination).with_context(|| {
@@ -444,8 +483,9 @@ pub fn delete_package(id: &str) -> Result<()> {
     validate_package_id(id)?;
     for path in [package_dir(id)?, partial_package_dir(id)?] {
         if path.exists() {
-            std::fs::remove_dir_all(&path)
-                .with_context(|| format!("remove speaker model package failed: {}", path.display()))?;
+            std::fs::remove_dir_all(&path).with_context(|| {
+                format!("remove speaker model package failed: {}", path.display())
+            })?;
         }
     }
     Ok(())
@@ -453,14 +493,19 @@ pub fn delete_package(id: &str) -> Result<()> {
 
 fn staging_downloaded_bytes(staging: &Path) -> u64 {
     [
-        (staging.join(SEGMENTATION_ARCHIVE_NAME), SEGMENTATION_ARCHIVE_SIZE),
+        (
+            staging.join(SEGMENTATION_ARCHIVE_NAME),
+            SEGMENTATION_ARCHIVE_SIZE,
+        ),
         (staging.join(EMBEDDING_MODEL_NAME), EMBEDDING_SOURCE_SIZE),
     ]
     .iter()
     .map(|(destination, size)| {
         std::fs::metadata(destination)
             .map(|metadata| metadata.len().min(*size))
-            .unwrap_or_else(|_| partial_actual_size(&destination.with_extension("partial")).min(*size))
+            .unwrap_or_else(|_| {
+                partial_actual_size(&destination.with_extension("partial")).min(*size)
+            })
     })
     .sum()
 }

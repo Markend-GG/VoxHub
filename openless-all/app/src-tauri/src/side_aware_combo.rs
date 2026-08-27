@@ -583,7 +583,10 @@ mod tests {
         state.set_side(SideModifier::ShiftLeft, false);
         state.set_side(SideModifier::ShiftRight, true);
         assert!(state.modifiers_match());
-        assert!(matches!(state.on_primary("D", true), Some(ComboHotkeyEvent::Pressed { .. })));
+        assert!(matches!(
+            state.on_primary("D", true),
+            Some(ComboHotkeyEvent::Pressed { .. })
+        ));
     }
 
     #[test]
@@ -619,7 +622,10 @@ mod tests {
         });
         state.set_side(SideModifier::CmdLeft, true);
         assert!(state.modifiers_match());
-        assert!(matches!(state.on_primary("D", true), Some(ComboHotkeyEvent::Pressed { .. })));
+        assert!(matches!(
+            state.on_primary("D", true),
+            Some(ComboHotkeyEvent::Pressed { .. })
+        ));
     }
 
     #[test]
@@ -657,9 +663,15 @@ mod tests {
     fn normal_press_then_release_is_paired() {
         let mut state = cmd_left_d_state();
         state.set_side(SideModifier::CmdLeft, true);
-        assert!(matches!(state.on_primary("D", true), Some(ComboHotkeyEvent::Pressed { .. })));
+        assert!(matches!(
+            state.on_primary("D", true),
+            Some(ComboHotkeyEvent::Pressed { .. })
+        ));
         // Primary key up terminates the combo with exactly one Released.
-        assert!(matches!(state.on_primary("D", false), Some(ComboHotkeyEvent::Released { .. })));
+        assert!(matches!(
+            state.on_primary("D", false),
+            Some(ComboHotkeyEvent::Released { .. })
+        ));
         // No trailing events; a second key-up must not emit anything.
         assert_eq!(state.on_primary("D", false), None);
         assert!(!state.combo_active);
@@ -669,9 +681,15 @@ mod tests {
     fn modifier_release_after_press_emits_paired_released() {
         let mut state = cmd_left_d_state();
         state.set_side(SideModifier::CmdLeft, true);
-        assert!(matches!(state.on_primary("D", true), Some(ComboHotkeyEvent::Pressed { .. })));
+        assert!(matches!(
+            state.on_primary("D", true),
+            Some(ComboHotkeyEvent::Pressed { .. })
+        ));
         // Modifier lifts while primary is still down -> combo terminates once.
-        assert!(matches!(state.on_modifier_release(SideModifier::CmdLeft), Some(ComboHotkeyEvent::Released { .. })));
+        assert!(matches!(
+            state.on_modifier_release(SideModifier::CmdLeft),
+            Some(ComboHotkeyEvent::Released { .. })
+        ));
         assert!(!state.combo_active);
         // A now-orphaned primary key-up must NOT emit a second Released.
         assert_eq!(state.on_primary("D", false), None);
@@ -684,10 +702,16 @@ mod tests {
         // key-up (absolute termination) must still emit the paired Released.
         let mut state = cmd_left_d_state();
         state.set_side(SideModifier::CmdLeft, true);
-        assert!(matches!(state.on_primary("D", true), Some(ComboHotkeyEvent::Pressed { .. })));
+        assert!(matches!(
+            state.on_primary("D", true),
+            Some(ComboHotkeyEvent::Pressed { .. })
+        ));
         // Modifier physically released but the release event never arrived, so the
         // side flag is still set here. Primary up is the fallback terminator.
-        assert!(matches!(state.on_primary("D", false), Some(ComboHotkeyEvent::Released { .. })));
+        assert!(matches!(
+            state.on_primary("D", false),
+            Some(ComboHotkeyEvent::Released { .. })
+        ));
         assert!(!state.combo_active);
     }
 
@@ -716,13 +740,22 @@ mod tests {
         // Releasing the required side-modifier breaks the match, so the stale latch
         // self-heals by emitting the terminal Released here (pairing the Pressed whose
         // Released was dropped). Either way combo_active must end up cleared.
-        assert!(matches!(state.on_modifier_release(SideModifier::CmdLeft), Some(ComboHotkeyEvent::Released { .. })));
+        assert!(matches!(
+            state.on_modifier_release(SideModifier::CmdLeft),
+            Some(ComboHotkeyEvent::Released { .. })
+        ));
         assert!(!state.combo_active);
 
         // Fresh, clean press cycle now behaves normally.
         state.set_side(SideModifier::CmdLeft, true);
-        assert!(matches!(state.on_primary("D", true), Some(ComboHotkeyEvent::Pressed { .. })));
-        assert!(matches!(state.on_primary("D", false), Some(ComboHotkeyEvent::Released { .. })));
+        assert!(matches!(
+            state.on_primary("D", true),
+            Some(ComboHotkeyEvent::Pressed { .. })
+        ));
+        assert!(matches!(
+            state.on_primary("D", false),
+            Some(ComboHotkeyEvent::Released { .. })
+        ));
     }
 
     #[test]
@@ -736,7 +769,10 @@ mod tests {
         assert!(state.modifiers_match());
         assert_eq!(state.on_primary("D", true), None);
         // The real terminator (primary up) still yields exactly one Released.
-        assert!(matches!(state.on_primary("D", false), Some(ComboHotkeyEvent::Released { .. })));
+        assert!(matches!(
+            state.on_primary("D", false),
+            Some(ComboHotkeyEvent::Released { .. })
+        ));
     }
 
     // ---- Fix 2: macOS race-free FLAGS_CHANGED side classification ----

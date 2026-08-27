@@ -309,9 +309,7 @@ pub(crate) fn persist_settings_with_keyboard_apply<T: SettingsWriter>(
         reject_hotkey_collisions(&prefs).map_err(|leftover| {
             format!("{collision_error}; 自动化解 {adjusted} 项后仍无法通过校验: {leftover}")
         })?;
-        log::warn!(
-            "[settings] 热键冲突已自动化解（调整 {adjusted} 项）后保存: {collision_error}"
-        );
+        log::warn!("[settings] 热键冲突已自动化解（调整 {adjusted} 项）后保存: {collision_error}");
     }
     let dictation_shortcut_changed = previous.dictation_hotkey != prefs.dictation_hotkey;
     let dictation_mode_changed = previous.hotkey.mode != prefs.hotkey.mode;

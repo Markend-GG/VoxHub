@@ -377,6 +377,39 @@ export interface MeetingSummary {
   risksAndOpenQuestions: string[];
 }
 
+export interface MeetingOrganizedDraftItem {
+  sourceSegmentIds: string[];
+  speakerId?: string | null;
+  speakerLabel: string;
+  startMs: number;
+  endMs: number | null;
+  text: string;
+}
+
+export interface MeetingOrganizedDraft {
+  sourceTranscriptRevision?: number | null;
+  providerId: string;
+  modelId?: string | null;
+  items: MeetingOrganizedDraftItem[];
+  generatedAt: string;
+}
+
+export type MeetingOrganizedDraftStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+export interface MeetingOrganizedDraftState {
+  status: MeetingOrganizedDraftStatus;
+  jobId: string;
+  processingRevision: number;
+  sourceTranscriptRevision?: number | null;
+  attempt: number;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+}
+
 export interface MeetingAudioMeta {
   state: MeetingAudioState;
   retained: boolean;
@@ -615,6 +648,8 @@ export interface MeetingRecord {
   durationMs: number | null;
   transcriptSegments: TranscriptSegment[];
   summary: MeetingSummary;
+  organizedDraft?: MeetingOrganizedDraft | null;
+  organizedDraftState?: MeetingOrganizedDraftState | null;
   audio: MeetingAudioMeta;
   realtimeAsr?: MeetingRealtimeAsrSnapshot | null;
   postProcessingConfig?: MeetingPostProcessingConfig | null;
@@ -703,6 +738,12 @@ export interface MeetingSummaryEvent {
   status: MeetingStatus;
   meeting: MeetingRecord | null;
   error: MeetingErrorEvent | null;
+}
+
+export interface MeetingOrganizedDraftEvent {
+  meetingId: string;
+  state: MeetingOrganizedDraftState;
+  meeting: MeetingRecord;
 }
 
 export type MeetingCloseRequestIntent = 'hide' | 'exit';

@@ -209,8 +209,7 @@ pub fn download_speaker_diarization_model(
     manager: State<'_, Arc<SherpaDownloadManager>>,
     model_id: String,
 ) -> Result<(), String> {
-    speaker_diarization::validate_package_id(&model_id)
-        .map_err(|error| format!("{error:#}"))?;
+    speaker_diarization::validate_package_id(&model_id).map_err(|error| format!("{error:#}"))?;
     manager.start_speaker_diarization(app, model_id);
     Ok(())
 }
@@ -220,8 +219,7 @@ pub fn cancel_speaker_diarization_model_download(
     manager: State<'_, Arc<SherpaDownloadManager>>,
     model_id: String,
 ) -> Result<(), String> {
-    speaker_diarization::validate_package_id(&model_id)
-        .map_err(|error| format!("{error:#}"))?;
+    speaker_diarization::validate_package_id(&model_id).map_err(|error| format!("{error:#}"))?;
     manager.cancel_speaker_diarization(&model_id);
     Ok(())
 }
@@ -232,8 +230,7 @@ pub fn delete_speaker_diarization_model(
     manager: State<'_, Arc<SherpaDownloadManager>>,
     model_id: String,
 ) -> Result<(), String> {
-    speaker_diarization::validate_package_id(&model_id)
-        .map_err(|error| format!("{error:#}"))?;
+    speaker_diarization::validate_package_id(&model_id).map_err(|error| format!("{error:#}"))?;
     if manager.speaker_diarization_is_active(&model_id) {
         return Err("speakerDiarizationModelDownloadActive: 请先取消模型下载".to_string());
     }
@@ -246,7 +243,10 @@ pub fn delete_speaker_diarization_model(
     let mut prefs = coord.prefs().get();
     if prefs.post_meeting_asr.diarization.local_model_id.as_deref() == Some(model_id.as_str()) {
         prefs.post_meeting_asr.diarization.local_model_id = None;
-        coord.prefs().set(prefs).map_err(|error| error.to_string())?;
+        coord
+            .prefs()
+            .set(prefs)
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -268,7 +268,9 @@ fn ensure_speaker_model_not_in_use(model_id: &str) -> Result<(), String> {
         }
         matches!(
             record.status,
-            MeetingStatus::Recording | MeetingStatus::Paused | MeetingStatus::TranscribingInterrupted
+            MeetingStatus::Recording
+                | MeetingStatus::Paused
+                | MeetingStatus::TranscribingInterrupted
         ) || record.post_processing.as_ref().is_some_and(|state| {
             matches!(
                 state.status,
