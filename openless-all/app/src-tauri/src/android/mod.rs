@@ -1,8 +1,10 @@
 //! Android platform integration (JNI, overlay, accessibility, insert).
 
 pub mod accessibility;
+pub mod shizuku;
 #[cfg(target_os = "android")]
 pub mod insert;
+pub mod insert_tiers;
 pub mod jni;
 #[cfg(target_os = "android")]
 pub mod native_bridge;
@@ -13,11 +15,16 @@ pub mod updater;
 pub mod updater_logic;
 pub use crate::types::android_types as types;
 
+pub use accessibility::{
+    get_android_accessibility_status, is_accessibility_enabled, paste_via_accessibility_with_result,
+    request_android_accessibility_permission, AndroidAccessibilityPermissionResult,
+};
 #[cfg(target_os = "android")]
 pub use accessibility::paste_via_accessibility;
-pub use accessibility::{
-    get_android_accessibility_status, request_android_accessibility_permission,
-    AndroidAccessibilityPermissionResult,
+pub use shizuku::{
+    get_android_shizuku_status, open_shizuku_app, paste_via_shizuku_with_result,
+    recover_android_accessibility, request_android_shizuku_permission, AndroidShizukuOpenResult,
+    AndroidShizukuPermissionResult,
 };
 #[cfg(target_os = "android")]
 pub use insert::android_insert_with_strategy;

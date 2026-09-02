@@ -1184,6 +1184,7 @@ fn schedule_meeting_local_asr_release_for(
         ActiveAsr::FoundryLocalWhisper(_) => super::schedule_foundry_local_asr_release(
             inner,
             super::AsrReleaseSession::Meeting(token),
+            None,
         ),
         #[cfg(target_os = "windows")]
         ActiveAsr::SherpaOnnxLocal(_) => {
@@ -1207,6 +1208,7 @@ fn schedule_meeting_local_asr_release_for_provider(
             super::schedule_foundry_local_asr_release(
                 inner,
                 super::AsrReleaseSession::Meeting(token),
+                None,
             );
         } else if crate::asr::local::sherpa::is_sherpa_onnx_local(provider_id) {
             super::schedule_sherpa_onnx_release(inner, super::AsrReleaseSession::Meeting(token));
@@ -1219,9 +1221,16 @@ fn schedule_meeting_local_asr_release_for_provider(
 }
 
 #[cfg(target_os = "windows")]
-fn schedule_foundry_meeting_release(inner: &Arc<Inner>) {
+fn schedule_foundry_meeting_release(
+    inner: &Arc<Inner>,
+    primary_recovery: Option<crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken>,
+) {
     let token = current_or_new_meeting_asr_release_token(inner);
-    super::schedule_foundry_local_asr_release(inner, super::AsrReleaseSession::Meeting(token));
+    super::schedule_foundry_local_asr_release(
+        inner,
+        super::AsrReleaseSession::Meeting(token),
+        primary_recovery,
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -1338,13 +1347,22 @@ async fn flush_meeting_asr(
         ActiveAsr::FoundryLocalWhisper(local) => {
             debug_assert!(!uses_global_timeout);
             let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
-            let result = local
-                .transcribe(super::windows_local_asr_transcribe_timeout(audio_secs))
+            match local
+                .transcribe_with_fallback_notice(
+                    super::windows_local_asr_transcribe_timeout(audio_secs),
+                    Arc::new(|_| {}),
+                )
                 .await
-                .map(MeetingAsrFlushOutcome::Raw)
-                .map_err(|e| e.to_string());
-            schedule_foundry_meeting_release(inner);
-            result
+            {
+                Ok(outcome) => {
+                    schedule_foundry_meeting_release(inner, outcome.primary_recovery);
+                    Ok(MeetingAsrFlushOutcome::Raw(outcome.raw))
+                }
+                Err(error) => {
+                    schedule_foundry_meeting_release(inner, None);
+                    Err(error.to_string())
+                }
+            }
         }
         #[cfg(target_os = "windows")]
         ActiveAsr::SherpaOnnxLocal(local) => {

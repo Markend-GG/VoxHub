@@ -125,15 +125,21 @@ pub fn reanalyze_context_history(
     Ok(())
 }
 
-/// 每日活动计数（日期升序），概览页年度热力图的数据源。与历史内容 / 保留策略解耦：
-/// 清空历史不影响它，全年格子照亮。
+/// 每日活动汇总（日期升序），概览页年度热力图与「近 7 天 / 近 30 天」指标的数据源。
+/// 与历史内容 / 保留策略解耦：清空历史不影响它，全年格子照亮，周期统计也不会被
+/// 历史 200 条上限截断。
 #[tauri::command]
 pub fn get_activity_stats(coord: CoordinatorState<'_>) -> Vec<ActivityDay> {
     coord
         .activity()
         .snapshot()
         .into_iter()
-        .map(|(date, count)| ActivityDay { date, count })
+        .map(|(date, stats)| ActivityDay {
+            date,
+            count: stats.count,
+            chars: stats.chars,
+            duration_ms: stats.duration_ms,
+        })
         .collect()
 }
 
@@ -515,6 +521,7 @@ mod retranscribe_tests {
             created_at: "2026-07-15T00:00:00Z".into(),
             source: HistorySource::Voice,
             raw_transcript: String::new(),
+            asr_transcript: None,
             final_text: String::new(),
             mode: PolishMode::Light,
             style_pack_id: None,
@@ -534,6 +541,7 @@ mod retranscribe_tests {
             asr_model: Some("volc.seedasr.sauc.duration".into()),
             llm_provider: Some("ark".into()),
             llm_model: Some("deepseek-v3-2".into()),
+            pipeline_mode: None,
             asr_ms: Some(15000),
             polish_ms: Some(1200),
         }

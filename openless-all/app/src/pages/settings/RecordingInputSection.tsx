@@ -24,6 +24,7 @@ import type {
   UserPreferences,
   WindowsInsertionMode,
   WindowsSendInputNewlineMode,
+  MacosNewlineMode,
 } from '../../lib/types';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { SelectLite } from '../../components/ui/SelectLite';
@@ -178,6 +179,8 @@ export function RecordingInputSection() {
     });
   const onWindowsSendInputNewlineModeChange = (windowsSendInputNewlineMode: WindowsSendInputNewlineMode) =>
     savePrefs({ ...prefs, windowsSendInputNewlineMode });
+  const onMacosNewlineModeChange = (macosNewlineMode: MacosNewlineMode) =>
+    savePrefs({ ...prefs, macosNewlineMode });
   const onWindowsShowOpenlessInKeyboardListChange = (
     windowsShowOpenlessInKeyboardList: boolean,
   ) => void saveKeyboardListAffectingPrefs({ ...prefs, windowsShowOpenlessInKeyboardList });
@@ -421,32 +424,34 @@ export function RecordingInputSection() {
         <SettingRow label={t('settings.recording.muteDuringRecordingLabel')} desc={t('settings.recording.muteDuringRecordingDesc')}>
           <Toggle on={prefs.muteDuringRecording} onToggle={onMuteDuringRecordingChange} />
         </SettingRow>
-        <SettingRow
-          label={t('settings.recording.audioCueLabel')}
-          desc={t('settings.recording.audioCueDesc')}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Toggle on={prefs.audioCueOnRecord} onToggle={onAudioCueChange} />
-            <button
-              type="button"
-              onClick={() => playRecordStartCue()}
-              style={{
-                padding: '5px 12px',
-                fontSize: 12,
-                fontWeight: 500,
-                fontFamily: 'inherit',
-                border: '0.5px solid var(--ol-line-strong)',
-                borderRadius: 8,
-                background: 'var(--ol-surface-2)',
-                color: 'var(--ol-ink-2)',
-                cursor: 'default',
-                transition: 'background 0.16s var(--ol-motion-quick)',
-              }}
-            >
-              {t('settings.recording.audioCuePreview')}
-            </button>
-          </div>
-        </SettingRow>
+        {os !== 'linux' && (
+          <SettingRow
+            label={t('settings.recording.audioCueLabel')}
+            desc={t('settings.recording.audioCueDesc')}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Toggle on={prefs.audioCueOnRecord} onToggle={onAudioCueChange} />
+              <button
+                type="button"
+                onClick={() => playRecordStartCue()}
+                style={{
+                  padding: '5px 12px',
+                  fontSize: 12,
+                  fontWeight: 500,
+                  fontFamily: 'inherit',
+                  border: '0.5px solid var(--ol-line-strong)',
+                  borderRadius: 8,
+                  background: 'var(--ol-surface-2)',
+                  color: 'var(--ol-ink-2)',
+                  cursor: 'default',
+                  transition: 'background 0.16s var(--ol-motion-quick)',
+                }}
+              >
+                {t('settings.recording.audioCuePreview')}
+              </button>
+            </div>
+          </SettingRow>
+        )}
         {os === 'linux' && (
         <SettingRow label={t('settings.advanced.streamingInsertLabel')}>
           <Toggle
@@ -513,6 +518,23 @@ export function RecordingInputSection() {
                 { value: 'crlf', label: t('settings.recording.windowsSendInputNewlineModeCrLf') },
               ]}
               ariaLabel={t('settings.recording.windowsSendInputNewlineModeLabel')}
+              style={{ ...inputStyle, maxWidth: 260 }}
+            />
+          </SettingRow>
+        )}
+        {capability.adapter === 'macEventTap' && prefs.streamingInsert && (
+          <SettingRow
+            label={t('settings.recording.macosNewlineModeLabel')}
+            desc={t('settings.recording.macosNewlineModeDesc')}
+          >
+            <SelectLite
+              value={prefs.macosNewlineMode ?? 'shiftReturn'}
+              onChange={next => onMacosNewlineModeChange(next as MacosNewlineMode)}
+              options={[
+                { value: 'shiftReturn', label: t('settings.recording.macosNewlineModeShiftReturn') },
+                { value: 'return', label: t('settings.recording.macosNewlineModeReturn') },
+              ]}
+              ariaLabel={t('settings.recording.macosNewlineModeLabel')}
               style={{ ...inputStyle, maxWidth: 260 }}
             />
           </SettingRow>

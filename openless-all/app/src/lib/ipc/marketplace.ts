@@ -43,6 +43,17 @@ export function installMarketplacePack(packId: string, scope?: StylePackScope | 
     )
 }
 
+export function downloadMarketplacePack(
+    packId: string,
+    targetPath: string,
+): Promise<void> {
+    return invokeOrMock(
+        "marketplace_download",
+        { packId, targetPath },
+        () => undefined,
+    )
+}
+
 export function uploadMarketplacePack(
     packId: string,
     originPackId?: string | null,

@@ -68,6 +68,9 @@ export let mockSettings: UserPreferences = {
         },
     },
     activeLlmProvider: "ark",
+    pipelineMode: "traditional",
+    multimodalPipelineEnabled: false,
+    activeOmniProvider: "custom",
     llmThinkingEnabled: false,
     useSystemProxy: true,
     restoreClipboardAfterPaste: true,
@@ -75,6 +78,7 @@ export let mockSettings: UserPreferences = {
     allowNonTsfInsertionFallback: true,
     windowsInsertionMode: "tsf",
     windowsSendInputNewlineMode: "enter",
+    macosNewlineMode: "shiftReturn",
     windowsSendInputInsertionOnly: false,
     windowsShowOpenlessInKeyboardList: true,
     workingLanguages: ["简体中文"],
@@ -106,6 +110,7 @@ export let mockSettings: UserPreferences = {
     selectedWeeklyReportTemplateId: "builtin.weekly.default",
     selectedMonthlyReportTemplateId: "builtin.monthly.default",
     rewriteSaveHistory: true,
+    stylePackHotkeys: [],
     codingAgentEnabled: false,
     codingAgentProvider: "claude-code-cli",
     codingAgentModel: null,
@@ -116,6 +121,7 @@ export let mockSettings: UserPreferences = {
     codingAgentPanelHotkey: { primary: "Enter", modifiers: ["cmd", "shift"] },
     codingAgentQuickHotkey: null,
     localAsrActiveModel: "qwen3-asr-0.6b",
+    localWhisperActiveModel: "whisper-large-v3-turbo",
     localAsrMirror: "huggingface",
     localAsrKeepLoadedSecs: 300,
     foundryLocalAsrModel: "whisper-small",
@@ -137,6 +143,7 @@ export let mockSettings: UserPreferences = {
     streamingInsert: true,
     streamingInsertDefaultMigrated: true,
     streamingInsertSaveClipboard: true,
+    cursorContextEnabled: false,
     showOverviewActivityHeatmap: true,
     autoUpdateCheck: true,
     historyMaxEntries: null,
@@ -576,8 +583,10 @@ export const mockHotkeyCapability: HotkeyCapability = {
 export const mockCredentialsStatus: CredentialsStatus = {
     activeAsrProvider: "foundry-local-whisper",
     activeLlmProvider: "ark",
+    pipelineMode: "traditional",
     asrConfigured: true,
     llmConfigured: true,
+    omniConfigured: false,
     volcengineConfigured: true,
     arkConfigured: true,
 }
@@ -649,6 +658,7 @@ export const mockHistory: DictationSession[] = OL_DATA.history.map((h, i) => ({
     id: `mock-${i}`,
     createdAt: new Date().toISOString(),
     rawTranscript: h.preview,
+    asrTranscript: null,
     finalText: h.preview,
     mode: "structured",
     stylePackId: "builtin.structured",
@@ -888,6 +898,15 @@ export const mockCorrectionRules: CorrectionRule[] = [
         replacement: "{num}例",
         enabled: true,
         createdAt: new Date().toISOString(),
+        source: "manual",
+    },
+    {
+        id: "rule-learned-codex",
+        pattern: "扣德克斯",
+        replacement: "Codex",
+        enabled: true,
+        createdAt: new Date().toISOString(),
+        source: "learned",
     },
 ]
 
@@ -1064,7 +1083,20 @@ export const mockActivityDays: ActivityDay[] = (() => {
         if (seed < 0.55) continue
         const count = Math.max(1, Math.round(seed * 22) - 8)
         const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
-        days.push({ date: iso, count })
+        // 字数 / 时长按每条 ~120 字、~9 秒的量级派生，让周期指标卡在浏览器 dev 下
+        // 也有可看的数据。最早的 30 天故意只给 count（不给 chars/durationMs），
+        // 模拟升级前写入的老数据，验证「老日期在字数/时长指标里显示 0」不会崩。
+        const legacy = i > 334
+        days.push(
+            legacy
+                ? { date: iso, count }
+                : {
+                      date: iso,
+                      count,
+                      chars: count * (90 + Math.round(seed * 70)),
+                      durationMs: count * (6000 + Math.round(seed * 7000)),
+                  },
+        )
     }
     return days
 })()

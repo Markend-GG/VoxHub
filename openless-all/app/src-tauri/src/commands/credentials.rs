@@ -2,6 +2,8 @@ use super::*;
 
 const LLM_EXTRA_HEADERS_ACCOUNT: &str = "ark.extra_headers";
 const LLM_TEMPERATURE_ACCOUNT: &str = "ark.temperature";
+const OMNI_EXTRA_HEADERS_ACCOUNT: &str = "omni.extra_headers";
+const OMNI_TEMPERATURE_ACCOUNT: &str = "omni.temperature";
 
 #[tauri::command]
 pub async fn get_credentials() -> Result<CredentialsStatus, String> {
@@ -9,14 +11,20 @@ pub async fn get_credentials() -> Result<CredentialsStatus, String> {
         let snap = CredentialsVault::snapshot();
         let active_asr_provider = CredentialsVault::get_active_asr();
         let active_llm_provider = CredentialsVault::get_active_llm();
+        let pipeline_mode = PreferencesStore::new()
+            .map(|store| store.get().pipeline_mode)
+            .unwrap_or(crate::types::PipelineMode::Traditional);
         let volcengine_configured = volcengine_configured(&snap);
         let asr_configured = asr_configured_for_provider(&active_asr_provider, &snap);
         let llm_configured = llm_configured_for_provider(&active_llm_provider, &snap);
+        let omni_configured = omni_configured_for_active_provider(&snap);
         CredentialsStatus {
             active_asr_provider,
             active_llm_provider,
+            pipeline_mode,
             asr_configured,
             llm_configured,
+            omni_configured,
             volcengine_configured,
             ark_configured: llm_configured,
         }
@@ -44,18 +52,47 @@ fn volcengine_configured(snap: &CredentialsSnapshot) -> bool {
 }
 
 pub(crate) fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bool {
+    if crate::asr::local::is_local_whisper(provider) {
+        #[cfg(target_os = "macos")]
+        {
+            let model_id = crate::persistence::PreferencesStore::new()
+                .ok()
+                .map(|store| store.get().local_whisper_active_model)
+                .filter(|id| {
+                    crate::asr::local::ModelId::from_str(id)
+                        .map(|model| model.is_whisper())
+                        .unwrap_or(false)
+                })
+                .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
+            return crate::asr::local::whisper_model_ready_for_model(&model_id);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return false;
+        }
+    }
     // 本地 / 无凭据引擎不属于云端分类枚举（ActiveAsrProviderKind），由平台 cfg 门
     // 在此单独判定；移动端上这些引擎不可用直接判未配置。
     if cfg!(mobile)
-        && (provider == crate::asr::local::PROVIDER_ID
+        && (crate::asr::local::is_local_qwen3(provider)
+            || crate::asr::local::is_local_whisper(provider)
             || provider == crate::asr::local::sherpa::PROVIDER_ID
             || provider == crate::asr::local::foundry::PROVIDER_ID
             || provider == crate::asr::local::APPLE_SPEECH_PROVIDER_ID)
     {
         return false;
     }
-    if provider == crate::asr::local::PROVIDER_ID
-        || active_apple_speech_asr_is_supported(provider)
+    if crate::asr::local::is_local_qwen3(provider) {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            return crate::asr::local::qwen_backend_for_provider(provider).is_some();
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            return false;
+        }
+    }
+    if active_apple_speech_asr_is_supported(provider)
         || active_foundry_asr_is_supported(provider)
         || active_sherpa_asr_is_supported(provider)
     {
@@ -136,10 +173,23 @@ fn configured(field: &Option<String>) -> bool {
         .unwrap_or(false)
 }
 
+/// 多模态（Omni）模型是否已配置：OpenAI 兼容通道要求 API Key + Base URL + Model；
+/// Gemini 通道要求 API Key + Model（Base URL 为空时后端走官方默认）。
+pub(crate) fn omni_configured_for_active_provider(snap: &CredentialsSnapshot) -> bool {
+    let provider = &snap.active_omni_provider;
+    let has_api_key = configured(&snap.omni_api_key);
+    let has_model = configured(&snap.omni_model);
+    if provider == "gemini" {
+        return has_api_key && has_model;
+    }
+    has_api_key && configured(&snap.omni_endpoint) && has_model
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(not(mobile))]
 pub(crate) struct LocalAsrReleasePlan {
     pub(crate) qwen: bool,
+    pub(crate) whisper: bool,
     pub(crate) foundry: bool,
     pub(crate) sherpa: bool,
 }
@@ -147,7 +197,8 @@ pub(crate) struct LocalAsrReleasePlan {
 #[cfg(not(mobile))]
 pub(crate) fn local_asr_release_plan_for_provider(provider: &str) -> LocalAsrReleasePlan {
     LocalAsrReleasePlan {
-        qwen: provider != crate::asr::local::PROVIDER_ID,
+        qwen: !crate::asr::local::is_local_qwen3(provider),
+        whisper: !crate::asr::local::is_local_whisper(provider),
         foundry: provider != FOUNDRY_LOCAL_PROVIDER_ID,
         sherpa: provider != crate::asr::local::sherpa::PROVIDER_ID,
     }
@@ -189,7 +240,9 @@ pub async fn set_credential(
     ensure_main_window(&window)?;
     let extra_headers = account == LLM_EXTRA_HEADERS_ACCOUNT;
     let temperature = account == LLM_TEMPERATURE_ACCOUNT;
-    let parsed = if extra_headers || temperature {
+    let omni_extra_headers = account == OMNI_EXTRA_HEADERS_ACCOUNT;
+    let omni_temperature = account == OMNI_TEMPERATURE_ACCOUNT;
+    let parsed = if extra_headers || temperature || omni_extra_headers || omni_temperature {
         None
     } else {
         Some(parse_account(&account)?)
@@ -202,27 +255,24 @@ pub async fn set_credential(
         if temperature {
             return CredentialsVault::set_active_llm_temperature(&value).map_err(|e| e.to_string());
         }
+        if omni_extra_headers {
+            return CredentialsVault::set_active_omni_extra_headers_json(&value)
+                .map_err(|e| e.to_string());
+        }
+        if omni_temperature {
+            return CredentialsVault::set_active_omni_temperature(&value)
+                .map_err(|e| e.to_string());
+        }
         let acc = parsed.expect("non-extra credential account must be parsed");
         if let Some(provider) = provider {
-            if !matches!(
-                acc,
-                CredentialAccount::VolcengineAppKey
-                    | CredentialAccount::VolcengineAccessKey
-                    | CredentialAccount::VolcengineResourceId
-                    | CredentialAccount::VolcengineAuthMode
-                    | CredentialAccount::VolcengineApiKey
-                    | CredentialAccount::AsrApiKey
-                    | CredentialAccount::AsrEndpoint
-                    | CredentialAccount::AsrModel
-                    | CredentialAccount::AsrVocabularyId
-                    | CredentialAccount::AsrAdvancedConfig
-                    | CredentialAccount::XfyunAppId
-                    | CredentialAccount::XfyunApiKey
-            ) {
-                return Err("provider-scoped credential must be an ASR account".to_string());
+            // 渠道化后 `provider` 是**渠道 id**，LLM 侧同样需要按 id 定位 —— 用户编辑
+            // 的可能是列表里第 3 张卡片，而不是当前生效的那张。
+            match account_channel_kind(acc) {
+                ChannelKind::Asr => CredentialsVault::set_for_asr_provider(&provider, acc, &value)
+                    .map_err(|e| e.to_string()),
+                ChannelKind::Llm => CredentialsVault::set_for_llm_provider(&provider, acc, &value)
+                    .map_err(|e| e.to_string()),
             }
-            CredentialsVault::set_for_asr_provider(&provider, acc, &value)
-                .map_err(|e| e.to_string())
         } else if value.is_empty() {
             CredentialsVault::remove(acc).map_err(|e| e.to_string())
         } else {
@@ -262,7 +312,8 @@ pub async fn set_active_asr_provider(
     _coord: CoordinatorState<'_>,
     provider: String,
 ) -> Result<(), String> {
-    if provider == crate::asr::local::PROVIDER_ID
+    if crate::asr::local::is_local_qwen3(&provider)
+        || crate::asr::local::is_local_whisper(&provider)
         || provider == crate::asr::local::sherpa::PROVIDER_ID
         || provider == crate::asr::local::foundry::PROVIDER_ID
         || provider == crate::asr::local::APPLE_SPEECH_PROVIDER_ID
@@ -283,6 +334,14 @@ pub async fn set_active_asr_provider(
     sherpa_runtime: State<'_, Arc<SherpaOnnxRuntime>>,
     provider: String,
 ) -> Result<(), String> {
+    if crate::asr::local::is_local_qwen3(&provider)
+        && crate::asr::local::qwen_backend_for_provider(&provider).is_none()
+    {
+        return Err("所选本地 Qwen3-ASR 后端不支持当前系统".to_string());
+    }
+    if crate::asr::local::is_local_whisper(&provider) && !cfg!(target_os = "macos") {
+        return Err("本地 Whisper 当前仅支持 macOS".to_string());
+    }
     if provider == FOUNDRY_LOCAL_PROVIDER_ID && !active_foundry_asr_is_supported(&provider) {
         return Err("Foundry Local Whisper is only available on Windows".to_string());
     }
@@ -301,24 +360,27 @@ pub async fn set_active_asr_provider(
     }
     CredentialsVault::set_active_asr_provider(&provider).map_err(|e| e.to_string())?;
     let release_plan = local_asr_release_plan_for_provider(&provider);
-    if provider == crate::asr::local::PROVIDER_ID {
-        // 切到本地 ASR → 后台预加载模型，下次按 hotkey 时不必等数秒。
-        coord.preload_local_asr_in_background();
-    }
-    if release_plan.qwen {
-        // 切回云端 → 用户已不需要本地引擎，立刻释放 1.2GB+ RAM；不释放的话只会等到
-        // schedule_local_asr_release 的下一次 dictation 才触发，而切回云端后根本不会
-        // 再走 local 路径，引擎会驻留到进程退出。
-        coord.release_local_asr_engine();
-    }
+    coord.release_inactive_local_asr_engines(release_plan.qwen, release_plan.whisper);
     release_foundry_runtime_if_inactive(runtime.inner(), release_plan.foundry).await;
     release_sherpa_runtime_if_inactive(sherpa_runtime.inner(), release_plan.sherpa).await;
+    coord.emit_local_asr_engine_status();
+    if crate::asr::local::is_local_qwen3(&provider)
+        || crate::asr::local::is_local_whisper(&provider)
+    {
+        // 所有非目标本地 runtime 已释放后再预加载，避免切换时两个大模型同时驻留。
+        coord.preload_local_asr_in_background();
+    }
     Ok(())
 }
 
 #[tauri::command]
 pub fn set_active_llm_provider(provider: String) -> Result<(), String> {
     CredentialsVault::set_active_llm_provider(&provider).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_active_omni_provider(provider: String) -> Result<(), String> {
+    CredentialsVault::set_active_omni_provider(&provider).map_err(|e| e.to_string())
 }
 
 /// 读出某个账号的实际值（用于设置页预填表单）。
@@ -332,7 +394,9 @@ pub async fn read_credential(
     ensure_main_window(&window)?;
     let extra_headers = account == LLM_EXTRA_HEADERS_ACCOUNT;
     let temperature = account == LLM_TEMPERATURE_ACCOUNT;
-    let parsed = if extra_headers || temperature {
+    let omni_extra_headers = account == OMNI_EXTRA_HEADERS_ACCOUNT;
+    let omni_temperature = account == OMNI_TEMPERATURE_ACCOUNT;
+    let parsed = if extra_headers || temperature || omni_extra_headers || omni_temperature {
         None
     } else {
         Some(parse_account(&account)?)
@@ -345,9 +409,21 @@ pub async fn read_credential(
         if temperature {
             return Ok(CredentialsVault::get_active_llm_temperature_string());
         }
+        if omni_extra_headers {
+            return CredentialsVault::get_active_omni_extra_headers_json()
+                .map_err(|e| e.to_string());
+        }
+        if omni_temperature {
+            return Ok(CredentialsVault::get_active_omni_temperature_string());
+        }
         let acc = parsed.expect("non-extra credential account must be parsed");
         if let Some(provider) = provider {
-            CredentialsVault::get_for_asr_provider(&provider, acc).map_err(|e| e.to_string())
+            match account_channel_kind(acc) {
+                ChannelKind::Asr => CredentialsVault::get_for_asr_provider(&provider, acc)
+                    .map_err(|e| e.to_string()),
+                ChannelKind::Llm => CredentialsVault::get_for_llm_provider(&provider, acc)
+                    .map_err(|e| e.to_string()),
+            }
         } else {
             CredentialsVault::get(acc).map_err(|e| e.to_string())
         }
@@ -371,7 +447,34 @@ pub fn read_asr_provider_credential(
     CredentialsVault::get_asr_for_provider(provider, acc).map_err(|e| e.to_string())
 }
 
-fn ensure_main_window(window: &Window) -> Result<(), String> {
+/// 一个凭据账户属于 ASR 面还是 LLM 面 —— 决定按渠道 id 定位时查哪张 map。
+fn account_channel_kind(account: CredentialAccount) -> ChannelKind {
+    match account {
+        CredentialAccount::ArkApiKey
+        | CredentialAccount::ArkModelId
+        | CredentialAccount::ArkContextVisionModelId
+        | CredentialAccount::ArkEndpoint => ChannelKind::Llm,
+        CredentialAccount::VolcengineAppKey
+        | CredentialAccount::VolcengineAccessKey
+        | CredentialAccount::VolcengineResourceId
+        | CredentialAccount::VolcengineAuthMode
+        | CredentialAccount::VolcengineApiKey
+        | CredentialAccount::AsrApiKey
+        | CredentialAccount::AsrEndpoint
+        | CredentialAccount::AsrModel
+        | CredentialAccount::AsrVocabularyId
+        | CredentialAccount::AsrAdvancedConfig
+        | CredentialAccount::XfyunAppId
+        | CredentialAccount::XfyunApiKey => ChannelKind::Asr,
+        // Omni 凭据走独立命名空间、从不按渠道 id 定位（前端写入不带 provider）；
+        // 映射到 Asr 只为穷尽 match，实际调用点不可达。
+        CredentialAccount::OmniApiKey
+        | CredentialAccount::OmniEndpoint
+        | CredentialAccount::OmniModel => ChannelKind::Asr,
+    }
+}
+
+pub(crate) fn ensure_main_window(window: &Window) -> Result<(), String> {
     if window.label() == "main" {
         Ok(())
     } else {
@@ -397,6 +500,9 @@ fn parse_account(s: &str) -> Result<CredentialAccount, String> {
         "asr.advanced_config" => Ok(CredentialAccount::AsrAdvancedConfig),
         "xfyun.app_id" => Ok(CredentialAccount::XfyunAppId),
         "xfyun.api_key" => Ok(CredentialAccount::XfyunApiKey),
+        "omni.api_key" => Ok(CredentialAccount::OmniApiKey),
+        "omni.endpoint" => Ok(CredentialAccount::OmniEndpoint),
+        "omni.model" => Ok(CredentialAccount::OmniModel),
         _ => Err(format!("unknown account: {s}")),
     }
 }
@@ -419,7 +525,10 @@ fn parse_asr_provider_account(s: &str) -> Result<CredentialAccount, String> {
         CredentialAccount::ArkApiKey
         | CredentialAccount::ArkModelId
         | CredentialAccount::ArkContextVisionModelId
-        | CredentialAccount::ArkEndpoint => Err(format!("account is not ASR-scoped: {s}")),
+        | CredentialAccount::ArkEndpoint
+        | CredentialAccount::OmniApiKey
+        | CredentialAccount::OmniEndpoint
+        | CredentialAccount::OmniModel => Err(format!("account is not ASR-scoped: {s}")),
     }
 }
 

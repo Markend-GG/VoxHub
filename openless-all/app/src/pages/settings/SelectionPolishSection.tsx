@@ -10,7 +10,6 @@ import { getPlatformCapabilities } from '../../lib/platform';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { Card } from '../_atoms';
 import { SectionTitle, SettingRow, chipSelectedStyle, segmentedTrackStyle } from './shared';
-import { detectOS } from '../../components/WindowChrome';
 
 const outputOptions: Array<{ value: SelectionPolishOutputMode }> = [
   { value: 'directReplace' },
@@ -19,14 +18,14 @@ const outputOptions: Array<{ value: SelectionPolishOutputMode }> = [
 
 export function SelectionPolishSection() {
   const { t } = useTranslation();
-  const os = detectOS();
   const { prefs, capability, refresh, updatePrefs } = useHotkeySettings();
   const [platformCaps, setPlatformCaps] = useState<PlatformCapabilities | null>(null);
 
   useEffect(() => { void getPlatformCapabilities().then(setPlatformCaps); }, []);
 
-  // 选区润色的安全替换依赖 Windows 前台窗口/焦点控件校验，macOS/Linux 尚未实现，仅 Windows 提供设置入口。
-  if (!prefs || !capability || !platformCaps?.supportsDesktopHotkey || os !== 'win') return null;
+  // 选区润色的安全替换：Windows 用前台窗口/焦点控件校验，macOS 用前台应用 +
+  // 选区文本指纹校验；两者都具备后才提供设置入口（Linux 热键接入后同样可用）。
+  if (!prefs || !capability || !platformCaps?.supportsDesktopHotkey) return null;
 
   return (
     <Card>
@@ -39,7 +38,10 @@ export function SelectionPolishSection() {
       >
         <ShortcutRecorder
           value={prefs.selectionPolishHotkey}
-          sideSpecificModifiers
+          // 注意：不能开 sideSpecificModifiers —— 后端 set_selection_polish_hotkey 用
+          // reject_side_specific_non_dictation 拒绝非听写功能的侧键修饰（side-aware hook
+          // 仅听写支持多 owner），开启会把录制出的 ctrl-left/alt-right 等标签全部打回，
+          // 前端 catch 后误报「该快捷键组合不可用」（上游 #851 引入的自相矛盾）。
           onSave={async binding => {
             await setSelectionPolishHotkey(binding);
             await refresh();

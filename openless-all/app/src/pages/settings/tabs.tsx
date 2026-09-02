@@ -4,11 +4,13 @@
 import { useTranslation } from 'react-i18next';
 import { useEffect, useState } from 'react';
 import { RecordingInputSection } from './RecordingInputSection';
+import { RemoteInputSection } from './RemoteInputSection';
 import { ShortcutsSection } from './ShortcutsSection';
 import { SelectionPolishSection } from './SelectionPolishSection';
 import { LanguageSection } from './LanguageSection';
 import { ThemeSection } from './ThemeSection';
-import { ProvidersSection } from './ProvidersSection';
+import { ProvidersSection } from './ChannelList';
+import { MeetingProvidersSection } from './MeetingProvidersSection';
 import { ScreenshotAnalysisSection } from './ScreenshotAnalysisSection';
 import { ReportRecordSection } from './ReportRecordSection';
 import { NetworkSection } from './NetworkSection';
@@ -17,6 +19,7 @@ import { PermissionsSection } from './PermissionsSection';
 import { DataStorageSection } from './DataStorageSection';
 import { LocalModelSection } from './LocalModelSection';
 import { DebugToolsSection } from './DebugToolsSection';
+import { MultimodalPipelineSection } from './MultimodalPipelineSection';
 import { CodingAgentSection } from './CodingAgentSection';
 import { ClaudeConsoleSection } from './ClaudeConsoleSection';
 import { BetaChannelSection } from './BetaChannelSection';
@@ -38,15 +41,17 @@ function usePlatformCaps(): PlatformCapabilities | null {
   return platformCaps;
 }
 
-// 通用：录音与输入 · 快捷键 · 主题 · 语言。
+// 通用：录音与输入 · 远程输入 · 快捷键 · 主题 · 语言。
 export function GeneralTab() {
   const platformCaps = usePlatformCaps();
   const showDesktopShortcuts = platformCaps?.supportsDesktopHotkey === true;
+  const showRemoteInput = platformCaps?.platform === 'desktop';
 
   return (
     <>
       <RecordingInputSection />
       {platformCaps?.platform === 'desktop' && <MeetingCompanionSection />}
+      {showRemoteInput && <RemoteInputSection />}
       <SelectionPolishSection />
       {showDesktopShortcuts && <ShortcutsSection />}
       <ThemeSection />
@@ -65,6 +70,7 @@ export function ServicesTab() {
   return (
     <>
       <ProvidersSection />
+      <MeetingProvidersSection />
       <ScreenshotAnalysisSection />
       <ReportRecordSection />
       <NetworkSection />
@@ -120,8 +126,10 @@ export function AdvancedTab() {
 
   return (
     <>
-      {showDesktopAdvanced && os !== 'win' && <CodingAgentSection />}
-      {showDesktopAdvanced && os !== 'win' && <ClaudeConsoleSection />}
+      {/* Less Computer / Claude 控制台仅 macOS 开放：后端只在 macOS 注册热键/创建窗口 */}
+      {showDesktopAdvanced && os === 'mac' && <CodingAgentSection />}
+      {showDesktopAdvanced && os === 'mac' && <ClaudeConsoleSection />}
+      <MultimodalPipelineSection />
       {showDebugTools && <DebugToolsSection />}
     </>
   );

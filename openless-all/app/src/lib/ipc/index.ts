@@ -28,12 +28,27 @@ export {
     setAsrProviderCredential,
     setActiveAsrProvider,
     setActiveLlmProvider,
+    setActiveOmniProvider,
     readCredential,
     readAsrProviderCredential,
     validateProviderCredentials,
     listProviderModels,
     listAsrProviderModels,
 } from "./asr-credentials"
+
+// channels（渠道卡片）
+export type { Channel, ChannelKind, ChannelTestResult } from "./channels"
+export {
+    listChannels,
+    createChannel,
+    setChannelProviderType,
+    deleteChannelIfBlank,
+    renameChannel,
+    deleteChannel,
+    setChannelEnabled,
+    reorderChannels,
+    recordChannelTest,
+} from "./channels"
 
 // history
 export {
@@ -110,6 +125,12 @@ export {
     setVocabEnabled,
     listCorrectionRules,
     addCorrectionRule,
+    acceptPendingCorrection,
+    rejectPendingCorrection,
+    dismissVocabSuggestions,
+    copyTextToClipboard,
+    dismissInsertFallbackCard,
+    reportInsertFallbackCardHeight,
     removeCorrectionRule,
     setCorrectionRuleEnabled,
     listVocabPresets,
@@ -169,6 +190,7 @@ export {
     setOpenAppHotkey,
     setRewriteHotkey,
     setScreenshotRecordHotkey,
+    setStylePackHotkeys,
     setShortcutRecordingActive,
 } from "./hotkeys"
 
@@ -252,6 +274,7 @@ export {
     listMarketplace,
     fetchMarketplaceDetail,
     installMarketplacePack,
+    downloadMarketplacePack,
     uploadMarketplacePack,
     likeMarketplacePack,
     marketplaceMyLikes,
@@ -285,7 +308,7 @@ export {
 } from "./marketplace-cache"
 
 // utils
-export { openExternal, exportErrorLog, logClientError } from "./utils"
+export { openExternal, exportErrorLog, logClientError, debugReadCursorContext } from "./utils"
 
 // rewrite
 export type { RewriteHistoryEntry } from "./rewrite"

@@ -43,8 +43,8 @@ pub(crate) use crate::coordinator::Coordinator;
 pub(crate) use crate::net;
 pub(crate) use crate::permissions::{self, PermissionStatus};
 pub(crate) use crate::persistence::{
-    sync_style_pack_preferences, CredentialAccount, CredentialsSnapshot, CredentialsVault,
-    MeetingStore, PreferencesStore,
+    sync_style_pack_preferences, ChannelKind, CredentialAccount, CredentialsSnapshot,
+    CredentialsVault, MeetingStore, PreferencesStore,
 };
 pub(crate) use crate::polish::{
     http_client_builder, openai_compatible_temperature_for_provider, CodexOAuthConfig,
@@ -57,13 +57,16 @@ pub(crate) use crate::recorder::{AudioConsumer, Recorder};
 pub(crate) use crate::types::WindowsImeStatus;
 pub(crate) use crate::types::{
     builtin_style_pack_id, default_active_style_pack_id, ActivityDay, AndroidAccessibilityStatus,
-    AndroidOverlayStatus, ChineseScriptPreference, ComboBinding, CorrectionRule, CredentialsStatus,
-    DictationSession, DictionaryEntry, HotkeyCapability, HotkeyStatus, MeetingRecord,
-    MeetingRecordingSnapshot, OutputLanguagePreference, PolishMode, RewriteHistoryEntry,
-    ShortcutBinding, StylePack, StylePackKind, StylePackRuntimeDiagnostics, StyleSystemPrompts,
-    UpdateChannel, UserPreferences, VocabPresetStore,
+    AndroidAccessibilityRecoveryOutcome, AndroidAccessibilityRecoveryResult,
+    AndroidOverlayStatus, AndroidShizukuStatus, ChineseScriptPreference, ComboBinding,
+    CorrectionRule, CredentialsStatus, DictationSession, DictionaryEntry, HotkeyCapability,
+    HotkeyStatus, MeetingRecord, MeetingRecordingSnapshot, OutputLanguagePreference, PolishMode,
+    RewriteHistoryEntry, ShortcutBinding, StylePack, StylePackHotkey, StylePackKind,
+    StylePackRuntimeDiagnostics, StyleSystemPrompts, UpdateChannel, UserPreferences,
+    VocabPresetStore,
 };
 
+mod channels;
 mod credentials;
 mod dictation;
 mod dictionary;
@@ -94,6 +97,7 @@ mod sherpa_asr;
 mod style_packs;
 mod whitelist;
 
+pub use channels::*;
 pub use credentials::*;
 pub use dictation::*;
 pub use dictionary::*;
@@ -359,8 +363,25 @@ mod tests {
             &whisper_keyless_ready
         ));
 
-        assert!(asr_configured_for_provider(
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            assert!(asr_configured_for_provider(
+                crate::asr::local::PROVIDER_ID,
+                &snapshot()
+            ));
+            assert!(asr_configured_for_provider(
+                crate::asr::local::LOCAL_QWEN3_C_PROVIDER_ID,
+                &snapshot()
+            ));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(!asr_configured_for_provider(
             crate::asr::local::PROVIDER_ID,
+            &snapshot()
+        ));
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert!(asr_configured_for_provider(
+            crate::asr::local::LOCAL_QWEN3_MLX_PROVIDER_ID,
             &snapshot()
         ));
         #[cfg(target_os = "windows")]
@@ -405,8 +426,29 @@ mod tests {
 
     #[test]
     fn local_asr_providers_skip_external_validation() {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert!(active_asr_is_keyless_for_validation(
             crate::asr::local::PROVIDER_ID
+        ));
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(!active_asr_is_keyless_for_validation(
+            crate::asr::local::PROVIDER_ID
+        ));
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(active_asr_is_keyless_for_validation(
+            crate::asr::local::LOCAL_QWEN3_C_PROVIDER_ID
+        ));
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert!(active_asr_is_keyless_for_validation(
+            crate::asr::local::LOCAL_QWEN3_MLX_PROVIDER_ID
+        ));
+        #[cfg(target_os = "macos")]
+        assert!(active_asr_is_keyless_for_validation(
+            crate::asr::local::LOCAL_WHISPER_PROVIDER_ID
+        ));
+        #[cfg(not(target_os = "macos"))]
+        assert!(!active_asr_is_keyless_for_validation(
+            crate::asr::local::LOCAL_WHISPER_PROVIDER_ID
         ));
         #[cfg(target_os = "windows")]
         assert!(active_asr_is_keyless_for_validation(
@@ -432,21 +474,37 @@ mod tests {
     fn provider_switch_release_plan_covers_inactive_local_runtimes() {
         let qwen = local_asr_release_plan_for_provider(crate::asr::local::PROVIDER_ID);
         assert!(!qwen.qwen);
+        assert!(qwen.whisper);
         assert!(qwen.foundry);
         assert!(qwen.sherpa);
 
+        let qwen_c =
+            local_asr_release_plan_for_provider(crate::asr::local::LOCAL_QWEN3_C_PROVIDER_ID);
+        assert!(!qwen_c.qwen);
+        assert!(qwen_c.whisper);
+
+        let whisper =
+            local_asr_release_plan_for_provider(crate::asr::local::LOCAL_WHISPER_PROVIDER_ID);
+        assert!(whisper.qwen);
+        assert!(!whisper.whisper);
+        assert!(whisper.foundry);
+        assert!(whisper.sherpa);
+
         let foundry = local_asr_release_plan_for_provider(crate::asr::local::foundry::PROVIDER_ID);
         assert!(foundry.qwen);
+        assert!(foundry.whisper);
         assert!(!foundry.foundry);
         assert!(foundry.sherpa);
 
         let sherpa = local_asr_release_plan_for_provider(crate::asr::local::sherpa::PROVIDER_ID);
         assert!(sherpa.qwen);
+        assert!(sherpa.whisper);
         assert!(sherpa.foundry);
         assert!(!sherpa.sherpa);
 
         let cloud = local_asr_release_plan_for_provider("volcengine");
         assert!(cloud.qwen);
+        assert!(cloud.whisper);
         assert!(cloud.foundry);
         assert!(cloud.sherpa);
     }

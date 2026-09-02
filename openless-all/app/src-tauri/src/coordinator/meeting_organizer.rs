@@ -18,7 +18,9 @@ use crate::types::{
 use super::{complete_text_with_active_llm_with_timeout, Inner};
 
 pub(super) const MEETING_ORGANIZED_CHUNK_TARGET_CHARS: usize = 12_000;
+const MEETING_ORGANIZED_CHUNK_MAX_GROUPS: usize = 48;
 const MEETING_ORGANIZED_REQUEST_TIMEOUT_SECS: u64 = 180;
+const MEETING_ORGANIZED_FORMAT_ATTEMPTS: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MeetingOrganizedDraftMode {
@@ -60,7 +62,7 @@ struct OrganizedChunkResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OrganizedChunkResponseItem {
-    source_segment_ids: Vec<String>,
+    group_id: String,
     text: String,
 }
 
@@ -357,9 +359,32 @@ async fn organize_record(
     }
     let mut items = Vec::new();
     for (index, chunk) in chunks.iter().enumerate() {
-        let (system, user) = build_organized_draft_prompt(chunk, index + 1, chunks.len());
-        let raw = llm(system, user, prefs.clone()).await?;
-        items.extend(parse_organized_chunk_response(&raw, chunk)?);
+        let mut parsed_items = None;
+        for attempt in 0..MEETING_ORGANIZED_FORMAT_ATTEMPTS {
+            let (system, user) =
+                build_organized_draft_prompt(chunk, index + 1, chunks.len(), attempt > 0);
+            let raw = llm(system, user, prefs.clone()).await?;
+            match parse_organized_chunk_response(&raw, chunk) {
+                Ok(chunk_items) => {
+                    parsed_items = Some(chunk_items);
+                    break;
+                }
+                Err(error) if attempt + 1 < MEETING_ORGANIZED_FORMAT_ATTEMPTS => {
+                    log::warn!(
+                        "[meeting-organizer] chunk {}/{} response rejected, retrying format once: {}",
+                        index + 1,
+                        chunks.len(),
+                        error
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        items.extend(
+            parsed_items.ok_or_else(|| {
+                "meeting organizer format retry attempts were exhausted".to_string()
+            })?,
+        );
     }
     Ok(items)
 }
@@ -381,37 +406,18 @@ fn validate_source_segment_ids(segments: &[TranscriptSegment]) -> Result<(), Str
 }
 
 fn build_source_chunks(segments: &[TranscriptSegment]) -> Vec<SourceChunk> {
-    let mut groups = Vec::<SourceGroup>::new();
-    for segment in segments
+    let groups = segments
         .iter()
         .filter(|segment| !segment.text.trim().is_empty())
-    {
-        let text = segment.text.trim();
-        let same_speaker = groups.last().is_some_and(|group| {
-            group.speaker_id == segment.speaker_id && group.speaker_label == segment.speaker_label
-        });
-        let can_append = same_speaker
-            && groups.last().is_some_and(|group| {
-                group.text.chars().count() + text.chars().count() + 1
-                    <= MEETING_ORGANIZED_CHUNK_TARGET_CHARS
-            });
-        if can_append {
-            let group = groups.last_mut().expect("checked above");
-            group.source_segment_ids.push(segment.id.clone());
-            group.text.push('\n');
-            group.text.push_str(text);
-            group.end_ms = segment.end_ms;
-        } else {
-            groups.push(SourceGroup {
-                source_segment_ids: vec![segment.id.clone()],
-                speaker_id: segment.speaker_id.clone(),
-                speaker_label: segment.speaker_label.clone(),
-                start_ms: segment.start_ms,
-                end_ms: segment.end_ms,
-                text: text.to_string(),
-            });
-        }
-    }
+        .map(|segment| SourceGroup {
+            source_segment_ids: vec![segment.id.clone()],
+            speaker_id: segment.speaker_id.clone(),
+            speaker_label: segment.speaker_label.clone(),
+            start_ms: segment.start_ms,
+            end_ms: segment.end_ms,
+            text: segment.text.trim().to_string(),
+        })
+        .collect::<Vec<_>>();
 
     let mut chunks = Vec::new();
     let mut current = SourceChunk { groups: Vec::new() };
@@ -419,7 +425,8 @@ fn build_source_chunks(segments: &[TranscriptSegment]) -> Vec<SourceChunk> {
     for group in groups {
         let group_chars = group.text.chars().count();
         if !current.groups.is_empty()
-            && current_chars + group_chars > MEETING_ORGANIZED_CHUNK_TARGET_CHARS
+            && (current_chars + group_chars > MEETING_ORGANIZED_CHUNK_TARGET_CHARS
+                || current.groups.len() >= MEETING_ORGANIZED_CHUNK_MAX_GROUPS)
         {
             chunks.push(current);
             current = SourceChunk { groups: Vec::new() };
@@ -438,15 +445,17 @@ fn build_organized_draft_prompt(
     chunk: &SourceChunk,
     index: usize,
     total: usize,
+    format_retry: bool,
 ) -> (String, String) {
-    let system = "你是 OpenLess 的会议整理助手。你的任务是把 ASR 会议转写改写成保真、自然的书面表达。删除无意义填充词、口头重复、断裂句和无意义自我修正；修正标点、断句、语序，以及上下文足够明确的明显 ASR 错词。不得总结、翻译、补充信息或改变数字、专有名词、否定关系、观点归属和不确定语气。只输出 JSON，不输出 Markdown 或解释。".to_string();
+    let system = "你是 OpenLess 的会议整理助手。你的任务是把 ASR 会议转写逐段改写成保真、自然的书面表达。删除无意义填充词、口头重复、断裂句和无意义自我修正；修正标点、断句、语序，以及上下文足够明确的明显 ASR 错词。可以参考相邻段落理解上下文，但不得总结、翻译、补充信息，不得改变数字、专有名词、否定关系、观点归属和不确定语气，也不得在段落之间移动内容。每个输入 groupId 代表一个原文段落，必须且只能对应一个输出项，不得拆分、合并、遗漏或新增 groupId。只输出 JSON，不输出 Markdown 或解释。".to_string();
     let source = chunk
         .groups
         .iter()
-        .map(|group| {
+        .enumerate()
+        .map(|(group_index, group)| {
             format!(
-                "[sourceSegmentIds={}][speaker={}][startMs={}][endMs={}]\n{}",
-                group.source_segment_ids.join(","),
+                "[groupId=g{}][speaker={}][startMs={}][endMs={}]\n{}",
+                group_index + 1,
                 group.speaker_label,
                 group.start_ms,
                 group
@@ -458,8 +467,13 @@ fn build_organized_draft_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
+    let retry_instruction = if format_retry {
+        "\n\n上一次响应未通过格式校验。请特别检查：items 数量必须等于输入组数量；groupId 必须从 g1 开始按输入顺序逐项出现且只出现一次；每项 text 必须是非空字符串。"
+    } else {
+        ""
+    };
     let user = format!(
-        "这是会议转写的第 {index}/{total} 个分块。请逐组整理，保持输入组数量和顺序不变。每个输出项的 sourceSegmentIds 必须与对应输入完全一致，text 必须非空。\n\n输入：\n{source}\n\n只输出以下 JSON 结构：\n{{\"items\":[{{\"sourceSegmentIds\":[\"seg-1\"],\"text\":\"整理后的文本\"}}]}}"
+        "这是会议转写的第 {index}/{total} 个分块。请逐段整理，保持原文段落数量和顺序不变。每个输出项的 groupId 必须与对应输入完全一致，text 必须非空。{retry_instruction}\n\n输入：\n{source}\n\n只输出以下 JSON 结构：\n{{\"items\":[{{\"groupId\":\"g1\",\"text\":\"整理后的文本\"}}]}}"
     );
     (system, user)
 }
@@ -477,12 +491,11 @@ fn parse_organized_chunk_response(
     response
         .items
         .into_iter()
-        .zip(&chunk.groups)
-        .map(|(item, group)| {
-            if item.source_segment_ids != group.source_segment_ids {
-                return Err(
-                    "invalid organized draft mapping: source segment ids changed".to_string(),
-                );
+        .zip(chunk.groups.iter().enumerate())
+        .map(|(item, (group_index, group))| {
+            let expected_group_id = format!("g{}", group_index + 1);
+            if item.group_id != expected_group_id {
+                return Err("invalid organized draft mapping: group ids changed".to_string());
             }
             let text = item.text.trim().to_string();
             if text.is_empty() {
@@ -611,7 +624,9 @@ fn apply_organized_draft_failure(
 }
 
 fn organized_error_code(error: &str) -> &'static str {
-    if error.starts_with("invalid organized draft json") {
+    if error.contains("output truncated") {
+        "organizedOutputTruncated"
+    } else if error.starts_with("invalid organized draft json") {
         "organizedInvalidJson"
     } else if error.starts_with("invalid organized draft mapping") {
         "organizedInvalidMapping"
@@ -789,16 +804,19 @@ mod tests {
     }
 
     #[test]
-    fn chunks_merge_only_adjacent_segments_from_same_speaker() {
+    fn chunks_preserve_source_segments_from_same_speaker() {
         let chunks = build_source_chunks(&[
             segment("s1", "A", 0, "嗯，先开始"),
             segment("s2", "A", 600, "然后看发布计划"),
             segment("s3", "B", 1200, "我来确认测试"),
         ]);
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].groups.len(), 2);
-        assert_eq!(chunks[0].groups[0].source_segment_ids, ["s1", "s2"]);
-        assert_eq!(chunks[0].groups[1].source_segment_ids, ["s3"]);
+        assert_eq!(chunks[0].groups.len(), 3);
+        assert_eq!(chunks[0].groups[0].source_segment_ids, ["s1"]);
+        assert_eq!(chunks[0].groups[1].source_segment_ids, ["s2"]);
+        assert_eq!(chunks[0].groups[2].source_segment_ids, ["s3"]);
+        assert_eq!(chunks[0].groups[0].speaker_label, "A");
+        assert_eq!(chunks[0].groups[1].start_ms, 600);
     }
 
     #[test]
@@ -810,7 +828,7 @@ mod tests {
     fn parses_valid_mapping_and_copies_server_metadata() {
         let chunk = build_source_chunks(&[segment("s1", "A", 0, "嗯，先开始")]).remove(0);
         let items = parse_organized_chunk_response(
-            r#"{"items":[{"sourceSegmentIds":["s1"],"text":"先开始。"}]}"#,
+            r#"{"items":[{"groupId":"g1","text":"先开始。"}]}"#,
             &chunk,
         )
         .unwrap();
@@ -820,14 +838,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_changed_source_mapping() {
+    fn rejects_changed_group_mapping() {
         let chunk = build_source_chunks(&[segment("s1", "A", 0, "开始")]).remove(0);
         let error = parse_organized_chunk_response(
-            r#"{"items":[{"sourceSegmentIds":["forged"],"text":"开始。"}]}"#,
+            r#"{"items":[{"groupId":"g2","text":"开始。"}]}"#,
             &chunk,
         )
         .unwrap_err();
-        assert!(error.contains("source segment ids changed"));
+        assert!(error.contains("group ids changed"));
     }
 
     #[test]
@@ -837,11 +855,16 @@ mod tests {
             .unwrap_err()
             .starts_with("invalid organized draft json"));
         assert!(parse_organized_chunk_response(
-            r#"{"items":[{"sourceSegmentIds":["s1"],"text":""}]}"#,
+            r#"{"items":[{"groupId":"g1","text":""}]}"#,
             &chunk,
         )
         .unwrap_err()
         .contains("empty text"));
+        assert!(
+            parse_organized_chunk_response(r#"{"items":[{"groupId":"g1"}]}"#, &chunk,)
+                .unwrap_err()
+                .contains("missing field `text`")
+        );
     }
 
     #[test]
@@ -855,6 +878,88 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].groups[0].source_segment_ids, ["s1"]);
         assert_eq!(chunks[1].groups[0].source_segment_ids, ["s2"]);
+    }
+
+    #[test]
+    fn each_group_maps_to_exactly_one_source_segment() {
+        let segments = (0..65)
+            .map(|index| segment(&format!("s{index}"), "A", index * 500, "short"))
+            .collect::<Vec<_>>();
+        let chunks = build_source_chunks(&segments);
+        let groups = chunks
+            .iter()
+            .flat_map(|chunk| chunk.groups.iter())
+            .collect::<Vec<_>>();
+
+        assert_eq!(groups.len(), segments.len());
+        assert!(groups
+            .iter()
+            .all(|group| group.source_segment_ids.len() == 1));
+    }
+
+    #[test]
+    fn long_same_speaker_meeting_does_not_echo_uuid_segment_ids() {
+        let segments = (1..=604)
+            .map(|index| {
+                segment(
+                    &format!("post-2ec5e526-c0bc-4cc5-8e87-accb94b6dbe6-{index}"),
+                    "未区分",
+                    index * 500,
+                    "这是一段用于验证长会议分组边界的转写文本。",
+                )
+            })
+            .collect::<Vec<_>>();
+        let chunks = build_source_chunks(&segments);
+
+        assert!(chunks.len() >= 2);
+        assert_eq!(
+            chunks.iter().map(|chunk| chunk.groups.len()).sum::<usize>(),
+            segments.len()
+        );
+        assert!(chunks.iter().all(|chunk| {
+            chunk.groups.len() <= MEETING_ORGANIZED_CHUNK_MAX_GROUPS
+                && chunk
+                    .groups
+                    .iter()
+                    .all(|group| group.source_segment_ids.len() == 1)
+        }));
+        for (index, chunk) in chunks.iter().enumerate() {
+            let (_, user) = build_organized_draft_prompt(chunk, index + 1, chunks.len(), false);
+            assert!(!user.contains("post-2ec5e526"));
+        }
+    }
+
+    #[test]
+    fn caps_chunk_group_count() {
+        let segments = (0..49)
+            .map(|index| {
+                segment(
+                    &format!("s{index}"),
+                    if index % 2 == 0 { "A" } else { "B" },
+                    index * 500,
+                    "short",
+                )
+            })
+            .collect::<Vec<_>>();
+        let chunks = build_source_chunks(&segments);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].groups.len(), MEETING_ORGANIZED_CHUNK_MAX_GROUPS);
+        assert_eq!(chunks[1].groups.len(), 1);
+    }
+
+    #[test]
+    fn prompt_uses_short_group_ids_without_source_segment_ids() {
+        let chunk = build_source_chunks(&[
+            segment("long-source-segment-id-1", "A", 0, "first"),
+            segment("long-source-segment-id-2", "B", 500, "second"),
+        ])
+        .remove(0);
+        let (_, user) = build_organized_draft_prompt(&chunk, 1, 1, false);
+
+        assert!(user.contains("groupId=g1"));
+        assert!(user.contains("groupId=g2"));
+        assert!(!user.contains("long-source-segment-id"));
     }
 
     #[test]
@@ -887,7 +992,7 @@ mod tests {
             let call = calls_for_llm.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 if call == 0 {
-                    Ok(r#"{"items":[{"sourceSegmentIds":["s1"],"text":"first"}]}"#.to_string())
+                    Ok(r#"{"items":[{"groupId":"g1","text":"first"}]}"#.to_string())
                 } else {
                     Err("second chunk failed".to_string())
                 }
@@ -898,6 +1003,32 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(result, Err("second chunk failed".to_string()));
+    }
+
+    #[tokio::test]
+    async fn retries_one_invalid_format_response() {
+        let record = record_with_segments(vec![segment("s1", "A", 0, "first")]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_llm = Arc::clone(&calls);
+        let llm = move |_system: String, user: String, _prefs: UserPreferences| {
+            let call = calls_for_llm.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if call == 0 {
+                    Ok(r#"{"items":[]}"#.to_string())
+                } else {
+                    assert!(user.contains("上一次响应未通过格式校验"));
+                    Ok(r#"{"items":[{"groupId":"g1","text":"first"}]}"#.to_string())
+                }
+            }) as Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+        };
+
+        let result = organize_record(&record, &UserPreferences::default(), &llm)
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result[0].source_segment_ids, ["s1"]);
+        assert_eq!(result[0].text, "first");
     }
 
     #[test]
