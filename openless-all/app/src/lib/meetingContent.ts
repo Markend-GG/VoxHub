@@ -102,7 +102,8 @@ export function organizedDraftView(record: MeetingRecord): OrganizedDraftView {
   const draft = record.organizedDraft ?? null;
   const task = record.organizedDraftState ?? null;
   const stale = Boolean(
-    draft && draft.sourceTranscriptRevision !== (record.activeTranscriptRevision ?? null),
+    draft
+      && (draft.sourceTranscriptRevision ?? null) !== (record.activeTranscriptRevision ?? null),
   );
   const transcriptFinal = ![
     'draft',

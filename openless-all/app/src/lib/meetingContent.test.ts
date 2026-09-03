@@ -160,6 +160,14 @@ assertDeepEqual(organizedDraftView(record({
   },
 })), { state: 'completed', hasDraft: true, stale: false }, 'matching draft revision is completed');
 assertDeepEqual(organizedDraftView(record({
+  organizedDraft: {
+    providerId: 'provider',
+    modelId: 'model',
+    items: [],
+    generatedAt: '2026-08-25T09:00:00Z',
+  },
+})), { state: 'completed', hasDraft: true, stale: false }, 'missing revisions on both sides are not stale');
+assertDeepEqual(organizedDraftView(record({
   activeTranscriptRevision: 2,
   organizedDraft: {
     sourceTranscriptRevision: 1,

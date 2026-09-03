@@ -2005,6 +2005,15 @@ pub(crate) fn extract_assistant_content(body: &str) -> Result<String, LLMError> 
     let first = choices
         .first()
         .ok_or_else(|| LLMError::ParseError("choices array is empty".into()))?;
+    if first
+        .get("finish_reason")
+        .and_then(|value| value.as_str())
+        .is_some_and(|reason| matches!(reason, "length" | "max_tokens"))
+    {
+        return Err(LLMError::ParseError(
+            "llm output truncated before completion".into(),
+        ));
+    }
     let content = first
         .get("message")
         .and_then(|m| m.get("content"))
@@ -2403,6 +2412,26 @@ mod tests {
 
         assert_eq!(openai.request_timeout_secs, 180);
         assert_eq!(codex.request_timeout_secs, 180);
+    }
+
+    #[test]
+    fn assistant_content_rejects_length_truncation() {
+        let error = extract_assistant_content(
+            r#"{"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("output truncated"));
+    }
+
+    #[test]
+    fn assistant_content_accepts_completed_response() {
+        let content = extract_assistant_content(
+            r#"{"choices":[{"finish_reason":"stop","message":{"content":"complete"}}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(content, "complete");
     }
 
     #[test]
