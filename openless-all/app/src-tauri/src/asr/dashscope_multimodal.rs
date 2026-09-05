@@ -15,8 +15,11 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use parking_lot::Mutex;
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::asr::meeting_audio_source::MeetingAudioSource;
 use crate::asr::mimo::{join_transcript_chunks, split_pcm_by_duration};
 use crate::asr::wav::encode_wav_16k_mono;
 use crate::asr::RawTranscript;
@@ -41,6 +44,52 @@ pub const QWEN_AUDIO_MODEL: &str = "qwen-audio-3.0-asr-flash";
 pub enum DashScopeBatchProtocol {
     Multimodal,
     AsyncTranscription,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DashScopeAsyncRequestOptions {
+    pub diarization_enabled: bool,
+    pub speaker_count: Option<u32>,
+}
+
+impl DashScopeAsyncRequestOptions {
+    pub fn validate(self) -> Result<Self> {
+        if !self.diarization_enabled && self.speaker_count.is_some() {
+            anyhow::bail!("speaker_count requires diarization_enabled=true");
+        }
+        if self
+            .speaker_count
+            .is_some_and(|count| !(2..=100).contains(&count))
+        {
+            anyhow::bail!("speaker_count must be between 2 and 100");
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashScopeAsyncSentence {
+    pub begin_time_ms: u64,
+    pub end_time_ms: u64,
+    pub text: String,
+    pub sentence_id: Option<String>,
+    pub speaker_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashScopeAsyncTranscript {
+    pub sentences: Vec<DashScopeAsyncSentence>,
+}
+
+#[derive(Debug, Clone)]
+struct DashScopeUploadPolicy {
+    upload_dir: String,
+    upload_host: String,
+    oss_access_key_id: String,
+    policy: String,
+    signature: String,
+    object_acl: String,
+    forbid_overwrite: String,
 }
 
 fn is_realtime_model(model: &str) -> bool {
@@ -73,9 +122,7 @@ pub fn protocol_for_model(model: &str) -> Option<DashScopeBatchProtocol> {
     if is_qwen_filetrans_model(model) {
         return None;
     }
-    if model.starts_with("fun-asr-flash")
-        || is_qwen_sync_model(model)
-        || is_qwen_audio_model(model)
+    if model.starts_with("fun-asr-flash") || is_qwen_sync_model(model) || is_qwen_audio_model(model)
     {
         return Some(DashScopeBatchProtocol::Multimodal);
     }
@@ -110,9 +157,7 @@ impl DashScopeMultimodalASR {
         if protocol_for_model(&self.model) == Some(DashScopeBatchProtocol::AsyncTranscription) {
             let pcm_bytes = (audio_secs.max(0.0) * 32_000.0).ceil() as u64;
             return async_upload_timeout(pcm_bytes.saturating_add(44))
-                + Duration::from_secs(
-                    ASYNC_TASK_POLL_TIMEOUT_SECS + ASYNC_WORKFLOW_OVERHEAD_SECS,
-                );
+                + Duration::from_secs(ASYNC_TASK_POLL_TIMEOUT_SECS + ASYNC_WORKFLOW_OVERHEAD_SECS);
         }
         let secs = ((audio_secs * 0.5).ceil() as u64)
             .saturating_add(20)
@@ -171,7 +216,8 @@ impl DashScopeMultimodalASR {
         let wav = encode_wav_16k_mono(&samples);
         let body = dashscope_multimodal_body(&self.model, &wav);
         let url = generation_url(&self.base_url)?;
-        let request_timeout = self.transcribe_timeout(crate::asr::pcm::pcm_duration_ms(pcm) as f64 / 1000.0);
+        let request_timeout =
+            self.transcribe_timeout(crate::asr::pcm::pcm_duration_ms(pcm) as f64 / 1000.0);
         let resp = crate::net::credential_http()
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key.trim()))
@@ -200,6 +246,42 @@ impl DashScopeMultimodalASR {
     }
 
     async fn upload_temporary_wav(&self, wav: &[u8]) -> Result<String> {
+        let policy = self.request_upload_policy().await?;
+        let object_key = format!("{}/audio.wav", policy.upload_dir.trim_end_matches('/'));
+        let form = upload_form(
+            &policy,
+            &object_key,
+            reqwest::multipart::Part::bytes(wav.to_vec())
+                .file_name("audio.wav")
+                .mime_str("audio/wav")?,
+        );
+        self.upload_form(form, &policy.upload_host, wav.len() as u64)
+            .await?;
+        Ok(format!("oss://{object_key}"))
+    }
+
+    pub async fn upload_meeting_audio(
+        &self,
+        source: MeetingAudioSource,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<String> {
+        if cancelled.load(Ordering::Acquire) {
+            anyhow::bail!("meeting audio upload cancelled");
+        }
+        let policy = self.request_upload_policy().await?;
+        let object_key = format!("{}/audio.wav", policy.upload_dir.trim_end_matches('/'));
+        let (info, stream) = source.into_stream(cancelled)?;
+        let body = reqwest::Body::wrap_stream(stream);
+        let part = reqwest::multipart::Part::stream_with_length(body, info.content_length)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")?;
+        let form = upload_form(&policy, &object_key, part);
+        self.upload_form(form, &policy.upload_host, info.content_length)
+            .await?;
+        Ok(format!("oss://{object_key}"))
+    }
+
+    async fn request_upload_policy(&self) -> Result<DashScopeUploadPolicy> {
         let mut policy_url = api_url(&self.base_url, "/api/v1/uploads")?;
         policy_url
             .query_pairs_mut()
@@ -226,31 +308,33 @@ impl DashScopeMultimodalASR {
                 .with_context(|| format!("DashScope upload policy missing {name}"))
         };
         let upload_dir = field("upload_dir")?;
-        let object_key = format!("{}/audio.wav", upload_dir.trim_end_matches('/'));
-        let form = reqwest::multipart::Form::new()
-            .text("OSSAccessKeyId", field("oss_access_key_id")?)
-            .text("policy", field("policy")?)
-            .text("Signature", field("signature")?)
-            .text("key", object_key.clone())
-            .text("x-oss-object-acl", field("x_oss_object_acl")?)
-            .text("x-oss-forbid-overwrite", field("x_oss_forbid_overwrite")?)
-            .text("success_action_status", "200")
-            .part(
-                "file",
-                reqwest::multipart::Part::bytes(wav.to_vec())
-                    .file_name("audio.wav")
-                    .mime_str("audio/wav")?,
-            );
-        let upload_url = dashscope_transfer_url(&field("upload_host")?)?;
+        Ok(DashScopeUploadPolicy {
+            upload_dir,
+            upload_host: field("upload_host")?,
+            oss_access_key_id: field("oss_access_key_id")?,
+            policy: field("policy")?,
+            signature: field("signature")?,
+            object_acl: field("x_oss_object_acl")?,
+            forbid_overwrite: field("x_oss_forbid_overwrite")?,
+        })
+    }
+
+    async fn upload_form(
+        &self,
+        form: reqwest::multipart::Form,
+        upload_host: &str,
+        audio_bytes: u64,
+    ) -> Result<()> {
+        let upload_url = dashscope_transfer_url(upload_host)?;
         let upload = crate::net::anonymous_no_redirect_http()
             .post(upload_url)
             .multipart(form)
-            .timeout(async_upload_timeout(wav.len() as u64))
+            .timeout(async_upload_timeout(audio_bytes))
             .send()
             .await
             .context("upload audio to DashScope temporary storage")?;
         ensure_success(upload, "DashScope temporary upload").await?;
-        Ok(format!("oss://{object_key}"))
+        Ok(())
     }
 
     pub async fn transcribe_async_url(&self, file_url: &str) -> Result<String> {
@@ -269,6 +353,32 @@ impl DashScopeMultimodalASR {
         file_url: &str,
         poll_timeout: Duration,
     ) -> Result<String> {
+        let task_id = self
+            .submit_async_task(
+                file_url,
+                DashScopeAsyncRequestOptions {
+                    diarization_enabled: false,
+                    speaker_count: None,
+                },
+            )
+            .await?;
+        let transcript = self
+            .poll_async_task(&task_id, poll_timeout, Arc::new(AtomicBool::new(false)))
+            .await?;
+        Ok(transcript
+            .sentences
+            .iter()
+            .map(|sentence| sentence.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+
+    pub async fn submit_async_task(
+        &self,
+        file_url: &str,
+        options: DashScopeAsyncRequestOptions,
+    ) -> Result<String> {
+        let options = options.validate()?;
         let submit_url = async_transcription_url(&self.base_url)?;
         let response = crate::net::credential_http()
             .post(submit_url)
@@ -276,21 +386,40 @@ impl DashScopeMultimodalASR {
             .header("Content-Type", "application/json")
             .header("X-DashScope-Async", "enable")
             .header("X-DashScope-OssResourceResolve", "enable")
-            .json(&async_transcription_body(&self.model, file_url))
+            .json(&async_transcription_body_with_options(
+                &self.model,
+                file_url,
+                options,
+            ))
             .timeout(Duration::from_secs(30))
             .send()
             .await
             .context("submit DashScope async ASR task")?;
         let submitted = response_json(response, "DashScope async ASR submission").await?;
-        let task_id = submitted
+        submitted
             .pointer("/output/task_id")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|id| !id.is_empty())
-            .context("DashScope async ASR response missing task_id")?;
+            .map(ToOwned::to_owned)
+            .context("DashScope async ASR response missing task_id")
+    }
+
+    pub async fn poll_async_task(
+        &self,
+        task_id: &str,
+        poll_timeout: Duration,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<DashScopeAsyncTranscript> {
+        if task_id.trim().is_empty() {
+            anyhow::bail!("DashScope async ASR task_id is empty");
+        }
         let task_url = api_url(&self.base_url, &format!("/api/v1/tasks/{task_id}"))?;
         let deadline = Instant::now() + poll_timeout;
         let completed = loop {
+            if cancelled.load(Ordering::Acquire) {
+                anyhow::bail!("DashScope async ASR task polling cancelled");
+            }
             // 轮询窗口最长可达 600s、每秒一次：对瞬态网络失败做有界重试，
             // 避免 10 分钟内单次连接抖动/5xx 直接废弃整段转写。
             let task = get_json_with_retry(
@@ -321,8 +450,27 @@ impl DashScopeMultimodalASR {
                 _ => tokio::time::sleep(Duration::from_secs(1)).await,
             }
         };
+        if cancelled.load(Ordering::Acquire) {
+            anyhow::bail!("DashScope async ASR task polling cancelled");
+        }
         let result = download_async_result(&extract_async_result_url(&completed)?).await?;
-        extract_async_transcript_text(&result)
+        extract_async_transcript_for_model(&self.model, &result)
+    }
+
+    pub async fn cancel_async_task(&self, task_id: &str) -> Result<()> {
+        let task_id = task_id.trim();
+        if task_id.is_empty() {
+            anyhow::bail!("DashScope async ASR task_id is empty");
+        }
+        let cancel_url = api_url(&self.base_url, &format!("/api/v1/tasks/{task_id}/cancel"))?;
+        let response = crate::net::credential_http()
+            .post(cancel_url)
+            .header("Authorization", format!("Bearer {}", self.api_key.trim()))
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .context("cancel DashScope async ASR task")?;
+        ensure_success(response, "DashScope async ASR cancellation").await
     }
 
     pub fn cancel(&self) {
@@ -371,10 +519,25 @@ fn dashscope_transfer_url(raw: &str) -> Result<reqwest::Url> {
 }
 
 fn async_upload_timeout(bytes: u64) -> Duration {
-    let transfer_secs = bytes
-        .saturating_add(ASYNC_UPLOAD_BYTES_PER_SEC - 1)
-        / ASYNC_UPLOAD_BYTES_PER_SEC;
+    let transfer_secs =
+        bytes.saturating_add(ASYNC_UPLOAD_BYTES_PER_SEC - 1) / ASYNC_UPLOAD_BYTES_PER_SEC;
     Duration::from_secs(transfer_secs.saturating_add(30).max(60))
+}
+
+fn upload_form(
+    policy: &DashScopeUploadPolicy,
+    object_key: &str,
+    file: reqwest::multipart::Part,
+) -> reqwest::multipart::Form {
+    reqwest::multipart::Form::new()
+        .text("OSSAccessKeyId", policy.oss_access_key_id.clone())
+        .text("policy", policy.policy.clone())
+        .text("Signature", policy.signature.clone())
+        .text("key", object_key.to_string())
+        .text("x-oss-object-acl", policy.object_acl.clone())
+        .text("x-oss-forbid-overwrite", policy.forbid_overwrite.clone())
+        .text("success_action_status", "200")
+        .part("file", file)
 }
 
 async fn download_async_result(raw_url: &str) -> Result<Value> {
@@ -425,8 +588,8 @@ async fn get_json_with_retry(
             Ok(response) => {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                let transient = status.is_server_error()
-                    || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                let transient =
+                    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
                 if !transient || attempts >= ASYNC_HTTP_RETRY_ATTEMPTS || Instant::now() >= deadline
                 {
                     anyhow::bail!("{operation} error {status}: {body}");
@@ -542,11 +705,23 @@ pub fn dashscope_multimodal_body_from_uri(model: &str, audio_uri: &str) -> Value
     })
 }
 
-pub fn async_transcription_body(model: &str, file_url: &str) -> Value {
+pub fn async_transcription_body_with_options(
+    model: &str,
+    file_url: &str,
+    options: DashScopeAsyncRequestOptions,
+) -> Value {
+    let mut parameters = serde_json::Map::new();
+    parameters.insert(
+        "diarization_enabled".to_string(),
+        Value::Bool(options.diarization_enabled),
+    );
+    if let Some(speaker_count) = options.speaker_count {
+        parameters.insert("speaker_count".to_string(), Value::from(speaker_count));
+    }
     serde_json::json!({
         "model": model,
         "input": { "file_urls": [file_url] },
-        "parameters": {},
+        "parameters": parameters,
     })
 }
 
@@ -560,43 +735,122 @@ pub fn extract_async_result_url(json: &Value) -> Result<String> {
         .context("DashScope async ASR response missing transcription_url")
 }
 
-pub fn extract_async_transcript_text(json: &Value) -> Result<String> {
+pub fn extract_async_transcript_for_model(
+    model: &str,
+    json: &Value,
+) -> Result<DashScopeAsyncTranscript> {
+    match model.trim() {
+        "fun-asr" => extract_fun_asr_transcript(json),
+        "paraformer-v2" => extract_paraformer_v2_transcript(json),
+        other if protocol_for_model(other) == Some(DashScopeBatchProtocol::AsyncTranscription) => {
+            extract_async_transcript(json)
+        }
+        other => anyhow::bail!("unsupported structured DashScope ASR model: {other}"),
+    }
+}
+
+fn extract_fun_asr_transcript(json: &Value) -> Result<DashScopeAsyncTranscript> {
+    extract_async_transcript(json).context("parse fun-asr transcription result")
+}
+
+fn extract_paraformer_v2_transcript(json: &Value) -> Result<DashScopeAsyncTranscript> {
+    extract_async_transcript(json).context("parse paraformer-v2 transcription result")
+}
+
+pub fn extract_async_transcript(json: &Value) -> Result<DashScopeAsyncTranscript> {
     let transcripts = json
         .get("transcripts")
         .context("DashScope async ASR result missing transcripts")?
         .as_array()
         .context("DashScope async ASR transcripts must be an array")?;
-    let mut texts = Vec::new();
+    let mut parsed = Vec::new();
     for transcript in transcripts {
-        if let Some(value) = transcript.get("text") {
-            let text = value
-                .as_str()
-                .context("DashScope async ASR transcript text must be a string")?
-                .trim();
-            if !text.is_empty() {
-                texts.push(text.to_string());
+        if let Some(sentences) = transcript.get("sentences") {
+            let sentences = sentences
+                .as_array()
+                .context("DashScope async ASR sentences must be an array")?;
+            for sentence in sentences {
+                let text = required_trimmed_string(sentence, "text")?;
+                let begin_time_ms = required_u64(sentence, "begin_time")?;
+                let end_time_ms = required_u64(sentence, "end_time")?;
+                if end_time_ms < begin_time_ms {
+                    anyhow::bail!("DashScope ASR sentence has invalid time range");
+                }
+                parsed.push(DashScopeAsyncSentence {
+                    begin_time_ms,
+                    end_time_ms,
+                    text,
+                    sentence_id: optional_scalar_string(sentence.get("sentence_id"))?,
+                    speaker_id: optional_scalar_string(sentence.get("speaker_id"))?,
+                });
             }
             continue;
         }
-        let sentences = transcript
-            .get("sentences")
-            .context("DashScope async ASR transcript missing text or sentences")?
-            .as_array()
-            .context("DashScope async ASR sentences must be an array")?;
-        for sentence in sentences {
-            let text = sentence
-                .get("text")
-                .and_then(Value::as_str)
-                .context("DashScope async ASR sentence missing text")?
+        if let Some(text) = transcript.get("text") {
+            let text = text
+                .as_str()
+                .context("DashScope async ASR transcript text must be a string")?
                 .trim();
-            if !text.is_empty() {
-                texts.push(text.to_string());
+            if text.is_empty() {
+                continue;
             }
+            let duration = transcript
+                .get("content_duration_in_milliseconds")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            parsed.push(DashScopeAsyncSentence {
+                begin_time_ms: 0,
+                end_time_ms: duration,
+                text: text.to_string(),
+                sentence_id: None,
+                speaker_id: None,
+            });
+            continue;
         }
+        anyhow::bail!("DashScope async ASR transcript missing text or sentences");
     }
-    // 段间用空格分隔：中文识别结果几乎不含空格，连成整句无感知；而拉丁语言
-    // （英文等）的词汇若直接拼接会粘在一起，空格分隔对两种场景都更安全。
-    Ok(texts.join(" "))
+    if parsed.is_empty() {
+        anyhow::bail!("DashScope async ASR result contains no transcript text");
+    }
+    parsed.sort_by_key(|sentence| sentence.begin_time_ms);
+    Ok(DashScopeAsyncTranscript { sentences: parsed })
+}
+
+fn required_trimmed_string(value: &Value, field: &str) -> Result<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("DashScope async ASR sentence missing {field}"))
+}
+
+fn required_u64(value: &Value, field: &str) -> Result<u64> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .with_context(|| format!("DashScope async ASR sentence missing {field}"))
+}
+
+fn optional_scalar_string(value: Option<&Value>) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Some(value) = value.as_str() {
+        let value = value.trim();
+        return Ok((!value.is_empty()).then(|| value.to_string()));
+    }
+    if let Some(value) = value.as_u64() {
+        return Ok(Some(value.to_string()));
+    }
+    if let Some(value) = value.as_i64() {
+        return Ok(Some(value.to_string()));
+    }
+    anyhow::bail!("DashScope async ASR scalar identifier has invalid type")
 }
 
 /// fun-asr-flash 的响应信封与标准多模态接口不同，且不同模型版本字段路径略有
@@ -766,10 +1020,38 @@ mod tests {
 
     #[test]
     fn async_body_uses_file_urls_input_shape() {
-        let funasr = async_transcription_body("fun-asr", "oss://bucket/test.wav");
+        let funasr = async_transcription_body_with_options(
+            "fun-asr",
+            "oss://bucket/test.wav",
+            DashScopeAsyncRequestOptions {
+                diarization_enabled: false,
+                speaker_count: None,
+            },
+        );
         assert_eq!(funasr["input"]["file_urls"][0], "oss://bucket/test.wav");
         assert!(funasr["input"].get("file_url").is_none());
-        assert_eq!(funasr["parameters"], serde_json::json!({}));
+        assert_eq!(funasr["parameters"]["diarization_enabled"], false);
+        assert!(funasr["parameters"].get("speaker_count").is_none());
+    }
+
+    #[test]
+    fn async_body_enables_diarization_and_valid_speaker_hint() {
+        let body = async_transcription_body_with_options(
+            "paraformer-v2",
+            "oss://bucket/test.wav",
+            DashScopeAsyncRequestOptions {
+                diarization_enabled: true,
+                speaker_count: Some(4),
+            },
+        );
+        assert_eq!(body["parameters"]["diarization_enabled"], true);
+        assert_eq!(body["parameters"]["speaker_count"], 4);
+        assert!(DashScopeAsyncRequestOptions {
+            diarization_enabled: true,
+            speaker_count: Some(1),
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]
@@ -787,22 +1069,73 @@ mod tests {
     }
 
     #[test]
-    fn extracts_text_from_async_result_documents() {
+    fn extracts_structured_text_from_async_result_documents() {
         let funasr = serde_json::json!({
-            "transcripts": [{"sentences": [{"text": "第一句"}, {"text": "第二句"}]}]
+            "transcripts": [{"sentences": [
+                {"begin_time": 0, "end_time": 500, "text": "第一句"},
+                {"begin_time": 500, "end_time": 1000, "text": "第二句"}
+            ]}]
         });
-        assert_eq!(extract_async_transcript_text(&funasr).unwrap(), "第一句 第二句");
+        let parsed = extract_async_transcript(&funasr).unwrap();
+        assert_eq!(
+            parsed
+                .sentences
+                .iter()
+                .map(|sentence| sentence.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            "第一句 第二句"
+        );
 
         let qwen = serde_json::json!({
             "transcripts": [{"text": "Qwen 转写结果"}]
         });
-        assert_eq!(extract_async_transcript_text(&qwen).unwrap(), "Qwen 转写结果");
+        assert_eq!(
+            extract_async_transcript(&qwen).unwrap().sentences[0].text,
+            "Qwen 转写结果"
+        );
+    }
+
+    #[test]
+    fn model_specific_parsers_keep_timestamps_and_speaker_ids() {
+        let result = serde_json::json!({
+            "transcripts": [{"sentences": [{
+                "begin_time": 100,
+                "end_time": 900,
+                "text": "第一句",
+                "sentence_id": 1,
+                "speaker_id": 0
+            }, {
+                "begin_time": 900,
+                "end_time": 1700,
+                "text": "第二句",
+                "sentence_id": "2",
+                "speaker_id": "1"
+            }]}]
+        });
+        for model in ["fun-asr", "paraformer-v2"] {
+            let parsed = extract_async_transcript_for_model(model, &result).unwrap();
+            assert_eq!(parsed.sentences.len(), 2);
+            assert_eq!(parsed.sentences[0].begin_time_ms, 100);
+            assert_eq!(parsed.sentences[0].speaker_id.as_deref(), Some("0"));
+            assert_eq!(parsed.sentences[1].sentence_id.as_deref(), Some("2"));
+        }
+    }
+
+    #[test]
+    fn model_specific_parsers_reject_missing_sentence_timestamps() {
+        let result = serde_json::json!({
+            "transcripts": [{"sentences": [{"text": "没有时间戳"}]}]
+        });
+        for model in ["fun-asr", "paraformer-v2"] {
+            assert!(extract_async_transcript_for_model(model, &result).is_err());
+        }
     }
 
     #[test]
     fn rejects_malformed_async_result_documents() {
-        assert!(extract_async_transcript_text(&serde_json::json!({})).is_err());
-        assert!(extract_async_transcript_text(&serde_json::json!({
+        assert!(extract_async_transcript(&serde_json::json!({})).is_err());
+        assert!(extract_async_transcript(&serde_json::json!({
             "transcripts": [{"unexpected": "shape"}]
         }))
         .is_err());
@@ -810,10 +1143,9 @@ mod tests {
 
     #[test]
     fn validates_dashscope_transfer_urls() {
-        let upgraded = dashscope_transfer_url(
-            "http://dashscope-file.oss-cn-beijing.aliyuncs.com/result.json",
-        )
-        .unwrap();
+        let upgraded =
+            dashscope_transfer_url("http://dashscope-file.oss-cn-beijing.aliyuncs.com/result.json")
+                .unwrap();
         assert_eq!(upgraded.scheme(), "https");
         assert!(dashscope_transfer_url("http://169.254.169.254/latest/meta-data").is_err());
         assert!(dashscope_transfer_url("https://aliyuncs.com.evil.example/result.json").is_err());
@@ -858,6 +1190,58 @@ mod tests {
         .unwrap();
         assert_eq!(value["ok"], true);
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn polling_exhausts_transient_http_retries_with_clear_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_hits = Arc::clone(&hits);
+        let server = tokio::spawn(async move {
+            for _ in 0..=ASYNC_HTTP_RETRY_ATTEMPTS {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 2048];
+                let read = stream.read(&mut request).await.unwrap();
+                assert!(String::from_utf8_lossy(&request[..read])
+                    .starts_with("GET /api/v1/tasks/task-retry-exhausted HTTP/1.1"));
+                server_hits.fetch_add(1, Ordering::SeqCst);
+                let body = "retry exhausted";
+                let response = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let asr = DashScopeMultimodalASR::new(
+            "sk-test".to_string(),
+            format!("http://{addr}/api/v1/services/audio/asr/transcription"),
+            "fun-asr".to_string(),
+        );
+        let error = asr
+            .poll_async_task(
+                "task-retry-exhausted",
+                Duration::from_secs(15),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("poll DashScope async ASR task error 503"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            (ASYNC_HTTP_RETRY_ATTEMPTS + 1) as usize
+        );
         server.await.unwrap();
     }
 
@@ -1012,7 +1396,7 @@ mod tests {
                         assert!(request_text.starts_with("GET /result.json HTTP/1.1"));
                         write_json_response(
                             &mut stream,
-                            r#"{"transcripts":[{"sentences":[{"text":"异步"},{"text":"转写"}]}]}"#,
+                            r#"{"transcripts":[{"sentences":[{"begin_time":0,"end_time":500,"sentence_id":1,"text":"异步"},{"begin_time":500,"end_time":1000,"sentence_id":2,"text":"转写"}]}]}"#,
                         );
                     }
                     _ => unreachable!(),
@@ -1029,6 +1413,234 @@ mod tests {
         let transcript = asr.transcribe().await.unwrap();
         assert_eq!(transcript.text, "异步 转写");
         assert_eq!(transcript.duration_ms, 1_000);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn streams_segmented_meeting_wav_into_one_multipart_file() {
+        let dir = std::env::temp_dir().join(format!("dashscope-meeting-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("part-0001.wav"),
+            crate::asr::wav::encode_wav_16k_mono(&[1, 2]),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("part-0002.wav"),
+            crate::asr::wav::encode_wav_16k_mono(&[3, 4]),
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for step in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                let request_text = String::from_utf8_lossy(&request);
+                match step {
+                    0 => {
+                        assert!(request_text.starts_with(
+                            "GET /api/v1/uploads?action=getPolicy&model=fun-asr HTTP/1.1"
+                        ));
+                        write_json_response(
+                            &mut stream,
+                            &format!(
+                                r#"{{"data":{{"policy":"policy","signature":"signature","upload_dir":"dashscope-instant/meeting","upload_host":"http://{addr}","oss_access_key_id":"key-id","x_oss_object_acl":"private","x_oss_forbid_overwrite":"true"}}}}"#
+                            ),
+                        );
+                    }
+                    1 => {
+                        assert!(request_text.starts_with("POST / HTTP/1.1"));
+                        assert!(request_text
+                            .to_ascii_lowercase()
+                            .contains("content-type: multipart/form-data"));
+                        let riff_positions = request
+                            .windows(4)
+                            .enumerate()
+                            .filter_map(|(index, window)| (window == b"RIFF").then_some(index))
+                            .collect::<Vec<_>>();
+                        assert_eq!(riff_positions.len(), 1);
+                        let expected = crate::asr::wav::encode_wav_16k_mono(&[1, 2, 3, 4]);
+                        let start = riff_positions[0];
+                        assert_eq!(&request[start..start + expected.len()], expected.as_slice());
+                        write_json_response(&mut stream, "{}");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+
+        let asr = DashScopeMultimodalASR::new(
+            "sk-test".to_string(),
+            format!("http://{addr}/api/v1/services/audio/asr/transcription"),
+            "fun-asr".to_string(),
+        );
+        let source = MeetingAudioSource::from_path(&dir).unwrap();
+        let file_url = asr
+            .upload_meeting_audio(source, Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap();
+
+        assert_eq!(file_url, "oss://dashscope-instant/meeting/audio.wav");
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn meeting_upload_connection_drop_returns_error_without_deleting_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "dashscope-meeting-upload-drop-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let part_path = dir.join("part-0001.wav");
+        std::fs::write(
+            &part_path,
+            crate::asr::wav::encode_wav_16k_mono(&[1, 2, 3, 4]),
+        )
+        .unwrap();
+        let source_before = std::fs::read(&part_path).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let upload_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_attempts = Arc::clone(&upload_attempts);
+        let server = thread::spawn(move || {
+            let (mut policy_stream, _) = listener.accept().unwrap();
+            policy_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let policy_request = read_http_request(&mut policy_stream);
+            assert!(String::from_utf8_lossy(&policy_request).starts_with(
+                "GET /api/v1/uploads?action=getPolicy&model=fun-asr HTTP/1.1"
+            ));
+            write_json_response(
+                &mut policy_stream,
+                &format!(
+                    r#"{{"data":{{"policy":"policy","signature":"signature","upload_dir":"dashscope-instant/drop","upload_host":"http://{addr}","oss_access_key_id":"key-id","x_oss_object_acl":"private","x_oss_forbid_overwrite":"true"}}}}"#
+                ),
+            );
+
+            let (mut upload_stream, _) = listener.accept().unwrap();
+            upload_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let upload_request = read_http_request(&mut upload_stream);
+            assert!(String::from_utf8_lossy(&upload_request).starts_with("POST / HTTP/1.1"));
+            server_attempts.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let asr = DashScopeMultimodalASR::new(
+            "sk-test".to_string(),
+            format!("http://{addr}/api/v1/services/audio/asr/transcription"),
+            "fun-asr".to_string(),
+        );
+        let source = MeetingAudioSource::from_path(&dir).unwrap();
+        let error = asr
+            .upload_meeting_audio(source, Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("DashScope temporary upload"),
+            "unexpected error: {error}"
+        );
+        server.join().unwrap();
+        assert_eq!(upload_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&part_path).unwrap(), source_before);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn async_submission_connection_drop_is_not_retried() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let submit_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_attempts = Arc::clone(&submit_attempts);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with(
+                "POST /api/v1/services/audio/asr/transcription HTTP/1.1"
+            ));
+            assert!(request_text.contains(r#""file_urls":["oss://bucket/meeting.wav"]"#));
+            server_attempts.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((retry_stream, _)) => {
+                        server_attempts.fetch_add(1, Ordering::SeqCst);
+                        drop(retry_stream);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept retry request failed: {error}"),
+                }
+            }
+        });
+
+        let asr = DashScopeMultimodalASR::new(
+            "sk-test".to_string(),
+            format!("http://{addr}/api/v1/services/audio/asr/transcription"),
+            "fun-asr".to_string(),
+        );
+        let error = asr
+            .submit_async_task(
+                "oss://bucket/meeting.wav",
+                DashScopeAsyncRequestOptions {
+                    diarization_enabled: false,
+                    speaker_count: None,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("DashScope async ASR submission"),
+            "unexpected error: {error}"
+        );
+        server.join().unwrap();
+        assert_eq!(submit_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancels_pending_async_task_with_credentials() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with("POST /api/v1/tasks/task-1/cancel HTTP/1.1"));
+            assert!(request_text
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk-test"));
+            write_json_response(&mut stream, r#"{"request_id":"request-1"}"#);
+        });
+
+        let asr = DashScopeMultimodalASR::new(
+            "sk-test".to_string(),
+            format!("http://{addr}/api/v1/services/audio/asr/transcription"),
+            "fun-asr".to_string(),
+        );
+        asr.cancel_async_task("task-1").await.unwrap();
         server.join().unwrap();
     }
 

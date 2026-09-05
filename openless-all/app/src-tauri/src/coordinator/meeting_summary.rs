@@ -9,8 +9,8 @@ use tauri::Emitter;
 
 use crate::persistence::{MeetingStore, PreferencesStore};
 use crate::types::{
-    MeetingErrorEvent, MeetingRecord, MeetingStatus, MeetingSummary, MeetingSummaryEvent,
-    MeetingTodo, OutputLanguagePreference, UserPreferences,
+    MeetingErrorEvent, MeetingImportStatus, MeetingRecord, MeetingStatus, MeetingSummary,
+    MeetingSummaryEvent, MeetingTodo, OutputLanguagePreference, UserPreferences,
 };
 
 use super::{complete_text_with_active_llm, Inner};
@@ -60,13 +60,16 @@ pub(super) fn prepare_and_spawn_auto_meeting_summary(
     let mut prepared = record.clone();
 
     if let Err(error) = prepare_summary_record(&mut prepared) {
-        persist_summary_record(&store, &prepared)?;
+        complete_import_summary(&mut prepared, Some(&error));
+        prepared = persist_summary_record(&store, &prepared)?;
+        apply_import_summary_retention(inner, &store, &mut prepared)?;
         *record = prepared;
         emit_meeting_summary_failed(inner, record, "emptyTranscript", &error);
+        super::meeting_audio_import::emit_import_event(inner, record);
         return Ok(());
     }
 
-    persist_summary_record(&store, &prepared)?;
+    prepared = persist_summary_record(&store, &prepared)?;
     *record = prepared;
     emit_meeting_summary(inner, record, None);
     spawn_prepared_meeting_summary(inner, record.id.clone());
@@ -114,12 +117,12 @@ async fn run_meeting_summary_job(
 
     validate_summary_mode(&record, mode)?;
     if let Err(error) = prepare_summary_record(&mut record) {
-        persist_summary_record(&store, &record)?;
+        record = persist_summary_record(&store, &record)?;
         emit_meeting_summary_failed(inner, &record, "emptyTranscript", &error);
         return Ok(record);
     }
 
-    persist_summary_record(&store, &record)?;
+    record = persist_summary_record(&store, &record)?;
     emit_meeting_summary(inner, &record, None);
 
     finish_summarizing_record(inner, &store, record, llm).await
@@ -171,18 +174,62 @@ async fn finish_summarizing_record(
     match llm_result {
         Ok(parsed) => {
             apply_parsed_summary(&mut record, parsed);
-            persist_summary_record(&store, &record)?;
+            complete_import_summary(&mut record, None);
+            record = persist_summary_record(&store, &record)?;
+            apply_import_summary_retention(inner, store, &mut record)?;
             emit_meeting_summary(inner, &record, None);
+            super::meeting_audio_import::emit_import_event(inner, &record);
             Ok(record)
         }
         Err(error) => {
             record.status = MeetingStatus::SummaryFailed;
             record.updated_at = Utc::now().to_rfc3339();
-            persist_summary_record(&store, &record)?;
+            complete_import_summary(&mut record, Some(&error));
+            record = persist_summary_record(&store, &record)?;
+            apply_import_summary_retention(inner, store, &mut record)?;
             emit_meeting_summary_failed(inner, &record, summary_error_code(&error), &error);
+            super::meeting_audio_import::emit_import_event(inner, &record);
             Ok(record)
         }
     }
+}
+
+fn complete_import_summary(record: &mut MeetingRecord, error: Option<&str>) {
+    let Some(import_state) = record.import_state.as_mut() else {
+        return;
+    };
+    let now = Utc::now().to_rfc3339();
+    import_state.progress = Some(1.0);
+    import_state.updated_at = now.clone();
+    import_state.completed_at = Some(now.clone());
+    if let Some(error) = error {
+        import_state.status = MeetingImportStatus::Failed;
+        import_state.error_code = Some(summary_error_code(error).to_string());
+        import_state.error_message = Some(error.to_string());
+    } else {
+        import_state.status = MeetingImportStatus::Completed;
+        import_state.error_code = None;
+        import_state.error_message = None;
+    }
+    record.processing_hold = None;
+    record.updated_at = now;
+}
+
+fn apply_import_summary_retention(
+    inner: &Arc<Inner>,
+    store: &MeetingStore,
+    record: &mut MeetingRecord,
+) -> Result<(), String> {
+    if record.import_state.is_none() {
+        return Ok(());
+    }
+    store
+        .prune_audio_retention(inner.prefs.get().meeting_audio_retention_count)
+        .map_err(|error| error.to_string())?;
+    if let Some(updated) = store.get(&record.id).map_err(|error| error.to_string())? {
+        *record = updated;
+    }
+    Ok(())
 }
 
 fn summary_error_code(error: &str) -> &'static str {
@@ -230,6 +277,15 @@ async fn summarize_record(
 }
 
 fn validate_summary_mode(record: &MeetingRecord, mode: MeetingSummaryMode) -> Result<(), String> {
+    if record.post_processing.as_ref().is_some_and(|state| {
+        !matches!(
+            state.status,
+            crate::types::MeetingPostProcessingStatus::Completed
+                | crate::types::MeetingPostProcessingStatus::RealtimeAccepted
+        )
+    }) {
+        return Err("meeting post-processing is not completed".to_string());
+    }
     match (record.status.clone(), mode) {
         (
             MeetingStatus::Recording
@@ -248,6 +304,14 @@ fn validate_summary_mode(record: &MeetingRecord, mode: MeetingSummaryMode) -> Re
         }
         (MeetingStatus::Draft, _) => Err("meeting is not completed".to_string()),
     }
+}
+
+#[cfg(test)]
+pub(super) fn validate_summary_mode_for_test(
+    record: &MeetingRecord,
+    mode: MeetingSummaryMode,
+) -> Result<(), String> {
+    validate_summary_mode(record, mode)
 }
 
 pub(super) fn prepare_summary_record(record: &mut MeetingRecord) -> Result<(), String> {
@@ -391,7 +455,7 @@ fn format_transcript_segments(record: &MeetingRecord) -> String {
             format!(
                 "[{}][{}][{}] {}",
                 segment.id,
-                segment.speaker_label,
+                record.speaker_display_name(segment),
                 format_segment_timestamp(segment.start_ms),
                 segment.text.trim()
             )
@@ -418,7 +482,7 @@ pub(super) fn transcript_chunks(record: &MeetingRecord) -> Vec<String> {
         let line = format!(
             "[{}][{}][{}] {}\n",
             segment.id,
-            segment.speaker_label,
+            record.speaker_display_name(segment),
             format_segment_timestamp(segment.start_ms),
             segment.text.trim()
         );
@@ -540,12 +604,27 @@ fn apply_parsed_summary(record: &mut MeetingRecord, parsed: ParsedMeetingSummary
     record.updated_at = Utc::now().to_rfc3339();
 }
 
-fn persist_summary_record(store: &MeetingStore, record: &MeetingRecord) -> Result<(), String> {
+fn persist_summary_record(
+    store: &MeetingStore,
+    record: &MeetingRecord,
+) -> Result<MeetingRecord, String> {
+    let snapshot = record.clone();
     store
-        .update(record.clone())
+        .update_if(&record.id, |current| {
+            apply_summary_persistence(current, &snapshot)
+        })
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "meeting not found".to_string())?;
-    Ok(())
+        .ok_or_else(|| "meeting not found".to_string())
+}
+
+fn apply_summary_persistence(current: &mut MeetingRecord, snapshot: &MeetingRecord) -> bool {
+    current.title = snapshot.title.clone();
+    current.status = snapshot.status.clone();
+    current.summary = snapshot.summary.clone();
+    current.import_state = snapshot.import_state.clone();
+    current.processing_hold = snapshot.processing_hold.clone();
+    current.updated_at = snapshot.updated_at.clone();
+    true
 }
 
 fn emit_meeting_summary(
@@ -698,11 +777,23 @@ mod tests {
             duration_ms: Some(1_800_000),
             transcript_segments: segments,
             summary: MeetingSummary::default(),
+            organized_draft: None,
+            organized_draft_state: None,
             audio: MeetingAudioMeta {
                 state: MeetingAudioState::Retained,
                 retained: true,
                 path: None,
             },
+            realtime_asr: None,
+            post_processing_config: None,
+            post_processing: None,
+            import_config: None,
+            import_state: None,
+            transcript_revisions: Vec::new(),
+            active_transcript_revision: None,
+            speaker_profiles: Vec::new(),
+            speaker_turns: Vec::new(),
+            processing_hold: None,
             created_at: "2026-07-04T09:30:00+00:00".to_string(),
             updated_at: "2026-07-04T10:00:00+00:00".to_string(),
         }
@@ -711,6 +802,7 @@ mod tests {
     fn segment(id: &str, text: &str) -> TranscriptSegment {
         TranscriptSegment {
             id: id.to_string(),
+            speaker_id: None,
             speaker_label: "未区分".to_string(),
             start_ms: 12_000,
             end_ms: Some(18_000),
@@ -729,6 +821,66 @@ mod tests {
         assert!(prompt.system.contains("只输出 JSON"));
         assert!(prompt.user.contains("[seg-000001][未区分][00:00:12]"));
         assert!(prompt.user.contains("确认 V1-4 做总结生成。"));
+    }
+
+    #[test]
+    fn summary_persistence_preserves_concurrent_organized_draft_fields() {
+        let mut current = record_with_segments(vec![segment("seg-000001", "确认下一步")]);
+        current.organized_draft = Some(crate::types::MeetingOrganizedDraft {
+            source_transcript_revision: Some(1),
+            provider_id: "provider".to_string(),
+            model_id: Some("model".to_string()),
+            items: Vec::new(),
+            generated_at: "2026-08-25T09:00:00Z".to_string(),
+        });
+        current.organized_draft_state = Some(crate::types::MeetingOrganizedDraftState {
+            status: crate::types::MeetingOrganizedDraftStatus::Completed,
+            job_id: "job-1".to_string(),
+            processing_revision: 1,
+            source_transcript_revision: Some(1),
+            attempt: 1,
+            error_code: None,
+            error_message: None,
+            created_at: "2026-08-25T08:59:00Z".to_string(),
+            updated_at: "2026-08-25T09:00:00Z".to_string(),
+            started_at: Some("2026-08-25T08:59:00Z".to_string()),
+            completed_at: Some("2026-08-25T09:00:00Z".to_string()),
+        });
+        let mut summary_snapshot = record_with_segments(current.transcript_segments.clone());
+        summary_snapshot.title = "Updated summary title".to_string();
+        summary_snapshot.summary.overview = "Updated overview".to_string();
+
+        apply_summary_persistence(&mut current, &summary_snapshot);
+
+        assert_eq!(current.title, "Updated summary title");
+        assert_eq!(current.summary.overview, "Updated overview");
+        assert_eq!(
+            current.organized_draft.as_ref().unwrap().provider_id,
+            "provider"
+        );
+        assert_eq!(
+            current.organized_draft_state.as_ref().unwrap().job_id,
+            "job-1"
+        );
+    }
+
+    #[test]
+    fn meeting_summary_uses_renamed_speaker_profile_in_full_prompt() {
+        let mut renamed_segment = segment("seg-000001", "确认下一步");
+        renamed_segment.speaker_id = Some("speaker-0".to_string());
+        renamed_segment.speaker_label = "发言人 1".to_string();
+        let mut record = record_with_segments(vec![renamed_segment]);
+        record.speaker_profiles = vec![crate::types::SpeakerProfile {
+            id: "speaker-0".to_string(),
+            provider_speaker_id: Some("0".to_string()),
+            display_name: "张三".to_string(),
+            manually_named: true,
+        }];
+
+        let prompt = build_meeting_summary_prompt(&record, &[], "auto");
+
+        assert!(prompt.user.contains("[seg-000001][张三][00:00:12]"));
+        assert!(!prompt.user.contains("[seg-000001][发言人 1]"));
     }
 
     #[test]
@@ -884,6 +1036,45 @@ mod tests {
     }
 
     #[test]
+    fn meeting_summary_waits_for_post_processing_or_explicit_realtime_acceptance() {
+        let mut record = record_with_segments(vec![segment("seg-000001", "内容")]);
+        let now = "2026-08-12T10:00:00Z".to_string();
+        record.post_processing = Some(crate::types::MeetingPostProcessingState {
+            status: crate::types::MeetingPostProcessingStatus::Failed,
+            job_id: "job-1".to_string(),
+            model_ref: crate::types::MeetingAsrModelRef {
+                provider_id: "bailian".to_string(),
+                model_id: "fun-asr".to_string(),
+            },
+            resolved_runtime_kind: crate::types::MeetingAsrRuntimeKind::Cloud,
+            diarization_mode: crate::types::MeetingDiarizationMode::Off,
+            expected_speaker_count: None,
+            processing_revision: 1,
+            provider_task_id: None,
+            progress: None,
+            attempt: 1,
+            error_code: Some("network".to_string()),
+            error_message: Some("网络失败".to_string()),
+            created_at: now.clone(),
+            updated_at: now,
+            started_at: None,
+            completed_at: None,
+        });
+
+        assert_eq!(
+            validate_summary_mode(&record, MeetingSummaryMode::Generate),
+            Err("meeting post-processing is not completed".to_string())
+        );
+
+        record.post_processing.as_mut().unwrap().status =
+            crate::types::MeetingPostProcessingStatus::RealtimeAccepted;
+        assert_eq!(
+            validate_summary_mode(&record, MeetingSummaryMode::Generate),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn meeting_summary_long_transcript_uses_rolling_context() {
         let record = record_with_segments(vec![
             segment(
@@ -901,6 +1092,26 @@ mod tests {
         assert!(chunks.len() > 1);
         assert!(chunks[0].contains("seg-000001"));
         assert!(chunks[1].contains("seg-000002"));
+    }
+
+    #[test]
+    fn meeting_summary_uses_renamed_speaker_profile_in_rolling_chunks() {
+        let mut renamed_segment = segment("seg-000001", "确认下一步");
+        renamed_segment.speaker_id = Some("speaker-0".to_string());
+        renamed_segment.speaker_label = "发言人 1".to_string();
+        let mut record = record_with_segments(vec![renamed_segment]);
+        record.speaker_profiles = vec![crate::types::SpeakerProfile {
+            id: "speaker-0".to_string(),
+            provider_speaker_id: Some("0".to_string()),
+            display_name: "张三".to_string(),
+            manually_named: true,
+        }];
+
+        let chunks = transcript_chunks(&record);
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].contains("[seg-000001][张三][00:00:12]"));
+        assert!(!chunks[0].contains("[seg-000001][发言人 1]"));
     }
 
     #[test]

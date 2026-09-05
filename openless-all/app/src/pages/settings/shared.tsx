@@ -44,6 +44,40 @@ export function SectionTitle({
     )
 }
 
+export function ExperimentalSectionTitle({
+    children,
+    badge,
+    hint,
+    style,
+}: {
+    children: ReactNode
+    badge: string
+    hint?: string
+    style?: CSSProperties
+}) {
+    return (
+        <SectionTitle hint={hint} style={style}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                <span>{children}</span>
+                <span
+                    style={{
+                        padding: "2px 6px",
+                        borderRadius: 999,
+                        background: "var(--ol-blue-soft)",
+                        color: "var(--ol-blue)",
+                        fontSize: 10,
+                        fontWeight: 600,
+                        lineHeight: 1.3,
+                        letterSpacing: 0,
+                    }}
+                >
+                    {badge}
+                </span>
+            </span>
+        </SectionTitle>
+    )
+}
+
 // 页面瘦身：设置页描述文案全部隐藏（保留组件签名 + 调用点，便于需要时恢复）。
 export function SectionDesc(_props: {
     children: ReactNode
@@ -192,7 +226,9 @@ export const inputStyle: CSSProperties = {
     fontSize: 12.5,
     fontFamily: "inherit",
     outline: "none",
-    background: "var(--ol-surface-2)",
+    // 与 SelectLite 触发器同底色：此前用 --ol-surface-2（浅灰）会让所有输入框/
+    // 下拉与其它设置控件（麦克风/胶囊样式等 select-trigger-bg）颜色不一致。
+    background: "var(--ol-select-trigger-bg)",
     width: "100%",
     maxWidth: 360,
     transition:
@@ -250,10 +286,14 @@ export const ASR_PRESETS = [
   // 两字段（asr/xfyun.rs）；音频 16k/16bit/mono，与 recorder 输出一致。
   { id: 'iflytek',      nameKey: 'asrIflytek',      baseUrl: '',                                              model: ''                              },
   { id: 'foundry-local-whisper', nameKey: 'asrFoundryLocalWhisper', baseUrl: '',                              model: ''                              },
+  { id: 'local-whisper', nameKey: 'asrLocalWhisper', baseUrl: '',                                         model: ''                              },
   // 本地引擎（Foundry / sherpa-onnx / Qwen3）：无 baseUrl/model 配置，
   // 模型在「高级 → 本地模型」里下载与切换。
   { id: 'sherpa-onnx-local',     nameKey: 'asrSherpaOnnxLocal',     baseUrl: '',                              model: ''                              },
-  { id: 'local-qwen3',  nameKey: 'asrLocalQwen3',   baseUrl: '',                                              model: ''                              },
+  { id: 'local-qwen3-mlx', nameKey: 'asrLocalQwen3Mlx', baseUrl: '',                                          model: ''                              },
+  { id: 'local-qwen3-c',   nameKey: 'asrLocalQwen3C', baseUrl: '',                                            model: ''                              },
+  // 历史配置兼容：不在新建下拉显示，但编辑旧渠道时仍按本地引擎处理。
+  { id: 'local-qwen3', nameKey: 'asrLocalQwen3', baseUrl: '',                                                 model: ''                              },
   // Apple 系统语音识别（macOS）：无 baseUrl/model、无下载、无凭据。
   { id: 'apple-speech', nameKey: 'asrAppleSpeech',  baseUrl: '',                                              model: ''                              },
 ] as const;

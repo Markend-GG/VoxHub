@@ -19,6 +19,7 @@ const requirements = [
   ['hide never aliases stop', source.includes("if (action === 'hide')") && source.includes('void interaction.hide();')],
   ['summary failure open entry', source.includes("action === 'open-meeting'") && source.includes('void interaction.openMeeting();')],
   ['native show restores hidden state', source.includes("'meeting-companion:show'") && source.includes("dispatch({ type: 'show'")],
+  ['time and controls below signal rail', source.indexOf('data-meeting-companion-footer') > source.indexOf('<MeetingSignalRail')],
   ['no native confirm', !source.includes('window.confirm(') && !source.includes('globalThis.confirm(')],
 ];
 

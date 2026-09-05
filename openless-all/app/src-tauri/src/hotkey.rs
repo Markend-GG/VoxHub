@@ -29,8 +29,13 @@ use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyCapability, HotkeyIns
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HotkeyEvent {
-    Pressed { at: Instant, press_id: u64 },
-    Released { at: Instant },
+    Pressed {
+        at: Instant,
+        press_id: u64,
+    },
+    Released {
+        at: Instant,
+    },
     // 组合键撤销不在此枚举里：走独立的 `combo_abort` 通道，避免被上面 Pressed →
     // begin_session 的同步开麦流程堵在队列里（见模块注释）。
     /// Shift（或未来配置项指定的修饰键）按下边沿。可在录音过程中任何时刻产生；
@@ -49,8 +54,8 @@ mod tests {
         Shared {
             binding: RwLock::new(HotkeyBinding::default()),
             trigger_held: AtomicBool::new(true),
-            trigger_press_id: AtomicU64::new(0),
-            trigger_companion_seen: AtomicU64::new(0),
+            trigger_press_id: AtomicU64::new(42),
+            trigger_companion_seen: AtomicU64::new(42),
             qa_trigger: RwLock::new(None),
             qa_trigger_held: AtomicBool::new(true),
             selection_polish_trigger: RwLock::new(None),
@@ -67,6 +72,8 @@ mod tests {
         reset_shared_held_state(&shared);
 
         assert!(!shared.trigger_held.load(Ordering::SeqCst));
+        assert_eq!(shared.trigger_press_id.load(Ordering::SeqCst), 0);
+        assert_eq!(shared.trigger_companion_seen.load(Ordering::SeqCst), 0);
         assert!(!shared.qa_trigger_held.load(Ordering::SeqCst));
         assert!(!shared.selection_polish_trigger_held.load(Ordering::SeqCst));
         assert!(!shared.translation_trigger_held.load(Ordering::SeqCst));
@@ -86,6 +93,8 @@ mod tests {
 
         assert_eq!(*shared.binding.read(), next);
         assert!(!shared.trigger_held.load(Ordering::SeqCst));
+        assert_eq!(shared.trigger_press_id.load(Ordering::SeqCst), 0);
+        assert_eq!(shared.trigger_companion_seen.load(Ordering::SeqCst), 0);
         assert!(shared.qa_trigger_held.load(Ordering::SeqCst));
         assert!(shared.selection_polish_trigger_held.load(Ordering::SeqCst));
         assert!(shared.translation_trigger_held.load(Ordering::SeqCst));
@@ -288,13 +297,9 @@ fn start_listener_thread<T, F>(
 ) -> Result<ListenerThread<T>, HotkeyInstallError>
 where
     T: Send + 'static,
-    F: FnOnce(
-            Arc<Shared>,
-            Sender<HotkeyEvent>,
-            Sender<()>,
-            Sender<u64>,
-            StartupTx<T>,
-        ) + Send + 'static,
+    F: FnOnce(Arc<Shared>, Sender<HotkeyEvent>, Sender<()>, Sender<u64>, StartupTx<T>)
+        + Send
+        + 'static,
 {
     let shared = Arc::new(Shared {
         binding: RwLock::new(binding),
@@ -339,6 +344,12 @@ fn update_shared_binding(shared: &Shared, binding: HotkeyBinding) {
     shared
         .trigger_held
         .store(false, std::sync::atomic::Ordering::SeqCst);
+    shared
+        .trigger_press_id
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    shared
+        .trigger_companion_seen
+        .store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 fn update_shared_modifier_shortcuts(
@@ -369,6 +380,9 @@ fn reset_shared_held_state(shared: &Shared) {
         .trigger_companion_seen
         .store(0, std::sync::atomic::Ordering::SeqCst);
     shared
+        .trigger_press_id
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    shared
         .qa_trigger_held
         .store(false, std::sync::atomic::Ordering::SeqCst);
     shared
@@ -393,9 +407,8 @@ mod platform {
 
     use super::{
         esc_exclusive, install_error, reset_shared_held_state, send_cancel_or_log,
-        send_combo_abort_or_log, send_or_log,
-        start_listener_thread, update_shared_binding, update_shared_modifier_shortcuts,
-        HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
+        send_combo_abort_or_log, send_or_log, start_listener_thread, update_shared_binding,
+        update_shared_modifier_shortcuts, HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
     };
     use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError, HotkeyTrigger};
 
@@ -470,10 +483,7 @@ mod platform {
         }
 
         fn trigger_combined_since_press(&self, press_id: u64) -> bool {
-            self.shared
-                .trigger_companion_seen
-                .load(Ordering::SeqCst)
-                == press_id
+            self.shared.trigger_companion_seen.load(Ordering::SeqCst) == press_id
         }
 
         fn shutdown(&self) {
@@ -747,9 +757,7 @@ mod platform {
             ctx.shared
                 .trigger_press_id
                 .store(press_id, Ordering::SeqCst);
-            ctx.shared
-                .trigger_companion_seen
-                .store(0, Ordering::SeqCst);
+            ctx.shared.trigger_companion_seen.store(0, Ordering::SeqCst);
             send_or_log(
                 &ctx.tx,
                 HotkeyEvent::Pressed {
@@ -759,7 +767,12 @@ mod platform {
             );
         } else if !is_active && was_held {
             ctx.shared.trigger_held.store(false, Ordering::SeqCst);
-            send_or_log(&ctx.tx, HotkeyEvent::Released { at: std::time::Instant::now() });
+            send_or_log(
+                &ctx.tx,
+                HotkeyEvent::Released {
+                    at: std::time::Instant::now(),
+                },
+            );
         }
     }
 
@@ -990,9 +1003,7 @@ mod platform {
             note_companion_key_down(&ctx);
             assert_eq!(drain_combo(&combo_rx), 0);
 
-            shared
-                .trigger_press_id
-                .store(1, Ordering::SeqCst);
+            shared.trigger_press_id.store(1, Ordering::SeqCst);
             shared.trigger_held.store(true, Ordering::SeqCst);
             // OS 自动重复 / 按住触发键连按多个键，都只撤销一次。
             note_companion_key_down(&ctx);
@@ -1001,9 +1012,7 @@ mod platform {
 
             // 下一次 Pressed 边沿会重置 latch（handle_flags_changed 里做），下一轮组合键
             // 才能再次撤销 —— 否则第二次组合键会被当成正常听写。
-            shared
-                .trigger_companion_seen
-                .store(0, Ordering::SeqCst);
+            shared.trigger_companion_seen.store(0, Ordering::SeqCst);
             note_companion_key_down(&ctx);
             assert_eq!(drain_combo(&combo_rx), 1);
 
@@ -1032,9 +1041,8 @@ mod platform {
 
     use super::{
         esc_exclusive, install_error, reset_shared_held_state, send_cancel_or_log,
-        send_combo_abort_or_log, send_or_log,
-        start_listener_thread, update_shared_binding, update_shared_modifier_shortcuts,
-        HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
+        send_combo_abort_or_log, send_or_log, start_listener_thread, update_shared_binding,
+        update_shared_modifier_shortcuts, HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
     };
     use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError, HotkeyTrigger};
 
@@ -1057,9 +1065,6 @@ mod platform {
     const VK_RWIN: u32 = 0x5C;
     const VK_LWIN: u32 = 0x5B;
     const VK_MEDIA_PLAY_PAUSE: u32 = 0xB3;
-    const LLKHF_INJECTED: u32 = 0x0000_0010;
-    const ACCEPT_INJECTED_ENV: &str = "OPENLESS_ACCEPT_SYNTHETIC_HOTKEY_EVENTS";
-
     static HOOK_CONTEXT: AtomicPtr<CallbackContext> = AtomicPtr::new(std::ptr::null_mut());
 
     pub fn start_adapter(
@@ -1116,10 +1121,7 @@ mod platform {
         }
 
         fn trigger_combined_since_press(&self, press_id: u64) -> bool {
-            self.shared
-                .trigger_companion_seen
-                .load(Ordering::SeqCst)
-                == press_id
+            self.shared.trigger_companion_seen.load(Ordering::SeqCst) == press_id
         }
 
         fn shutdown(&self) {
@@ -1199,6 +1201,10 @@ mod platform {
             if let Some(hook) = (*context).hook.lock().unwrap().take() {
                 let _ = UnhookWindowsHookEx(hook);
             }
+            // 监听线程可能在触发键仍处于按下状态时退出（配置重载、应用关闭或
+            // hook 消息循环异常结束）。先清理内部锁存，避免下一次监听器复用
+            // 共享状态时把旧的按下状态带过去。
+            super::reset_shared_held_state(&(*context).shared);
             HOOK_CONTEXT.store(std::ptr::null_mut(), AtomicOrdering::SeqCst);
             let _ = Box::from_raw(context);
         }
@@ -1212,10 +1218,11 @@ mod platform {
         if code == HC_ACTION as i32 && lparam.0 != 0 {
             if let Some(ctx) = callback_context() {
                 let keyboard = *(lparam.0 as *const KBDLLHOOKSTRUCT);
-                if keyboard.flags.0 & LLKHF_INJECTED == 0 || accept_injected_events() {
-                    if dispatch_keyboard_event(ctx, keyboard.vkCode, wparam.0) {
-                        return LRESULT(1);
-                    }
+                // 合成输入（SendInput/keybd_event）与真实键盘统一走同一条分发路径。
+                // 只要事件的虚拟键值匹配当前配置，现有的边沿去重和组合键撤销逻辑
+                // 仍然负责决定是否触发 OpenLess；这里不再按合成输入来源过滤。
+                if dispatch_keyboard_event(ctx, keyboard.vkCode, wparam.0) {
+                    return LRESULT(1);
                 }
             }
         }
@@ -1311,9 +1318,7 @@ mod platform {
                     ctx.shared
                         .trigger_press_id
                         .store(press_id, Ordering::SeqCst);
-                    ctx.shared
-                        .trigger_companion_seen
-                        .store(0, Ordering::SeqCst);
+                    ctx.shared.trigger_companion_seen.store(0, Ordering::SeqCst);
                     log::info!("[hotkey] Windows trigger pressed vk={vk_code}");
                     send_or_log(
                         &ctx.tx,
@@ -1328,7 +1333,12 @@ mod platform {
                 let was_held = ctx.shared.trigger_held.swap(false, Ordering::SeqCst);
                 if was_held {
                     log::info!("[hotkey] Windows trigger released vk={vk_code}");
-                    send_or_log(&ctx.tx, HotkeyEvent::Released { at: std::time::Instant::now() });
+                    send_or_log(
+                        &ctx.tx,
+                        HotkeyEvent::Released {
+                            at: std::time::Instant::now(),
+                        },
+                    );
                 }
             }
             _ => {}
@@ -1424,10 +1434,6 @@ mod platform {
         }
     }
 
-    fn accept_injected_events() -> bool {
-        std::env::var(ACCEPT_INJECTED_ENV).ok().as_deref() == Some("1")
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -1513,10 +1519,17 @@ mod platform {
             assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
             assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
 
-            assert_eq!(
-                edge_names(drain(&rx)),
-                vec!["pressed", "released"]
-            );
+            assert_eq!(edge_names(drain(&rx)), vec!["pressed", "released"]);
+        }
+
+        #[test]
+        fn windows_unrelated_key_does_not_trigger_configured_modifier() {
+            let shared = shared(HotkeyTrigger::RightControl);
+            let (ctx, rx) = callback_context(shared);
+
+            assert!(!dispatch_keyboard_event(&ctx, 0x41, WM_KEYDOWN));
+            assert!(!dispatch_keyboard_event(&ctx, 0x41, WM_KEYUP));
+            assert!(drain(&rx).is_empty());
         }
 
         #[test]
@@ -1591,10 +1604,7 @@ mod platform {
             assert!(!dispatch_keyboard_event(&left_ctx, VK_RMENU, WM_KEYDOWN));
             assert!(dispatch_keyboard_event(&left_ctx, VK_LMENU, WM_KEYDOWN));
             assert!(dispatch_keyboard_event(&left_ctx, VK_LMENU, WM_KEYUP));
-            assert_eq!(
-                edge_names(drain(&left_rx)),
-                vec!["pressed", "released"]
-            );
+            assert_eq!(edge_names(drain(&left_rx)), vec!["pressed", "released"]);
 
             let right_option_shared = shared(HotkeyTrigger::RightOption);
             let (right_option_ctx, right_option_rx) = callback_context(right_option_shared);
@@ -1671,12 +1681,13 @@ mod platform {
             dispatch_keyboard_event(&ctx, VK_LSHIFT, WM_KEYDOWN);
             dispatch_keyboard_event(&ctx, 0x44, WM_KEYDOWN);
 
-            assert!(matches!(combo_rx.recv().unwrap(), ComboHotkeyEvent::Pressed { .. }));
-            assert!(
-                hotkey_rx
-                    .try_iter()
-                     .any(|evt| evt == HotkeyEvent::TranslationModifierPressed)
-             );
+            assert!(matches!(
+                combo_rx.recv().unwrap(),
+                ComboHotkeyEvent::Pressed { .. }
+            ));
+            assert!(hotkey_rx
+                .try_iter()
+                .any(|evt| evt == HotkeyEvent::TranslationModifierPressed));
 
             drop(monitor);
         }
@@ -1735,9 +1746,9 @@ mod platform {
             translation_trigger: Option<HotkeyTrigger>,
         ) {
             crate::linux_fcitx::sync_qa_binding(qa_trigger);
-            // Selection Polish ships disabled on Linux for now; the fcitx plugin has
-            // no corresponding signal route yet.
-            let _ = selection_polish_trigger;
+            // 选区润色触发键：fcitx5 插件通过 SelectionPolishEvent 信号回传
+            //（插件端需 `scripts/inject-fcitx5-plugin.sh` 重装新版 .so）。
+            crate::linux_fcitx::sync_selection_polish_binding(selection_polish_trigger);
             crate::linux_fcitx::sync_translation_binding(translation_trigger);
         }
 

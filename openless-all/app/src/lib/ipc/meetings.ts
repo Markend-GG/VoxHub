@@ -1,4 +1,15 @@
-import type { MeetingListItem, MeetingRecord, MeetingRecordingSnapshot } from "../types"
+import type {
+    MeetingAsrModelDescriptor,
+    MeetingAudioSelection,
+    MeetingListItem,
+    MeetingRecord,
+    MeetingRecordingSnapshot,
+    PostMeetingAsrModelDescriptor,
+    RetryMeetingAudioImportOptions,
+    RetryMeetingPostProcessingOptions,
+    StartMeetingAudioImportOptions,
+    StartMeetingRecordingOptions,
+} from "../types"
 import { invokeOrMock } from "./shared"
 import { mockMeetings } from "./mock-data"
 
@@ -49,8 +60,14 @@ function mockMeetingRecordingSnapshot(): MeetingRecordingSnapshot {
     }
 }
 
-export function startMeetingRecording(): Promise<MeetingRecordingSnapshot> {
-    return invokeOrMock("start_meeting_recording", undefined, mockMeetingRecordingSnapshot)
+export function startMeetingRecording(
+    options?: StartMeetingRecordingOptions,
+): Promise<MeetingRecordingSnapshot> {
+    return invokeOrMock(
+        "start_meeting_recording",
+        { options: options ?? null },
+        mockMeetingRecordingSnapshot,
+    )
 }
 
 export function pauseMeetingRecording(id: string): Promise<MeetingRecordingSnapshot> {
@@ -86,6 +103,197 @@ export function stopMeetingRecording(id: string): Promise<MeetingRecord> {
 
 export function getActiveMeetingRecording(): Promise<MeetingRecordingSnapshot | null> {
     return invokeOrMock("get_active_meeting_recording", undefined, () => null)
+}
+
+export function listPostMeetingAsrModels(): Promise<PostMeetingAsrModelDescriptor[]> {
+    return invokeOrMock("list_post_meeting_asr_models", undefined, () => [
+        {
+            providerId: "bailian",
+            modelId: "fun-asr",
+            displayName: "Fun-ASR",
+            runtimeKind: "cloud",
+            supportsFileTranscription: true,
+            supportsDiarization: true,
+            supportsSpeakerCount: true,
+            isDefault: true,
+        },
+        {
+            providerId: "bailian",
+            modelId: "paraformer-v2",
+            displayName: "Paraformer V2",
+            runtimeKind: "cloud",
+            supportsFileTranscription: true,
+            supportsDiarization: true,
+            supportsSpeakerCount: true,
+            isDefault: false,
+        },
+    ])
+}
+
+export function chooseMeetingAudioFile(): Promise<MeetingAudioSelection | null> {
+    return invokeOrMock("choose_meeting_audio_file", undefined, () => ({
+        selectionToken: "mock-meeting-audio-selection",
+        fileName: "meeting.wav",
+        format: "wav",
+        sizeBytes: 1_920_044,
+        durationMs: 60_000,
+        channels: 1,
+        sampleRate: 16_000,
+        bitsPerSample: 16,
+    }))
+}
+
+export function listMeetingFileAsrModels(): Promise<MeetingAsrModelDescriptor[]> {
+    return invokeOrMock("list_meeting_file_asr_models", undefined, () => [
+        {
+            providerId: "bailian",
+            modelId: "fun-asr",
+            displayName: "Fun-ASR",
+            runtimeKind: "cloud",
+            supportsMeetingFile: true,
+            supportsDiarization: true,
+            supportsSpeakerCount: true,
+            readiness: "ready",
+            readinessMessage: null,
+            isDefault: true,
+        },
+        {
+            providerId: "bailian",
+            modelId: "paraformer-v2",
+            displayName: "Paraformer V2",
+            runtimeKind: "cloud",
+            supportsMeetingFile: true,
+            supportsDiarization: true,
+            supportsSpeakerCount: true,
+            readiness: "ready",
+            readinessMessage: null,
+            isDefault: false,
+        },
+        {
+            providerId: "sherpa-onnx-local",
+            modelId: "sense-voice-small-zh",
+            displayName: "SenseVoice Small (local)",
+            runtimeKind: "local",
+            supportsMeetingFile: true,
+            supportsDiarization: false,
+            supportsSpeakerCount: false,
+            readiness: "missing",
+            readinessMessage: "Local model is not downloaded",
+            isDefault: false,
+        },
+    ])
+}
+
+export function startMeetingAudioImport(
+    options: StartMeetingAudioImportOptions,
+): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "start_meeting_audio_import",
+        { options },
+        () => ({
+            ...mockMeetings[0],
+            id: `mock-import-${Date.now()}`,
+            title: options.title || "Imported meeting",
+            status: "draft",
+            transcriptSegments: [],
+            audio: { state: "temporary", retained: false, path: null },
+            importState: {
+                status: "importing",
+                importJobId: "mock-import-job",
+                progress: 0,
+                attempt: 1,
+                errorCode: null,
+                errorMessage: null,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                completedAt: null,
+            },
+            importConfig: {
+                sourceFileName: "meeting.wav",
+                sourceFormat: "wav",
+                asrModelRef: options.asrModelRef,
+                resolvedAsrRuntimeKind: options.asrModelRef.providerId === "bailian" ? "cloud" : "local",
+                diarizationMode: options.diarizationMode,
+                localDiarizationModelId: options.localDiarizationModelId,
+                expectedSpeakerCount: options.expectedSpeakerCount,
+                generateSummary: options.generateSummary,
+                processingRevision: 1,
+            },
+        }),
+    )
+}
+
+export function cancelMeetingAudioImport(id: string): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "cancel_meeting_audio_import",
+        { id },
+        () => ({ ...mockMeetings[0], id }),
+    )
+}
+
+export function retryMeetingAudioImport(
+    id: string,
+    options?: RetryMeetingAudioImportOptions,
+): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "retry_meeting_audio_import",
+        { id, options: options ?? null },
+        () => ({ ...mockMeetings[0], id }),
+    )
+}
+
+export function retryMeetingPostProcessing(
+    id: string,
+    options?: RetryMeetingPostProcessingOptions,
+): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "retry_meeting_post_processing",
+        { id, options: options ?? null },
+        () => ({ ...mockMeetings[0], id }),
+    )
+}
+
+export function cancelMeetingPostProcessing(id: string): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "cancel_meeting_post_processing",
+        { id },
+        () => ({ ...mockMeetings[0], id }),
+    )
+}
+
+export function useRealtimeTranscriptAndSummarize(id: string): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "use_realtime_transcript_and_summarize",
+        { id },
+        () => ({ ...mockMeetings[0], id }),
+    )
+}
+
+export function renameMeetingSpeaker(
+    meetingId: string,
+    speakerId: string,
+    displayName: string,
+): Promise<MeetingRecord> {
+    return invokeOrMock(
+        "rename_meeting_speaker",
+        { meetingId, speakerId, displayName },
+        () => {
+            const index = mockMeetings.findIndex(meeting => meeting.id === meetingId)
+            const meeting = index >= 0 ? mockMeetings[index] : mockMeetings[0]
+            const updated = {
+                ...meeting,
+                id: meetingId,
+                speakerProfiles: meeting.speakerProfiles?.map(profile => (
+                    profile.id === speakerId
+                        ? { ...profile, displayName, manuallyNamed: true }
+                        : profile
+                )),
+                updatedAt: new Date().toISOString(),
+            }
+            if (index >= 0) mockMeetings[index] = updated
+            return updated
+        },
+    )
 }
 
 export function showMeetingCompanion(): Promise<void> {
@@ -132,6 +340,18 @@ export function retryMeetingSummary(id: string): Promise<MeetingRecord> {
     }))
 }
 
+export function generateMeetingOrganizedDraft(id: string): Promise<MeetingRecord> {
+    return invokeOrMock("generate_meeting_organized_draft", { id }, () => mockOrganizedDraft(id))
+}
+
+export function retryMeetingOrganizedDraft(id: string): Promise<MeetingRecord> {
+    return invokeOrMock("retry_meeting_organized_draft", { id }, () => mockOrganizedDraft(id))
+}
+
+export function regenerateMeetingOrganizedDraft(id: string): Promise<MeetingRecord> {
+    return invokeOrMock("regenerate_meeting_organized_draft", { id }, () => mockOrganizedDraft(id))
+}
+
 export function exportMeetingMarkdown(id: string, targetPath: string): Promise<void> {
     return invokeOrMock("export_meeting_markdown", { id, targetPath }, () => undefined)
 }
@@ -157,6 +377,41 @@ export function hideMainWindowAfterMeetingGuard(): Promise<void> {
 
 export function exitAppAfterMeetingGuard(): Promise<void> {
     return invokeOrMock("exit_app_after_meeting_guard", undefined, () => undefined)
+}
+
+function mockOrganizedDraft(id: string): MeetingRecord {
+    const generatedAt = new Date().toISOString()
+    return {
+        ...mockMeetings[0],
+        id,
+        organizedDraft: {
+            sourceTranscriptRevision: mockMeetings[0].activeTranscriptRevision ?? null,
+            providerId: "mock-llm",
+            modelId: "mock-model",
+            generatedAt,
+            items: mockMeetings[0].transcriptSegments.map((segment) => ({
+                sourceSegmentIds: [segment.id],
+                speakerId: segment.speakerId,
+                speakerLabel: segment.speakerLabel,
+                startMs: segment.startMs,
+                endMs: segment.endMs,
+                text: segment.text,
+            })),
+        },
+        organizedDraftState: {
+            status: "completed",
+            jobId: "mock-organized-draft-job",
+            processingRevision: 1,
+            sourceTranscriptRevision: mockMeetings[0].activeTranscriptRevision ?? null,
+            attempt: 1,
+            errorCode: null,
+            errorMessage: null,
+            createdAt: generatedAt,
+            updatedAt: generatedAt,
+            startedAt: generatedAt,
+            completedAt: generatedAt,
+        },
+    }
 }
 
 function mockMeetingAudioWav(): Uint8Array {

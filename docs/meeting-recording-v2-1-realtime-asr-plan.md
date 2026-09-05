@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 为会议录音接入 meeting-specific ASR settings（会议专用语音转文字设置）、provider capabilities（服务商能力声明）、`fun-asr-realtime` draft/final（临时/最终）事件和 timestamp metadata（时间戳元数据），让会议中实时可见文字，并为 V2-2 本地说话人分离保存足够数据。
+**Goal:** 为会议录音接入 meeting-specific ASR settings（会议专用语音转文字设置）、provider capabilities（服务商能力声明）、`fun-asr-realtime` draft/final（临时/最终）事件和 timestamp metadata（时间戳元数据），让会议中实时可见文字，并为 V2-2 云端 / 本地会后说话人处理保存足够数据。
 
 **Architecture:** V2-1 复用现有 meeting coordinator（会议协调器）、CredentialsVault（凭据存储）、ASR provider（语音转文字服务商）和 event（事件）机制。新增能力只放在会议 ASR 选择、ASR 事件契约、`TranscriptSegment.metadata` 和现有 `bailian` Fun-ASR Realtime provider 增强上，短口述主链路默认行为不变。
 
@@ -10,11 +10,24 @@
 
 ---
 
-状态：ready for implementation after user approval  
+状态：implementation present / pending full acceptance（代码主体已存在，待完整验收）
 日期：2026-07-08  
+进展同步：2026-08-12（Phase 1 自动验证完成）
 上级计划：`docs/meeting-recording-v2-plan.md`
 
-## 0. 开发就绪审查结论
+## 0. 2026-08-12 进展同步
+
+本计划最初写于 2026-07-08。经只读核对当前代码，V2-1 的主要数据结构和事件链路已经存在，包括：
+
+- `MeetingAsrSettings`（会议 ASR 设置）及偏好持久化。
+- `TranscriptSegment.metadata`（原文片段元数据）。
+- `MeetingRecordingSnapshot.activeProviderSessionId`（活跃服务商会话标识）。
+- ASR draft sink（临时识别回调）与 `meeting:transcript-draft` 事件。
+- 会议页 draft 订阅、provider session 防旧事件污染，以及 pause / resume 的 session metadata（会话元数据）传递路径。
+
+因此，本文后续“当前没有 / 需要新增”的表述应统一理解为 **2026-07-08 实施前基线**，不能再作为 2026-08-12 的缺失项清单。Phase 1 已补齐本场实际 realtime ASR 配置持久化、旧记录兼容、resume 模型锁定和设置页 effective provider capability 查询，并通过 TypeScript、前端 build、MSVC `cargo check` 及 meeting / bailian / preferences / credentials 自动测试。当前状态仍标记为 `partial`（部分完成），原因是还没有完成真实百炼会议、暂停 / 继续、多次 session、网络中断、短口述回归和 Tauri UI 人工验收。最新状态以 `docs/meeting-recording-v2-acceptance-checklist.md` 为准；本文任务 checkbox（复选框）保留原实施顺序，不代表当前代码全部未实现。
+
+## 0.1 2026-07-08 开发就绪审查结论（历史基线）
 
 结论：V2-1 可以进入开发，但执行前必须按本计划中的“实现锚点”落地，不要只按概念描述开发。当前代码与计划之间最容易漏掉的点有 6 个：
 
@@ -33,7 +46,7 @@ V1 会议录音已经能保存会议原文，但 realtime（实时）体验仍�
 
 - draft（临时识别）：录音中底部“正在识别”行，来自 provider interim result（临时结果）。
 - final（最终片段）：provider 确认后的片段，生成 `TranscriptSegment` 并持久化。
-- timestamp（时间戳）：优先保存 word/token-level timestamp（词级/Token 级时间戳），用于后续 speaker diarization alignment（说话人分离对齐）。
+- timestamp（时间戳）：优先保存 word/token-level timestamp（词级/Token 级时间戳），用于保存可回退的实时原文和诊断跨 session（会话）时间轴；V2-2 所选会后模型 `fun-asr` 或 `paraformer-v2` 使用自己的结构化时间戳生成整理后原文，本地 speaker diarization（说话人分离）优先与该会后原文对齐，不跨模型把标签硬贴回实时文本。
 
 ## 2. V2-1 范围
 
@@ -59,6 +72,7 @@ V1 会议录音已经能保存会议原文，但 realtime（实时）体验仍�
 - 不做上传音频。
 - 不新增手动重新生成原文入口；不删除、不重构 V1 已有“重新转写”能力。
 - 不做停止后自动重新转写。
+- 不做会议音频文件流式上传；该能力由 V2-2 共用 audio source（音频源）实现。
 - 不做 subtitle-grade streaming（字幕级低延迟流式逐字刷新）。
 - 不做第二次 punctuation restoration（标点恢复）。
 - 不做第二次 ITN（Inverse Text Normalization，逆文本规范化）。
@@ -66,7 +80,7 @@ V1 会议录音已经能保存会议原文，但 realtime（实时）体验仍�
 - 不做会议专用 LLM provider（大语言模型服务商）配置。
 - 不把新会议设置暴露到短口述 UI。
 
-## 4. 当前代码结构观察
+## 4. 2026-07-08 实施前代码结构观察（历史基线）
 
 后端：
 

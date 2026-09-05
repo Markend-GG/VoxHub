@@ -1,4 +1,4 @@
-import type { ComboBinding, HotkeyCapability, HotkeyStatus, ShortcutBinding, WindowsImeStatus } from "../types"
+import type { ComboBinding, HotkeyCapability, HotkeyStatus, ShortcutBinding, StylePackHotkey, WindowsImeStatus } from "../types"
 import { invokeOrMock, platformCapabilities, androidHotkeyStatus, androidHotkeyCapability, androidWindowsImeStatus } from "./shared"
 import {
     mockHotkeyStatus,
@@ -93,6 +93,14 @@ export function setRewriteHotkey(binding: ShortcutBinding | null): Promise<void>
 
 export function setScreenshotRecordHotkey(binding: ShortcutBinding | null): Promise<void> {
     return invokeOrMock("set_screenshot_record_hotkey", { binding }, () => undefined)
+}
+
+// 风格包直达快捷键：整表替换（前端任何增删改都发全量列表，issue #759）。
+export function setStylePackHotkeys(hotkeys: StylePackHotkey[]): Promise<void> {
+    return invokeOrMock("set_style_pack_hotkeys", { hotkeys }, () => {
+        mockSetSettings({ ...mockSettings, stylePackHotkeys: hotkeys })
+        return undefined
+    })
 }
 
 export function setShortcutRecordingActive(active: boolean): Promise<void> {

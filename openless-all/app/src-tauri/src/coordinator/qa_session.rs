@@ -6,8 +6,7 @@
 //! References parent items via `use super::*;`; `pub(super)` so the parent and
 //! sibling submodules (e.g. `qa`) reach them through `use qa_session::*;`.
 
-#[cfg(target_os = "android")]
-use super::resources::{take_asr_for_session, take_recorder_for_session};
+use super::resources::*;
 use super::*;
 use crate::correction::apply_correction_rules;
 
@@ -147,7 +146,6 @@ pub(super) async fn finalize_dictation_as_qa_question(inner: &Arc<Inner>) -> Res
     log::info!("[coord] QA finalize from overlay: capturing selection before opening panel");
     let capture = crate::selection::capture_selection_with_status();
     let selection = capture.selection;
-    let selection_warning = capture.warning_code;
     let selection_preview_text = selection.as_ref().map(|s| s.text.clone());
 
     log::info!("[coord] QA finalize from overlay: opening panel and waiting for ASR result");
@@ -176,7 +174,6 @@ pub(super) async fn finalize_dictation_as_qa_question(inner: &Arc<Inner>) -> Res
                     "kind": "loading",
                     "session_id": session_id,
                     "selection_preview": selection_preview_text,
-                    "selection_warning": selection_warning,
                     "messages": state.messages.clone(),
                 }),
             );
@@ -210,6 +207,8 @@ pub(super) async fn finalize_dictation_as_qa_question(inner: &Arc<Inner>) -> Res
         raw.text.trim().to_string(),
         raw.duration_ms,
         session_id,
+        None,
+        super::CapsuleFeedback::Show,
     )
     .await
 }
@@ -247,7 +246,6 @@ pub(super) async fn submit_qa_text_question(
         .selection
         .as_ref()
         .map(|selection| selection.text.clone());
-    let selection_warning = capture.warning_code;
     {
         let mut state = inner.qa_state.lock();
         if !qa_turn_can_continue(&state, session_id) {
@@ -265,14 +263,21 @@ pub(super) async fn submit_qa_text_question(
                     "kind": "thinking",
                     "session_id": session_id,
                     "selection_preview": selection_preview_text,
-                    "selection_warning": selection_warning,
                     "messages": state.messages.clone(),
                 }),
             );
         }
     }
 
-    answer_qa_question_text(inner, question, 0, session_id).await
+    answer_qa_question_text(
+        inner,
+        question,
+        0,
+        session_id,
+        None,
+        super::CapsuleFeedback::Hide,
+    )
+    .await
 }
 
 pub(super) async fn take_current_dictation_transcript_for_qa(
@@ -295,6 +300,33 @@ pub(super) async fn take_current_dictation_transcript_for_qa(
     if let Some(rec) = take_recorder_for_session(inner, current_session_id) {
         rec.stop();
         release_recording_mute(inner, "dictation");
+    }
+
+    // 多模态（Omni）模式：dictation 会话没有 ASR，录音 PCM 直接交给 QA 一步回答。
+    if pipeline_multimodal_enabled(&inner.prefs.get()) {
+        let Some(pcm_consumer) = take_omni_pcm_for_session(inner, current_session_id) else {
+            restore_prepared_windows_ime_session(inner, current_session_id);
+            set_phase_idle_if_session_matches(inner, current_session_id);
+            return Ok(None);
+        };
+        let duration_ms = pcm_consumer.duration_ms();
+        let wav = pcm_bytes_to_wav(&pcm_consumer.pcm());
+        restore_prepared_windows_ime_session(inner, current_session_id);
+        {
+            let mut state = inner.state.lock();
+            state.phase = SessionPhase::Idle;
+            state.focus_target = None;
+        }
+        answer_qa_question_text(
+            inner,
+            String::new(),
+            duration_ms,
+            qa_session_id,
+            Some(wav),
+            super::CapsuleFeedback::Show,
+        )
+        .await?;
+        return Ok(None);
     }
 
     let Some(asr) = take_asr_for_session(inner, current_session_id) else {
@@ -533,20 +565,47 @@ pub(super) async fn transcribe_overlay_dictation_asr(
             debug_assert!(!uses_global_timeout);
             let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
             let timeout_duration = windows_local_asr_transcribe_timeout(audio_secs);
-            match local.transcribe(timeout_duration).await {
-                Ok(raw) => {
+            let notices = foundry_dictation_fallback_notice_callback(_inner, _current_session_id);
+            tokio::select! {
+                result = local.transcribe_with_fallback_notice(timeout_duration, notices) => match result {
+                    Ok(outcome) => {
+                        debug_assert_eq!(
+                            outcome.used_cpu_fallback,
+                            outcome.primary_recovery.is_some()
+                        );
+                        if _inner.state.lock().cancelled {
+                            local.cancel();
+                            schedule_foundry_local_asr_release(
+                                _inner,
+                                AsrReleaseSession::Dictation(_current_session_id),
+                                None,
+                            );
+                            return OverlayDictationTranscribeOutcome::Cancelled;
+                        }
+                        schedule_foundry_local_asr_release(
+                            _inner,
+                            AsrReleaseSession::Dictation(_current_session_id),
+                            outcome.primary_recovery,
+                        );
+                        Ok(outcome.raw)
+                    }
+                    Err(error) => {
+                        schedule_foundry_local_asr_release(
+                            _inner,
+                            AsrReleaseSession::Dictation(_current_session_id),
+                            None,
+                        );
+                        Err(error.to_string())
+                    }
+                },
+                _ = wait_for_overlay_dictation_cancel(_inner, _current_session_id) => {
+                    local.cancel();
                     schedule_foundry_local_asr_release(
                         _inner,
                         AsrReleaseSession::Dictation(_current_session_id),
+                        None,
                     );
-                    Ok(raw)
-                }
-                Err(error) => {
-                    schedule_foundry_local_asr_release(
-                        _inner,
-                        AsrReleaseSession::Dictation(_current_session_id),
-                    );
-                    Err(error.to_string())
+                    return OverlayDictationTranscribeOutcome::Cancelled;
                 }
             }
         }
@@ -572,18 +631,69 @@ pub(super) async fn transcribe_overlay_dictation_asr(
                 }
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         ActiveAsr::Local(local) => {
             debug_assert!(uses_global_timeout);
             let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
             let timeout_duration = local_qwen_transcribe_timeout(audio_secs);
-            let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
-            _inner.local_asr_cache.touch();
-            schedule_local_asr_release(_inner);
+            let result = tokio::select! {
+                biased;
+                result = tokio::time::timeout(timeout_duration, local.clone().transcribe()) => result,
+                _ = wait_for_overlay_dictation_cancel(_inner, _current_session_id) => {
+                    local.cancel();
+                    release_local_asr_engines_now(_inner, true, false);
+                    return OverlayDictationTranscribeOutcome::Cancelled;
+                }
+            };
+            if result.is_err() {
+                // 超时只放弃结果：解码任务仍在 spawn_blocking 里跑并持有引擎锁，
+                // cancel() 中止不了它。驱逐引擎让下次会话加载新引擎（与
+                // coordinator/dictation.rs 同款处理）。
+                log::warn!(
+                    "[coord] QA local Qwen3-ASR 超时 {}s，驱逐引擎避免下次会话排队",
+                    timeout_duration.as_secs()
+                );
+                local.cancel();
+                release_local_asr_engines_now(_inner, true, false);
+            } else {
+                _inner.local_asr_cache.touch();
+                schedule_local_asr_release(_inner);
+            }
             match result {
                 Ok(Ok(raw)) => Ok(raw),
                 Ok(Err(error)) => Err(error.to_string()),
                 Err(_) => Err("local qwen transcribe timeout".to_string()),
+            }
+        }
+        #[cfg(target_os = "macos")]
+        ActiveAsr::LocalWhisper(local) => {
+            debug_assert!(!uses_global_timeout);
+            let timeout_duration =
+                local_whisper_transcribe_timeout((local.buffer_duration_ms() as f64) / 1000.0);
+            let result = tokio::select! {
+                biased;
+                result = tokio::time::timeout(timeout_duration, local.clone().transcribe()) => result,
+                _ = wait_for_overlay_dictation_cancel(_inner, _current_session_id) => {
+                    local.cancel();
+                    release_local_asr_engines_now(_inner, false, true);
+                    return OverlayDictationTranscribeOutcome::Cancelled;
+                }
+            };
+            if result.is_err() {
+                log::warn!(
+                    "[coord] QA local Whisper 超时 {}s，驱逐引擎避免下次会话排队",
+                    timeout_duration.as_secs()
+                );
+                local.cancel();
+                release_local_asr_engines_now(_inner, false, true);
+            } else {
+                _inner.local_whisper_cache.touch();
+                schedule_local_whisper_release(_inner);
+            }
+            match result {
+                Ok(Ok(raw)) => Ok(raw),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err("local whisper transcribe timeout".to_string()),
             }
         }
         #[cfg(target_os = "macos")]
@@ -609,6 +719,11 @@ pub(super) async fn answer_qa_question_text(
     question: String,
     duration_ms: u64,
     session_id: SessionId,
+    audio_wav: Option<Vec<u8>>,
+    // QA 面板打字提问传 Hide：回答在面板内流式可见，不应在输入法 auxDown
+    // 闪「✨ 润色中...」（Linux 下 Polishing 会映射到候选词栏）。
+    // 语音/听写路径保持 Show（用户熟悉的小录音条反馈）。
+    capsule_feedback: super::CapsuleFeedback,
 ) -> Result<(), String> {
     {
         let state = inner.qa_state.lock();
@@ -617,20 +732,27 @@ pub(super) async fn answer_qa_question_text(
             return Ok(());
         }
     }
-    if question.trim().is_empty() {
+    if question.trim().is_empty() && audio_wav.is_none() {
         if qa_turn_can_continue(&inner.qa_state.lock(), session_id) {
             finish_qa_idle_silently_if_current(inner, session_id);
         }
         return Ok(());
     }
 
+    // 多模态（Omni）模式：问题本体在音频里，文本槽位用占位符，便于模型理解
+    // 「这是语音提问」并让 history 的 raw_transcript 不为空。
+    let question_for_message = if audio_wav.is_some() {
+        "（语音问题）".to_string()
+    } else {
+        question.clone()
+    };
     {
         let mut state = inner.qa_state.lock();
         if !qa_turn_can_continue(&state, session_id) {
             log::info!("[coord] QA turn invalidated before answer dispatch");
             return Ok(());
         }
-        let user_message = qa_user_message_from_state(&state, &question);
+        let user_message = qa_user_message_from_state(&state, &question_for_message);
         state.messages.push(user_message);
     }
 
@@ -653,7 +775,9 @@ pub(super) async fn answer_qa_question_text(
         }
     }
 
-    emit_capsule(inner, CapsuleState::Polishing, 0.0, 0, None, None);
+    if capsule_feedback == super::CapsuleFeedback::Show {
+        emit_capsule(inner, CapsuleState::Polishing, 0.0, 0, None, None);
+    }
 
     let prefs = inner.prefs.get();
     let working_languages = prefs.working_languages.clone();
@@ -706,6 +830,8 @@ pub(super) async fn answer_qa_question_text(
         output_language_preference,
         llm_thinking_enabled,
         front_app.as_deref(),
+        audio_wav,
+        pipeline_multimodal_enabled(&inner.prefs.get()),
         on_delta,
         should_cancel,
     )
@@ -754,18 +880,22 @@ pub(super) async fn answer_qa_question_text(
     }
 
     if prefs.qa_save_history {
+        // 与听写路径同口径：应用名与 bundle id 分开存。
+        let qa_front = crate::types::split_front_app_opt(front_app.as_deref());
         let session = DictationSession {
             id: Uuid::new_v4().to_string(),
             created_at: Utc::now().to_rfc3339(),
             source: crate::types::HistorySource::Voice,
             raw_transcript: question.clone(),
+            // QA 不是听写落字，没有「纠正规则前的 ASR 原文」这个概念。
+            asr_transcript: None,
             final_text: answer,
             mode: PolishMode::Raw,
             style_pack_id: None,
             translation_active: false,
             polish_source: None,
-            app_bundle_id: None,
-            app_name: front_app,
+            app_bundle_id: qa_front.bundle_id,
+            app_name: qa_front.name,
             insert_status: InsertStatus::CopiedFallback,
             error_code: Some("qaSession".to_string()),
             duration_ms: Some(duration_ms),
@@ -778,6 +908,7 @@ pub(super) async fn answer_qa_question_text(
             asr_model: None,
             llm_provider: None,
             llm_model: None,
+            pipeline_mode: None,
             asr_ms: None,
             polish_ms: None,
         };
@@ -823,7 +954,6 @@ pub(super) async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
     // 每轮按 Option 都重新抓一次：用户多轮提问中可以重新选别处文字。
     let capture = capture_qa_turn_selection(inner);
     let selection = capture.selection;
-    let selection_warning = capture.warning_code;
     let selection_preview_text = selection.as_ref().map(|s| s.text.clone());
     {
         let mut state = inner.qa_state.lock();
@@ -840,7 +970,6 @@ pub(super) async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                     "kind": "recording",
                     "session_id": session_id,
                     "selection_preview": selection_preview_text,
-                    "selection_warning": selection_warning,
                     "messages": state.messages.clone(),
                 }),
             );
@@ -849,12 +978,40 @@ pub(super) async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     // 2. QA 与 dictation 使用同一个 active ASR 入口。不要回退火山，否则用户配置
     // 百炼 / Whisper / 本地 ASR 后，浮窗仍会偷偷走另一套凭据。
-    let active_asr = CredentialsVault::get_active_asr();
-    if let Err(message) = ensure_asr_credentials() {
-        log::warn!("[coord] QA: active ASR credentials missing: {message}");
-        finish_qa_with_error_if_current(inner, session_id, format!("缺少 ASR 凭据：{message}"));
-        return Err(message);
-    }
+    // 多模态（Omni）模式：不构建 ASR，录音 PCM 进缓冲器，松键后一步出答案。
+    let multimodal = pipeline_multimodal_enabled(&inner.prefs.get());
+    let qa_asr: Option<QaAsrStart> = if multimodal {
+        if let Err(message) = ensure_omni_credentials() {
+            log::warn!("[coord] QA: omni credential gate failed: {message}");
+            finish_qa_with_error_if_current(
+                inner,
+                session_id,
+                format!("缺少多模态模型凭据：{message}"),
+            );
+            return Err(message);
+        }
+        None
+    } else {
+        let active_asr = CredentialsVault::get_active_asr();
+        if let Err(message) = ensure_asr_credentials() {
+            log::warn!("[coord] QA: active ASR credentials missing: {message}");
+            finish_qa_with_error_if_current(inner, session_id, format!("缺少 ASR 凭据：{message}"));
+            return Err(message);
+        }
+        // QA 历史暂不落模型归因字段，构建时快照就地丢弃（dictation / 重转录路径在用）。
+        match build_qa_asr_start(inner, &active_asr).await {
+            Ok((qa_asr, _asr_call_label)) => Some(qa_asr),
+            Err(message) => {
+                log::error!("[coord] QA active ASR init failed: {message}");
+                finish_qa_with_error_if_current(
+                    inner,
+                    session_id,
+                    format!("ASR 初始化失败: {message}"),
+                );
+                return Err(message);
+            }
+        }
+    };
 
     if let Err(message) = ensure_microphone_permission(inner) {
         log::warn!("[coord] QA: microphone permission gate failed: {message}");
@@ -862,28 +1019,24 @@ pub(super) async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         return Err(message);
     }
 
-    // QA 历史暂不落模型归因字段，构建时快照就地丢弃（dictation / 重转录路径在用）。
-    let qa_asr = match build_qa_asr_start(inner, &active_asr).await {
-        Ok((qa_asr, _asr_call_label)) => qa_asr,
-        Err(message) => {
-            log::error!("[coord] QA active ASR init failed: {message}");
-            finish_qa_with_error_if_current(
-                inner,
-                session_id,
-                format!("ASR 初始化失败: {message}"),
-            );
-            return Err(message);
-        }
-    };
-    let consumer = {
+    let consumer: Arc<dyn crate::recorder::AudioConsumer> = {
         let state = inner.qa_state.lock();
         if !qa_recording_can_continue(&state, session_id) {
             log::info!("[coord] QA recording invalidated during ASR initialization");
             return Ok(());
         }
-        let consumer = qa_asr.recorder_consumer();
-        store_qa_asr_for_session(inner, session_id, qa_asr.active_asr());
-        consumer
+        match &qa_asr {
+            Some(start) => {
+                let consumer = start.recorder_consumer();
+                store_qa_asr_for_session(inner, session_id, start.active_asr());
+                consumer
+            }
+            None => {
+                let consumer = PcmBufferConsumer::new();
+                store_qa_omni_pcm_for_session(inner, session_id, Arc::clone(&consumer));
+                consumer
+            }
+        }
     };
 
     // QA recorder 不需要 RMS 节流到胶囊；前端 QA 浮窗有自己的电平视图，
@@ -968,18 +1121,20 @@ pub(super) async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
     }
 
-    if let Err(e) = qa_asr.open_streaming_session().await {
-        if !qa_recording_can_continue(&inner.qa_state.lock(), session_id) {
-            log::info!("[coord] discarded ASR error from invalidated QA session");
+    if let Some(start) = &qa_asr {
+        if let Err(e) = start.open_streaming_session().await {
+            if !qa_recording_can_continue(&inner.qa_state.lock(), session_id) {
+                log::info!("[coord] discarded ASR error from invalidated QA session");
+                stop_qa_recorder_for_session(inner, session_id);
+                cancel_qa_asr_for_session(inner, session_id);
+                return Ok(());
+            }
+            log::error!("[coord] QA: open ASR session failed: {e}");
             stop_qa_recorder_for_session(inner, session_id);
             cancel_qa_asr_for_session(inner, session_id);
-            return Ok(());
+            finish_qa_with_error_if_current(inner, session_id, format!("ASR 连接失败: {e}"));
+            return Err(e);
         }
-        log::error!("[coord] QA: open ASR session failed: {e}");
-        stop_qa_recorder_for_session(inner, session_id);
-        cancel_qa_asr_for_session(inner, session_id);
-        finish_qa_with_error_if_current(inner, session_id, format!("ASR 连接失败: {e}"));
-        return Err(e);
     }
 
     // cancel race：在 await 期间用户可能 dismiss 了浮窗。
@@ -1023,6 +1178,25 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
     emit_capsule(inner, CapsuleState::Transcribing, 0.0, 0, None, None);
 
     stop_qa_recorder_for_session(inner, session_id);
+
+    // 多模态（Omni）模式：不走 ASR 转写，录音 PCM 直接编码 WAV，一步出答案。
+    if pipeline_multimodal_enabled(&inner.prefs.get()) {
+        let Some(pcm_consumer) = take_qa_omni_pcm_for_session(inner, session_id) else {
+            reset_qa_processing_if_current(&mut inner.qa_state.lock(), session_id);
+            return Ok(());
+        };
+        let duration_ms = pcm_consumer.duration_ms();
+        let wav = pcm_bytes_to_wav(&pcm_consumer.pcm());
+        return answer_qa_question_text(
+            inner,
+            String::new(),
+            duration_ms,
+            session_id,
+            Some(wav),
+            super::CapsuleFeedback::Show,
+        )
+        .await;
+    }
 
     let asr = match take_qa_asr_for_session(inner, session_id) {
         Some(a) => a,
@@ -1267,13 +1441,37 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                 audio_secs,
                 timeout_duration.as_secs()
             );
-            match local.transcribe(timeout_duration).await {
-                Ok(r) => {
-                    schedule_foundry_local_asr_release(inner, AsrReleaseSession::Qa(qa_session_id));
-                    r
+            let notices = foundry_qa_fallback_notice_callback(inner, session_id);
+            tokio::select! {
+                result = local.transcribe_with_fallback_notice(timeout_duration, notices) => match result {
+                Ok(outcome) => {
+                    debug_assert_eq!(
+                        outcome.used_cpu_fallback,
+                        outcome.primary_recovery.is_some()
+                    );
+                    if !qa_turn_can_continue(&inner.qa_state.lock(), session_id) {
+                        local.cancel();
+                        schedule_foundry_local_asr_release(
+                            inner,
+                            AsrReleaseSession::Qa(qa_session_id),
+                            None,
+                        );
+                        finish_qa_idle_silently_if_current(inner, session_id);
+                        return Ok(());
+                    }
+                    schedule_foundry_local_asr_release(
+                        inner,
+                        AsrReleaseSession::Qa(qa_session_id),
+                        outcome.primary_recovery,
+                    );
+                    outcome.raw
                 }
                 Err(e) => {
-                    schedule_foundry_local_asr_release(inner, AsrReleaseSession::Qa(qa_session_id));
+                    schedule_foundry_local_asr_release(
+                        inner,
+                        AsrReleaseSession::Qa(qa_session_id),
+                        None,
+                    );
                     if inner.qa_state.lock().cancelled {
                         log::info!(
                             "[coord] QA Foundry Local Whisper transcribe cancelled — discarding transcript"
@@ -1284,12 +1482,30 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                         return Ok(());
                     }
                     log::error!("[coord] QA Foundry Local Whisper transcribe failed: {e:#}");
-                    finish_qa_with_error_if_current(
-                        inner,
-                        session_id,
-                        format!("本地识别失败: {e}"),
-                    );
+                    // 终态错误面向用户的消息精简（PR #945 review P2-2）：原始 GPU/CPU
+                    // SDK 错误保留在上方日志，不把冗长的引擎错误文本直接展示给用户。
+                    let user_msg =
+                        if crate::asr::local::foundry_runtime::is_terminal_foundry_fallback_error(
+                            &e,
+                        ) {
+                            crate::asr::local::foundry_runtime::FOUNDRY_FALLBACK_TERMINAL_USER_MESSAGE
+                                .to_string()
+                        } else {
+                            format!("本地识别失败: {e}")
+                        };
+                    finish_qa_with_error_if_current(inner, session_id, user_msg);
                     return Err(e.to_string());
+                }
+                },
+                _ = wait_for_qa_processing_cancel(inner, session_id) => {
+                    local.cancel();
+                    schedule_foundry_local_asr_release(
+                        inner,
+                        AsrReleaseSession::Qa(qa_session_id),
+                        None,
+                    );
+                    finish_qa_idle_silently_if_current(inner, session_id);
+                    return Ok(());
                 }
             }
         }
@@ -1329,7 +1545,7 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         ActiveAsr::Local(local) => {
             debug_assert!(uses_global_timeout);
             let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
@@ -1339,9 +1555,30 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                 audio_secs,
                 timeout_duration.as_secs()
             );
-            let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
-            inner.local_asr_cache.touch();
-            schedule_local_asr_release(inner);
+            let result = tokio::select! {
+                biased;
+                result = tokio::time::timeout(timeout_duration, local.clone().transcribe()) => result,
+                _ = wait_for_qa_processing_cancel(inner, session_id) => {
+                    local.cancel();
+                    release_local_asr_engines_now(inner, true, false);
+                    finish_qa_idle_silently_if_current(inner, session_id);
+                    return Ok(());
+                }
+            };
+            if result.is_err() {
+                // 超时只放弃结果：解码任务仍在 spawn_blocking 里跑并持有引擎锁，
+                // cancel() 中止不了它。驱逐引擎让下次会话加载新引擎（与
+                // coordinator/dictation.rs 同款处理）。
+                log::warn!(
+                    "[coord] QA local Qwen3-ASR 超时 {}s，驱逐引擎避免下次会话排队",
+                    timeout_duration.as_secs()
+                );
+                local.cancel();
+                release_local_asr_engines_now(inner, true, false);
+            } else {
+                inner.local_asr_cache.touch();
+                schedule_local_asr_release(inner);
+            }
             match result {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
@@ -1360,6 +1597,49 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                     );
                     finish_qa_with_error_if_current(inner, session_id, "本地识别超时".to_string());
                     return Err("local qwen transcribe timeout".to_string());
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        ActiveAsr::LocalWhisper(local) => {
+            debug_assert!(!uses_global_timeout);
+            let timeout_duration =
+                local_whisper_transcribe_timeout((local.buffer_duration_ms() as f64) / 1000.0);
+            let result = tokio::select! {
+                biased;
+                result = tokio::time::timeout(timeout_duration, local.clone().transcribe()) => result,
+                _ = wait_for_qa_processing_cancel(inner, session_id) => {
+                    local.cancel();
+                    release_local_asr_engines_now(inner, false, true);
+                    finish_qa_idle_silently_if_current(inner, session_id);
+                    return Ok(());
+                }
+            };
+            if result.is_err() {
+                log::warn!(
+                    "[coord] QA local Whisper 超时 {}s，驱逐引擎避免下次会话排队",
+                    timeout_duration.as_secs()
+                );
+                local.cancel();
+                release_local_asr_engines_now(inner, false, true);
+            } else {
+                inner.local_whisper_cache.touch();
+                schedule_local_whisper_release(inner);
+            }
+            match result {
+                Ok(Ok(raw)) => raw,
+                Ok(Err(error)) => {
+                    log::error!("[coord] QA local Whisper transcribe failed: {error:#}");
+                    finish_qa_with_error_if_current(
+                        inner,
+                        session_id,
+                        format!("本地识别失败: {error}"),
+                    );
+                    return Err(error.to_string());
+                }
+                Err(_) => {
+                    finish_qa_with_error_if_current(inner, session_id, "本地识别超时".to_string());
+                    return Err("local whisper transcribe timeout".to_string());
                 }
             }
         }
@@ -1401,7 +1681,15 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         return Ok(());
     }
 
-    answer_qa_question_text(inner, question, raw.duration_ms, session_id).await
+    answer_qa_question_text(
+        inner,
+        question,
+        raw.duration_ms,
+        session_id,
+        None,
+        super::CapsuleFeedback::Show,
+    )
+    .await
 }
 
 /// 静默收尾：发 idle 事件给前端，phase 复位。**不关浮窗**（v2：浮窗只在用户
@@ -1478,6 +1766,8 @@ pub(super) async fn answer_chat_dispatch<F, C>(
     output_language_preference: OutputLanguagePreference,
     llm_thinking_enabled: bool,
     front_app: Option<&str>,
+    audio_wav: Option<Vec<u8>>,
+    multimodal: bool,
     on_delta: F,
     should_cancel: C,
 ) -> anyhow::Result<String>
@@ -1485,6 +1775,50 @@ where
     F: Fn(&str) + Send + Sync,
     C: Fn() -> bool + Send + Sync,
 {
+    // 多模态（Omni）模式：音频 + 选区/历史上下文一次调用出答案。
+    // OpenAI 兼容通道逐字流式（answer_delta）；Gemini 通道一次性返回。
+    if let Some(wav) = audio_wav {
+        let provider = build_active_omni_provider(llm_thinking_enabled)?;
+        let system_prompt = crate::polish::compose_qa_system_prompt(
+            working_languages,
+            chinese_script_preference,
+            output_language_preference,
+            front_app,
+        );
+        let user_text = messages
+            .iter()
+            .map(|message| format!("{}: {}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return Ok(provider
+            .complete_streaming(
+                &system_prompt,
+                &user_text,
+                Some(&wav),
+                on_delta,
+                should_cancel,
+            )
+            .await?);
+    }
+    // 多模态模式下键盘输入的纯文本问题：omni 模型当文本 LLM 用（无音频 part）。
+    if multimodal {
+        let provider = build_active_omni_provider(llm_thinking_enabled)?;
+        let system_prompt = crate::polish::compose_qa_system_prompt(
+            working_languages,
+            chinese_script_preference,
+            output_language_preference,
+            front_app,
+        );
+        let user_text = messages
+            .iter()
+            .map(|message| format!("{}: {}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return Ok(provider
+            .complete_streaming(&system_prompt, &user_text, None, on_delta, should_cancel)
+            .await?);
+    }
+
     // 见 polish_text 顶部注释——同样的 Gemini / OpenAI-compatible 路由逻辑，
     // QA 流式回答走 Gemini 原生 :streamGenerateContent?alt=sse。
     let active_llm = CredentialsVault::get_active_llm();

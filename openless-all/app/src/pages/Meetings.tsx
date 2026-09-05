@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -8,35 +9,59 @@ import {
   type MutableRefObject,
   type ReactNode,
 } from 'react';
-import { Volume2 } from 'lucide-react';
+import { Volume2, VolumeX } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import type { TFunction } from 'i18next';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import {
   type BinaryPayload,
+  type SpeakerDiarizationModelDescriptor,
+  cancelMeetingAudioImport,
+  cancelMeetingPostProcessing,
+  chooseMeetingAudioFile,
   deleteMeetingRecord,
   exportMeetingMarkdown,
+  generateMeetingOrganizedDraft,
   generateMeetingSummary,
   getActiveMeetingRecording,
   getMeeting,
+  listMeetingFileAsrModels,
+  listPostMeetingAsrModels,
+  listSpeakerDiarizationModels,
   retryMeetingSummary,
   listMeetings,
   pauseMeetingRecording,
   prepareMeetingAudioPlayback,
+  renameMeetingSpeaker,
+  retryMeetingAudioImport,
+  retryMeetingOrganizedDraft,
+  retryMeetingPostProcessing,
   resumeMeetingRecording,
   retranscribeMeeting,
+  regenerateMeetingOrganizedDraft,
   showMeetingCompanion,
+  startMeetingAudioImport,
   startMeetingRecording,
   stopMeetingRecording,
   updateMeetingRecord,
+  useRealtimeTranscriptAndSummarize,
   isDesktop,
 } from '../lib/ipc';
 import type {
   MeetingCloseRequestEvent,
   MeetingAudioState,
+  MeetingAsrModelDescriptor,
+  MeetingAudioSelection,
   MeetingErrorEvent,
+  MeetingImportEvent,
   MeetingListItem,
+  MeetingOrganizedDraftEvent,
+  MeetingOrganizedDraftItem,
+  MeetingAsrModelRef,
+  MeetingPostProcessingEvent,
   MeetingRecord,
   MeetingRecordingPhase,
   MeetingRecordingSnapshot,
@@ -46,16 +71,35 @@ import type {
   MeetingTranscriptSegmentEvent,
   TranscriptSegment,
   TranscriptSegmentSource,
+  PostMeetingAsrModelDescriptor,
+  StartMeetingAudioImportOptions,
+  RetryMeetingAudioImportOptions,
+  UserPreferences,
 } from '../lib/types';
 import { normalizeMeetingCloseRequest } from '../lib/types';
+import {
+  MEETING_CONTENT_TABS,
+  meetingTranscriptView,
+  moveMeetingContentTab,
+  organizedDraftView,
+  type MeetingContentTab,
+  type MeetingTabNavigationKey,
+} from '../lib/meetingContent';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill, type PillTone } from './_atoms';
+import { Modal } from '../components/ui/Modal';
+import { SelectLite } from '../components/ui/SelectLite';
 
-type ActionLoading = 'start' | 'pause' | 'resume' | 'stop' | 'summary' | 'save' | 'delete' | 'export' | 'retranscribe' | null;
+type ActionLoading = 'start' | 'import' | 'pause' | 'resume' | 'stop' | 'summary' | 'organized' | 'save' | 'delete' | 'export' | 'retranscribe' | 'postProcessing' | null;
 type ActiveControlMode = 'recording' | 'paused';
 const PLAYBACK_SPEEDS = [0.75, 1, 1.25, 1.5, 2] as const;
 type PlaybackSpeed = typeof PLAYBACK_SPEEDS[number];
+const configLabelStyle: CSSProperties = {
+  fontSize: 11.5,
+  fontWeight: 600,
+  color: 'var(--ol-ink-3)',
+};
 
 interface MeetingEditDraft {
   id: string;
@@ -90,6 +134,7 @@ export function Meetings({
   const [meetings, setMeetings] = useState<MeetingListItem[]>([]);
   const [meetingDetails, setMeetingDetails] = useState<Record<string, MeetingRecord>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [activeContentTab, setActiveContentTab] = useState<MeetingContentTab>('summary');
   const [activeSnapshot, setActiveSnapshot] = useState<MeetingRecordingSnapshot | null>(null);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
@@ -101,13 +146,21 @@ export function Meetings({
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailRetryNonce, setDetailRetryNonce] = useState(0);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [retranscribeJobByMeetingId, setRetranscribeJobByMeetingId] = useState<Record<string, string>>({});
   const [eventError, setEventError] = useState<MeetingErrorEvent | null>(null);
   const [draftByMeetingId, setDraftByMeetingId] = useState<Record<string, MeetingTranscriptDraftEvent>>({});
   const [editDraft, setEditDraft] = useState<MeetingEditDraft | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [rewriteConfirmId, setRewriteConfirmId] = useState<string | null>(null);
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  const [startConfigOpen, setStartConfigOpen] = useState(false);
+  const [audioImportOpen, setAudioImportOpen] = useState(false);
+  const [expectedSpeakerCount, setExpectedSpeakerCount] = useState('auto');
+  const [postMeetingAsrModels, setPostMeetingAsrModels] = useState<PostMeetingAsrModelDescriptor[]>([]);
+  const [meetingFileAsrModels, setMeetingFileAsrModels] = useState<MeetingAsrModelDescriptor[]>([]);
+  const [speakerDiarizationModels, setSpeakerDiarizationModels] = useState<SpeakerDiarizationModelDescriptor[]>([]);
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
+  const detailScrollRef = useRef<HTMLDivElement | null>(null);
   const transcriptStickToBottomRef = useRef(true);
   const meetingsRef = useRef<MeetingListItem[]>([]);
   const meetingDetailsRef = useRef<Record<string, MeetingRecord>>({});
@@ -209,11 +262,41 @@ export function Meetings({
 
   useEffect(() => {
     let cancelled = false;
+    void Promise.all([
+      listPostMeetingAsrModels(),
+      listMeetingFileAsrModels(),
+      listSpeakerDiarizationModels(),
+    ])
+      .then(([postModels, fileModels, speakerModels]) => {
+        if (cancelled) return;
+        setPostMeetingAsrModels(postModels);
+        setMeetingFileAsrModels(fileModels);
+        setSpeakerDiarizationModels(speakerModels);
+      })
+      .catch(error => {
+        console.warn('[meetings] failed to load meeting ASR models', error);
+        if (!cancelled) {
+          setPostMeetingAsrModels([]);
+          setMeetingFileAsrModels([]);
+          setSpeakerDiarizationModels([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     let unlistenState: (() => void) | undefined;
     let unlistenDraft: (() => void) | undefined;
     let unlistenSegment: (() => void) | undefined;
     let unlistenError: (() => void) | undefined;
     let unlistenSummary: (() => void) | undefined;
+    let unlistenOrganizedDraft: (() => void) | undefined;
+    let unlistenPostProcessing: (() => void) | undefined;
+    let unlistenImport: (() => void) | undefined;
+    let unlistenRecordDeleted: (() => void) | undefined;
     let unlistenClose: (() => void) | undefined;
 
     (async () => {
@@ -309,6 +392,35 @@ export function Meetings({
           }
           if (payload.error) setEventError(payload.error);
         });
+        const organizedDraftHandle = await listen<MeetingOrganizedDraftEvent>('meeting:organized-draft', event => {
+          if (cancelled) return;
+          cacheMeetingRecord(event.payload.meeting);
+          setSelectedId(prev => prev ?? event.payload.meetingId);
+        });
+        const postProcessingHandle = await listen<MeetingPostProcessingEvent>('meeting:post-processing-state', event => {
+          if (cancelled) return;
+          cacheMeetingRecord(event.payload.meeting);
+          setSelectedId(prev => prev ?? event.payload.meetingId);
+        });
+        const importHandle = await listen<MeetingImportEvent>('meeting:import-state', event => {
+          if (cancelled) return;
+          cacheMeetingRecord(event.payload.meeting);
+          setSelectedId(prev => prev ?? event.payload.meetingId);
+        });
+        const recordDeletedHandle = await listen<string>('meeting:record-deleted', event => {
+          if (cancelled) return;
+          const meetingId = event.payload;
+          setMeetings(prev => prev.filter(record => record.id !== meetingId));
+          setMeetingDetails(prev => {
+            const next = { ...prev };
+            delete next[meetingId];
+            return next;
+          });
+          setSelectedId(current => {
+            if (current !== meetingId) return current;
+            return meetingsRef.current.find(record => record.id !== meetingId)?.id ?? null;
+          });
+        });
         const closeHandle = await listen<MeetingCloseRequestEvent | MeetingRecordingSnapshot>('meeting:close-requested', event => {
           if (cancelled) return;
           const { snapshot } = normalizeMeetingCloseRequest(event.payload);
@@ -326,6 +438,10 @@ export function Meetings({
           segmentHandle();
           errorHandle();
           summaryHandle();
+          organizedDraftHandle();
+          postProcessingHandle();
+          importHandle();
+          recordDeletedHandle();
           closeHandle();
         } else {
           unlistenState = stateHandle;
@@ -333,6 +449,10 @@ export function Meetings({
           unlistenSegment = segmentHandle;
           unlistenError = errorHandle;
           unlistenSummary = summaryHandle;
+          unlistenOrganizedDraft = organizedDraftHandle;
+          unlistenPostProcessing = postProcessingHandle;
+          unlistenImport = importHandle;
+          unlistenRecordDeleted = recordDeletedHandle;
           unlistenClose = closeHandle;
         }
       } catch (error) {
@@ -347,6 +467,10 @@ export function Meetings({
       unlistenSegment?.();
       unlistenError?.();
       unlistenSummary?.();
+      unlistenOrganizedDraft?.();
+      unlistenPostProcessing?.();
+      unlistenImport?.();
+      unlistenRecordDeleted?.();
       unlistenClose?.();
     };
   }, [cacheMeetingRecord, mobile, syncActiveSnapshot, t]);
@@ -362,6 +486,11 @@ export function Meetings({
     return visibleSelected ?? filteredMeetings[0] ?? null;
   }, [filteredMeetings, selectedId]);
 
+  useEffect(() => {
+    setActiveContentTab('summary');
+    detailScrollRef.current?.scrollTo({ top: 0 });
+  }, [selectedMeeting?.id]);
+
   const cachedDetail = selectedMeeting ? meetingDetails[selectedMeeting.id] : null;
   const detailMeeting = activeSnapshot && selectedMeeting?.id === activeSnapshot.meeting.id
     ? activeSnapshot.meeting
@@ -375,7 +504,18 @@ export function Meetings({
     ? activeControlMode.mode
     : null;
   const selectedDraft = detailMeeting ? draftByMeetingId[detailMeeting.id] ?? null : null;
-  const transcriptCount = detailMeeting?.transcriptSegments.length ?? 0;
+  const selectedTranscriptView = useMemo(
+    () => detailMeeting ? meetingTranscriptView(detailMeeting) : null,
+    [detailMeeting],
+  );
+  const transcriptCount = selectedTranscriptView?.segments.length ?? 0;
+  const selectedRetranscribeState = detailMeeting?.postProcessing
+    && retranscribeJobByMeetingId[detailMeeting.id] === detailMeeting.postProcessing.jobId
+    ? detailMeeting.postProcessing
+    : null;
+  const selectedRetranscribeFeedback = selectedRetranscribeState
+    ? retranscribeFeedback(selectedRetranscribeState, t)
+    : null;
 
   useEffect(() => {
     const meetingId = selectedMeeting?.id;
@@ -446,14 +586,156 @@ export function Meetings({
     setActionError(null);
     setEventError(null);
     try {
-      const snapshot = await startMeetingRecording();
+      const postMeetingAsr = prefs?.postMeetingAsr;
+      const snapshot = await startMeetingRecording({
+        postMeetingAsrModelRef: postMeetingAsr
+          ? { providerId: postMeetingAsr.providerId, modelId: postMeetingAsr.modelId }
+          : null,
+        diarizationMode: postMeetingAsr?.diarization.mode ?? null,
+        localDiarizationModelId: postMeetingAsr?.diarization.localModelId ?? null,
+        expectedSpeakerCount: expectedSpeakerCount === 'auto'
+          ? null
+          : Number(expectedSpeakerCount),
+      });
       setActiveSnapshot(snapshot);
       setActiveControlMode({ meetingId: snapshot.meeting.id, mode: 'recording' });
       cacheMeetingRecord(snapshot.meeting);
       setSelectedId(snapshot.meeting.id);
+      setStartConfigOpen(false);
       if (mobile) setMobileDetailOpen(true);
     } catch (error) {
       console.error('[meetings] start failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runStartAudioImport = async (options: StartMeetingAudioImportOptions) => {
+    setActionLoading('import');
+    setActionError(null);
+    setEventError(null);
+    try {
+      const record = await startMeetingAudioImport(options);
+      cacheMeetingRecord(record);
+      setSelectedId(record.id);
+      setAudioImportOpen(false);
+      if (mobile) setMobileDetailOpen(true);
+    } catch (error) {
+      console.error('[meetings] audio import failed', error);
+      setActionError(t('meetings.audioImport.startFailed', { err: errorMessage(error) }));
+      throw error;
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runCancelAudioImport = async (id: string) => {
+    setActionLoading('import');
+    setActionError(null);
+    try {
+      const updated = await cancelMeetingAudioImport(id);
+      if (updated.audio.state === 'retained') cacheMeetingRecord(updated);
+    } catch (error) {
+      console.error('[meetings] cancel audio import failed', error);
+      setActionError(t('meetings.audioImport.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runRetryAudioImport = async (
+    record: MeetingRecord,
+    options: RetryMeetingAudioImportOptions,
+  ) => {
+    setActionLoading('import');
+    setActionError(null);
+    setEventError(null);
+    try {
+      let updated: MeetingRecord;
+      try {
+        updated = await retryMeetingAudioImport(record.id, options);
+      } catch (error) {
+        if (!errorMessage(error).includes('meetingAudioReselectionRequired')) throw error;
+        const selection = await chooseMeetingAudioFile();
+        if (!selection) return;
+        updated = await retryMeetingAudioImport(record.id, {
+          ...options,
+          selectionToken: selection.selectionToken,
+        });
+      }
+      cacheMeetingRecord(updated);
+      setSelectedId(updated.id);
+    } catch (error) {
+      console.error('[meetings] retry audio import failed', error);
+      setActionError(t('meetings.audioImport.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runRetryPostProcessing = async (
+    record: MeetingRecord,
+    modelRef: MeetingAsrModelRef,
+    speakerCount: string,
+  ) => {
+    setActionLoading('postProcessing');
+    setActionError(null);
+    setEventError(null);
+    try {
+      const updated = await retryMeetingPostProcessing(record.id, {
+        postMeetingAsrModelRef: modelRef,
+        expectedSpeakerCount: speakerCount === 'auto'
+          ? { mode: 'auto' }
+          : { mode: 'fixed', count: Number(speakerCount) },
+      });
+      cacheMeetingRecord(updated);
+      setSelectedId(updated.id);
+    } catch (error) {
+      console.error('[meetings] retry post-processing failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runCancelPostProcessing = async (id: string) => {
+    setActionLoading('postProcessing');
+    setActionError(null);
+    try {
+      const updated = await cancelMeetingPostProcessing(id);
+      cacheMeetingRecord(updated);
+    } catch (error) {
+      console.error('[meetings] cancel post-processing failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runUseRealtimeTranscript = async (id: string) => {
+    setActionLoading('postProcessing');
+    setActionError(null);
+    setEventError(null);
+    try {
+      const updated = await useRealtimeTranscriptAndSummarize(id);
+      cacheMeetingRecord(updated);
+    } catch (error) {
+      console.error('[meetings] use realtime transcript failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const runRenameSpeaker = async (meetingId: string, speakerId: string, displayName: string) => {
+    setActionLoading('postProcessing');
+    setActionError(null);
+    try {
+      const updated = await renameMeetingSpeaker(meetingId, speakerId, displayName);
+      cacheMeetingRecord(updated);
+    } catch (error) {
+      console.error('[meetings] rename speaker failed', error);
       setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
     } finally {
       setActionLoading(null);
@@ -557,9 +839,11 @@ export function Meetings({
     setEventError(null);
     try {
       const updated = await retranscribeMeeting(record.id);
+      const jobId = updated.postProcessing?.jobId;
+      if (!jobId) throw new Error('meeting post-processing job was not created');
       cacheMeetingRecord(updated);
       setSelectedId(updated.id);
-      setActionError(t('meetings.retranscribeSuccess'));
+      setRetranscribeJobByMeetingId(prev => ({ ...prev, [updated.id]: jobId }));
     } catch (error) {
       console.error('[meetings] retranscribe failed', error);
       setActionError(t('meetings.retranscribeFailed', { err: errorMessage(error) }));
@@ -660,6 +944,28 @@ export function Meetings({
     }
   };
 
+  const runOrganizedDraft = async (
+    id: string,
+    mode: 'generate' | 'retry' | 'regenerate',
+  ) => {
+    setActionLoading('organized');
+    setActionError(null);
+    try {
+      const record = mode === 'retry'
+        ? await retryMeetingOrganizedDraft(id)
+        : mode === 'regenerate'
+          ? await regenerateMeetingOrganizedDraft(id)
+          : await generateMeetingOrganizedDraft(id);
+      cacheMeetingRecord(record);
+      setSelectedId(record.id);
+    } catch (error) {
+      console.error('[meetings] organized draft action failed', error);
+      setActionError(t('meetings.actionFailed', { err: errorMessage(error) }));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const activePill = activeSnapshot ? (
     <Pill tone={statusTone(activeSnapshot.meeting.status)} size="sm">
       {phaseLabel(activeSnapshot.phase, t)}
@@ -683,12 +989,38 @@ export function Meetings({
             <Btn icon="refresh" variant="ghost" size="sm" onClick={() => void refresh()} disabled={loading}>
               {t('common.refresh')}
             </Btn>
-            <Btn icon="mic" variant="blue" size="sm" onClick={() => void runStart()} disabled={Boolean(activeSnapshot) || actionLoading !== null}>
+            <Btn icon="doc" variant="ghost" size="sm" onClick={() => setAudioImportOpen(true)} disabled={Boolean(activeSnapshot) || actionLoading !== null}>
+              {t('meetings.audioImport.open')}
+            </Btn>
+            <Btn icon="mic" variant="blue" size="sm" onClick={() => setStartConfigOpen(true)} disabled={Boolean(activeSnapshot) || actionLoading !== null}>
               {actionLoading === 'start' ? t('meetings.actions.starting') : t('meetings.actions.start')}
             </Btn>
           </div>
         }
       />
+
+      {startConfigOpen && (
+        <StartMeetingConfigDialog
+          prefs={prefs}
+          models={postMeetingAsrModels}
+          expectedSpeakerCount={expectedSpeakerCount}
+          onExpectedSpeakerCountChange={setExpectedSpeakerCount}
+          loading={actionLoading === 'start'}
+          onClose={() => setStartConfigOpen(false)}
+          onStart={() => void runStart()}
+        />
+      )}
+
+      {audioImportOpen && (
+        <MeetingAudioImportDialog
+          models={meetingFileAsrModels}
+          speakerModels={speakerDiarizationModels}
+          prefs={prefs}
+          loading={actionLoading === 'import'}
+          onClose={() => setAudioImportOpen(false)}
+          onStart={runStartAudioImport}
+        />
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '320px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
         {(!mobile || !mobileDetailOpen) && (
@@ -735,7 +1067,7 @@ export function Meetings({
         )}
 
         {(!mobile || mobileDetailOpen) && (
-          <Card padding={20} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+          <Card padding={20} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', position: 'relative' }}>
             {detailMeeting ? (
               <>
                 {mobile && (
@@ -766,9 +1098,37 @@ export function Meetings({
                   onResume={() => void runResume(detailMeeting.id)}
                   onStop={() => void runStop(detailMeeting.id)}
                 />
-                <div className="ol-thinscroll" style={{ flex: 1, minHeight: 0, overflow: 'auto', paddingRight: 2 }}>
+                <MeetingContentTabs
+                  activeTab={activeContentTab}
+                  onChange={setActiveContentTab}
+                />
+                <div
+                  ref={detailScrollRef}
+                  className="ol-thinscroll"
+                  style={{
+                    flex: 1,
+                    minHeight: 0,
+                    overflow: 'auto',
+                    paddingTop: 14,
+                    paddingRight: 2,
+                    paddingBottom: canPlayMeetingAudio(detailMeeting, activeSnapshot) ? 84 : 2,
+                  }}
+                >
+                  {canPlayMeetingAudio(detailMeeting, activeSnapshot) && (
+                    <MeetingAudioPlayer
+                      meetingId={detailMeeting.id}
+                      mobile={mobile}
+                      scrollRootRef={detailScrollRef}
+                      onMissing={() => markMeetingAudioMissing(detailMeeting.id)}
+                    />
+                  )}
                   {actionError && (
                     <ErrorBanner tone="error">{actionError}</ErrorBanner>
+                  )}
+                  {selectedRetranscribeFeedback && (
+                    <ErrorBanner tone={selectedRetranscribeFeedback.tone}>
+                      {selectedRetranscribeFeedback.message}
+                    </ErrorBanner>
                   )}
                   {eventError && (!eventError.meetingId || eventError.meetingId === detailMeeting.id) && (
                     <ErrorBanner tone="error">
@@ -797,35 +1157,77 @@ export function Meetings({
                       {t('meetings.audioPlayback.missing')}
                     </ErrorBanner>
                   )}
-                  {canPlayMeetingAudio(detailMeeting, activeSnapshot) && (
-                    <MeetingAudioPlayer
-                      meetingId={detailMeeting.id}
-                      onMissing={() => markMeetingAudioMissing(detailMeeting.id)}
+                  {activeContentTab === 'summary' && (
+                    <section
+                      id="meeting-tabpanel-summary"
+                      role="tabpanel"
+                      aria-labelledby="meeting-tab-summary"
+                    >
+                      {detailMeeting.importState && detailMeeting.importConfig ? (
+                        <MeetingAudioImportSection
+                          record={detailMeeting}
+                          models={meetingFileAsrModels}
+                          speakerModels={speakerDiarizationModels}
+                          actionLoading={actionLoading}
+                          onRetry={options => void runRetryAudioImport(detailMeeting, options)}
+                          onCancel={() => void runCancelAudioImport(detailMeeting.id)}
+                          onRenameSpeaker={(speakerId, displayName) => void runRenameSpeaker(detailMeeting.id, speakerId, displayName)}
+                        />
+                      ) : (
+                        <PostProcessingSection
+                          record={detailMeeting}
+                          models={postMeetingAsrModels}
+                          actionLoading={actionLoading}
+                          onRetry={(modelRef, speakerCount) => void runRetryPostProcessing(detailMeeting, modelRef, speakerCount)}
+                          onCancel={() => void runCancelPostProcessing(detailMeeting.id)}
+                          onUseRealtime={() => void runUseRealtimeTranscript(detailMeeting.id)}
+                          onRenameSpeaker={(speakerId, displayName) => void runRenameSpeaker(detailMeeting.id, speakerId, displayName)}
+                        />
+                      )}
+                      <SummarySection
+                        record={detailMeeting}
+                        draft={editDraft?.id === detailMeeting.id ? editDraft : null}
+                        onDraftChange={setEditDraft}
+                        actionLoading={actionLoading}
+                        onRetry={() => void runRetrySummary(detailMeeting.id)}
+                        onRewrite={() => void runGenerateSummary(detailMeeting.id)}
+                        rewriteConfirming={rewriteConfirmId === detailMeeting.id}
+                        onCancelRewrite={() => setRewriteConfirmId(null)}
+                      />
+                    </section>
+                  )}
+                  {activeContentTab === 'organized' && (
+                    <OrganizedDraftSection
+                      record={detailMeeting}
+                      mobile={mobile}
+                      actionLoading={actionLoading}
+                      onGenerate={() => void runOrganizedDraft(detailMeeting.id, 'generate')}
+                      onRetry={() => void runOrganizedDraft(detailMeeting.id, 'retry')}
+                      onRegenerate={() => void runOrganizedDraft(detailMeeting.id, 'regenerate')}
                     />
                   )}
-                  <SummarySection
-                    record={detailMeeting}
-                    draft={editDraft?.id === detailMeeting.id ? editDraft : null}
-                    onDraftChange={setEditDraft}
-                    actionLoading={actionLoading}
-                    onRetry={() => void runRetrySummary(detailMeeting.id)}
-                    onRewrite={() => void runGenerateSummary(detailMeeting.id)}
-                    rewriteConfirming={rewriteConfirmId === detailMeeting.id}
-                    onCancelRewrite={() => setRewriteConfirmId(null)}
-                  />
-                  <TranscriptList
-                    record={detailMeeting}
-                    draft={selectedDraft}
-                    scrollRef={transcriptScrollRef}
-                    onScroll={() => {
-                      const el = transcriptScrollRef.current;
-                      if (!el) return;
-                      transcriptStickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-                    }}
-                    actionLoading={actionLoading}
-                    canRetranscribe={editDraft?.id !== detailMeeting.id && canRetranscribeMeeting(detailMeeting, activeSnapshot)}
-                    onRetranscribe={() => void runRetranscribe(detailMeeting)}
-                  />
+                  {activeContentTab === 'transcript' && (
+                    <TranscriptList
+                      record={detailMeeting}
+                      segments={selectedTranscriptView?.segments ?? []}
+                      draft={selectedDraft}
+                      mobile={mobile}
+                      historical={selectedTranscriptView?.historical ?? false}
+                      emptyMessage={selectedTranscriptView?.kind === 'imported_empty'
+                        ? t('meetings.transcript.importedEmpty')
+                        : t('meetings.transcript.empty')}
+                      scrollRef={transcriptScrollRef}
+                      onScroll={() => {
+                        const el = transcriptScrollRef.current;
+                        if (!el) return;
+                        transcriptStickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+                      }}
+                      actionLoading={actionLoading}
+                      canRetranscribe={editDraft?.id !== detailMeeting.id && canRetranscribeMeeting(detailMeeting, activeSnapshot)}
+                      retranscribing={isMeetingPostProcessingActive(detailMeeting)}
+                      onRetranscribe={() => void runRetranscribe(detailMeeting)}
+                    />
+                  )}
                 </div>
               </>
             ) : (
@@ -856,6 +1258,831 @@ export function Meetings({
       </div>
     </div>
   );
+}
+
+function StartMeetingConfigDialog({
+  prefs,
+  models,
+  expectedSpeakerCount,
+  onExpectedSpeakerCountChange,
+  loading,
+  onClose,
+  onStart,
+}: {
+  prefs: UserPreferences | null;
+  models: PostMeetingAsrModelDescriptor[];
+  expectedSpeakerCount: string;
+  onExpectedSpeakerCountChange: (value: string) => void;
+  loading: boolean;
+  onClose: () => void;
+  onStart: () => void;
+}) {
+  const { t } = useTranslation();
+  const postMeetingAsr = prefs?.postMeetingAsr;
+  const localModelId = postMeetingAsr?.diarization.localModelId ?? null;
+  const localDiarizationEnabled = postMeetingAsr?.diarization.mode === 'local';
+  const [localModelReady, setLocalModelReady] = useState(!localDiarizationEnabled);
+  const [localModelChecking, setLocalModelChecking] = useState(localDiarizationEnabled);
+
+  useEffect(() => {
+    if (!localDiarizationEnabled || !localModelId) {
+      setLocalModelReady(!localDiarizationEnabled);
+      setLocalModelChecking(false);
+      return;
+    }
+    let cancelled = false;
+    setLocalModelReady(false);
+    setLocalModelChecking(true);
+    void listSpeakerDiarizationModels()
+      .then(localModels => {
+        if (cancelled) return;
+        const selectedLocalModel = localModels.find(model => model.id === localModelId);
+        setLocalModelReady(selectedLocalModel?.readiness === 'ready');
+      })
+      .catch(error => {
+        if (!cancelled) console.warn('[meetings] failed to check local speaker model readiness', error);
+      })
+      .finally(() => {
+        if (!cancelled) setLocalModelChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [localDiarizationEnabled, localModelId]);
+  const selectedModel = models.find(model => (
+    model.providerId === postMeetingAsr?.providerId
+    && model.modelId === postMeetingAsr?.modelId
+  ));
+  const localModelUnavailable = localDiarizationEnabled
+    && (!localModelId || !localModelReady);
+  const realtimeProvider = prefs?.meetingAsr.mode === 'provider_specific'
+    ? prefs.meetingAsr.providerId || prefs.activeAsrProvider
+    : prefs?.activeAsrProvider;
+  const realtimeModel = prefs?.meetingAsr.modelProviderId === realtimeProvider
+    ? prefs?.meetingAsr.modelOverride
+    : null;
+  const canStart = Boolean(
+    prefs
+    && selectedModel
+    && !localModelUnavailable
+    && !localModelChecking
+    && !loading,
+  );
+
+  return (
+    <Modal onClose={loading ? () => undefined : onClose} width="min(480px, 100%)">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 17, fontWeight: 650, color: 'var(--ol-ink)' }}>
+          {t('meetings.startConfig.title')}
+        </h2>
+        <Btn icon="x" variant="ghost" size="sm" disabled={loading} onClick={onClose}>
+          {t('common.cancel')}
+        </Btn>
+      </div>
+      <div style={{ display: 'grid', gap: 12 }}>
+        <MeetingConfigRow label={t('meetings.startConfig.realtimeAsr')}>
+          {realtimeProvider || '-'}{realtimeModel ? ` / ${realtimeModel}` : ''}
+        </MeetingConfigRow>
+        <MeetingConfigRow label={t('meetings.startConfig.postMeetingAsr')}>
+          {selectedModel?.displayName ?? t('meetings.startConfig.modelUnavailable')}
+        </MeetingConfigRow>
+        <MeetingConfigRow label={t('meetings.startConfig.diarization')}>
+          {t(`meetings.postProcessing.diarization.${postMeetingAsr?.diarization.mode ?? 'off'}`)}
+        </MeetingConfigRow>
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>
+            {t('meetings.startConfig.expectedSpeakers')}
+          </span>
+          <SelectLite
+            value={expectedSpeakerCount}
+            onChange={onExpectedSpeakerCountChange}
+            options={speakerCountOptions(t)}
+            ariaLabel={t('meetings.startConfig.expectedSpeakers')}
+            style={{ width: '100%' }}
+          />
+        </label>
+        {localDiarizationEnabled && (
+          <ErrorBanner tone={localModelUnavailable || localModelChecking ? 'error' : 'warning'}>
+            {localModelUnavailable || localModelChecking
+              ? t('meetings.startConfig.localModelMissing')
+              : t('meetings.startConfig.localDiarizationUploadNotice')}
+          </ErrorBanner>
+        )}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
+        <Btn variant="ghost" size="sm" disabled={loading} onClick={onClose}>
+          {t('common.cancel')}
+        </Btn>
+        <Btn icon="mic" variant="blue" size="sm" disabled={!canStart} onClick={onStart}>
+          {loading ? t('meetings.actions.starting') : t('meetings.actions.start')}
+        </Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function MeetingAudioImportDialog({
+  models,
+  speakerModels,
+  prefs,
+  loading,
+  onClose,
+  onStart,
+}: {
+  models: MeetingAsrModelDescriptor[];
+  speakerModels: SpeakerDiarizationModelDescriptor[];
+  prefs: UserPreferences | null;
+  loading: boolean;
+  onClose: () => void;
+  onStart: (options: StartMeetingAudioImportOptions) => Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const defaultModel = models.find(model => model.isDefault && model.readiness === 'ready')
+    ?? models.find(model => model.readiness === 'ready')
+    ?? models[0];
+  const defaultLocalSpeakerModel = speakerModels.find(model => (
+    model.id === prefs?.postMeetingAsr.diarization.localModelId
+    && model.readiness === 'ready'
+  )) ?? speakerModels.find(model => model.readiness === 'ready');
+  const [selection, setSelection] = useState<MeetingAudioSelection | null>(null);
+  const [choosing, setChoosing] = useState(false);
+  const [dialogError, setDialogError] = useState<string | null>(null);
+  const [title, setTitle] = useState('');
+  const [modelValue, setModelValue] = useState(() => (
+    defaultModel ? meetingModelValue(defaultModel) : ''
+  ));
+  const [diarizationMode, setDiarizationMode] = useState<'off' | 'cloud' | 'local'>('off');
+  const [localDiarizationModelId, setLocalDiarizationModelId] = useState(
+    defaultLocalSpeakerModel?.id ?? '',
+  );
+  const [speakerCount, setSpeakerCount] = useState('auto');
+  const [generateSummary, setGenerateSummary] = useState(true);
+
+  useEffect(() => {
+    if (models.some(model => meetingModelValue(model) === modelValue)) return;
+    const next = models.find(model => model.isDefault && model.readiness === 'ready')
+      ?? models.find(model => model.readiness === 'ready')
+      ?? models[0];
+    setModelValue(next ? meetingModelValue(next) : '');
+  }, [modelValue, models]);
+
+  useEffect(() => {
+    if (speakerModels.some(model => model.id === localDiarizationModelId)) return;
+    setLocalDiarizationModelId(
+      speakerModels.find(model => model.readiness === 'ready')?.id ?? '',
+    );
+  }, [localDiarizationModelId, speakerModels]);
+
+  const selectedModel = models.find(model => meetingModelValue(model) === modelValue);
+  const selectedSpeakerModel = speakerModels.find(model => model.id === localDiarizationModelId);
+  const localSpeakerUnavailable = diarizationMode === 'local'
+    && selectedSpeakerModel?.readiness !== 'ready';
+  const unsupportedCombination = selectedModel?.runtimeKind === 'local'
+    && diarizationMode === 'cloud';
+  const modelUnavailable = selectedModel?.readiness !== 'ready';
+  const canStart = Boolean(
+    selection
+    && selectedModel
+    && !modelUnavailable
+    && !localSpeakerUnavailable
+    && !unsupportedCombination
+    && !loading
+    && !choosing,
+  );
+
+  const chooseFile = async () => {
+    setChoosing(true);
+    setDialogError(null);
+    try {
+      setSelection(await chooseMeetingAudioFile());
+    } catch (error) {
+      setDialogError(t('meetings.audioImport.chooseFailed', { err: errorMessage(error) }));
+    } finally {
+      setChoosing(false);
+    }
+  };
+
+  const start = async () => {
+    if (!canStart || !selection || !selectedModel) return;
+    setDialogError(null);
+    try {
+      await onStart({
+        selectionToken: selection.selectionToken,
+        title: title.trim(),
+        asrModelRef: {
+          providerId: selectedModel.providerId,
+          modelId: selectedModel.modelId,
+        },
+        diarizationMode,
+        localDiarizationModelId: diarizationMode === 'local'
+          ? localDiarizationModelId
+          : null,
+        expectedSpeakerCount: speakerCount === 'auto' ? null : Number(speakerCount),
+        generateSummary,
+      });
+    } catch (error) {
+      setDialogError(t('meetings.audioImport.startFailed', { err: errorMessage(error) }));
+    }
+  };
+
+  return (
+    <Modal onClose={loading ? () => undefined : onClose} width="min(560px, 100%)">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 17, fontWeight: 650, color: 'var(--ol-ink)' }}>
+          {t('meetings.audioImport.title')}
+        </h2>
+        <Btn icon="x" variant="ghost" size="sm" disabled={loading} onClick={onClose}>
+          {t('common.cancel')}
+        </Btn>
+      </div>
+      <div style={{ display: 'grid', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <Btn icon="doc" variant="ghost" size="sm" disabled={loading || choosing} onClick={() => void chooseFile()}>
+            {choosing ? t('meetings.audioImport.choosing') : t('meetings.audioImport.chooseFile')}
+          </Btn>
+          <span style={{ minWidth: 0, flex: 1, fontSize: 12, color: 'var(--ol-ink-3)', overflowWrap: 'anywhere' }}>
+            {selection?.fileName ?? t('meetings.audioImport.noFile')}
+          </span>
+        </div>
+        {selection && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8, padding: 10, border: '0.5px solid var(--ol-line-soft)', borderRadius: 8, fontSize: 11.5, color: 'var(--ol-ink-4)' }}>
+            <span>{t('meetings.audioImport.duration')}: {formatDuration(selection.durationMs, t)}</span>
+            <span>{t('meetings.audioImport.size')}: {formatFileSize(selection.sizeBytes)}</span>
+            <span>{selection.sampleRate / 1000} kHz · {selection.channels} ch · {selection.bitsPerSample} bit</span>
+          </div>
+        )}
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={configLabelStyle}>{t('meetings.audioImport.meetingTitle')}</span>
+          <input
+            value={title}
+            onChange={event => setTitle(event.target.value)}
+            placeholder={selection?.fileName.replace(/\.wav$/i, '') ?? t('meetings.audioImport.titlePlaceholder')}
+            aria-label={t('meetings.audioImport.meetingTitle')}
+            style={editorInputStyle}
+          />
+        </label>
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={configLabelStyle}>{t('meetings.audioImport.asrModel')}</span>
+          <SelectLite
+            value={modelValue}
+            onChange={setModelValue}
+            options={models.map(model => ({
+              value: meetingModelValue(model),
+              label: `${model.displayName} · ${t(`meetings.audioImport.runtime.${model.runtimeKind}`)}`,
+              disabled: model.readiness !== 'ready',
+            }))}
+            placeholder={t('meetings.audioImport.modelUnavailable')}
+            ariaLabel={t('meetings.audioImport.asrModel')}
+            style={{ width: '100%' }}
+          />
+          {selectedModel?.readinessMessage && selectedModel.readiness !== 'ready' && (
+            <span style={{ fontSize: 11, color: 'var(--ol-danger)' }}>{selectedModel.readinessMessage}</span>
+          )}
+        </label>
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={configLabelStyle}>{t('meetings.audioImport.diarization')}</span>
+          <SelectLite
+            value={diarizationMode}
+            onChange={value => setDiarizationMode(value as 'off' | 'cloud' | 'local')}
+            options={[
+              { value: 'off', label: t('meetings.postProcessing.diarization.off') },
+              {
+                value: 'cloud',
+                label: t('meetings.postProcessing.diarization.cloud'),
+                disabled: selectedModel?.runtimeKind === 'local' || !selectedModel?.supportsDiarization,
+              },
+              { value: 'local', label: t('meetings.postProcessing.diarization.local') },
+            ]}
+            ariaLabel={t('meetings.audioImport.diarization')}
+            style={{ width: '100%' }}
+          />
+        </label>
+        {diarizationMode === 'local' && (
+          <label style={{ display: 'grid', gap: 6 }}>
+            <span style={configLabelStyle}>{t('meetings.audioImport.localSpeakerModel')}</span>
+            <SelectLite
+              value={localDiarizationModelId}
+              onChange={setLocalDiarizationModelId}
+              options={speakerModels.map(model => ({
+                value: model.id,
+                label: model.displayName,
+                disabled: model.readiness !== 'ready',
+              }))}
+              placeholder={t('meetings.audioImport.localSpeakerModelMissing')}
+              ariaLabel={t('meetings.audioImport.localSpeakerModel')}
+              style={{ width: '100%' }}
+            />
+          </label>
+        )}
+        {diarizationMode !== 'off' && (
+          <label style={{ display: 'grid', gap: 6 }}>
+            <span style={configLabelStyle}>{t('meetings.startConfig.expectedSpeakers')}</span>
+            <SelectLite
+              value={speakerCount}
+              onChange={setSpeakerCount}
+              options={speakerCountOptions(t)}
+              ariaLabel={t('meetings.startConfig.expectedSpeakers')}
+              style={{ width: '100%' }}
+            />
+          </label>
+        )}
+        <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 12.5, color: 'var(--ol-ink-2)' }}>
+          <input
+            type="checkbox"
+            checked={generateSummary}
+            onChange={event => setGenerateSummary(event.target.checked)}
+          />
+          {t('meetings.audioImport.generateSummary')}
+        </label>
+        {selectedModel?.runtimeKind === 'cloud' && (
+          <ErrorBanner tone="warning">
+            {diarizationMode === 'local'
+              ? t('meetings.audioImport.cloudAsrLocalDiarizationNotice')
+              : t('meetings.audioImport.cloudUploadNotice')}
+          </ErrorBanner>
+        )}
+        {selectedModel?.runtimeKind === 'local' && (
+          <ErrorBanner tone={unsupportedCombination ? 'error' : 'warning'}>
+            {unsupportedCombination
+              ? t('meetings.audioImport.unsupportedLocalCloud')
+              : t('meetings.audioImport.localOnlyNotice')}
+          </ErrorBanner>
+        )}
+        {localSpeakerUnavailable && (
+          <ErrorBanner tone="error">{t('meetings.audioImport.localSpeakerModelMissing')}</ErrorBanner>
+        )}
+        {dialogError && <ErrorBanner tone="error">{dialogError}</ErrorBanner>}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
+        <Btn variant="ghost" size="sm" disabled={loading} onClick={onClose}>
+          {t('common.cancel')}
+        </Btn>
+        <Btn icon="doc" variant="blue" size="sm" disabled={!canStart} onClick={() => void start()}>
+          {loading ? t('meetings.audioImport.starting') : t('meetings.audioImport.start')}
+        </Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function MeetingConfigRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 14, paddingBottom: 10, borderBottom: '0.5px solid var(--ol-line-soft)' }}>
+      <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>{label}</span>
+      <span style={{ minWidth: 0, textAlign: 'right', fontSize: 12.5, color: 'var(--ol-ink)', overflowWrap: 'anywhere' }}>{children}</span>
+    </div>
+  );
+}
+
+function MeetingAudioImportSection({
+  record,
+  models,
+  speakerModels,
+  actionLoading,
+  onRetry,
+  onCancel,
+  onRenameSpeaker,
+}: {
+  record: MeetingRecord;
+  models: MeetingAsrModelDescriptor[];
+  speakerModels: SpeakerDiarizationModelDescriptor[];
+  actionLoading: ActionLoading;
+  onRetry: (options: RetryMeetingAudioImportOptions) => void;
+  onCancel: () => void;
+  onRenameSpeaker: (speakerId: string, displayName: string) => void;
+}) {
+  const { t } = useTranslation();
+  const state = record.importState;
+  const config = record.importConfig;
+  const [modelValue, setModelValue] = useState(() => (
+    config ? meetingModelValue(config.asrModelRef) : ''
+  ));
+  const [diarizationMode, setDiarizationMode] = useState(config?.diarizationMode ?? 'off');
+  const [localModelId, setLocalModelId] = useState(config?.localDiarizationModelId ?? '');
+  const [speakerCount, setSpeakerCount] = useState(
+    config?.expectedSpeakerCount ? String(config.expectedSpeakerCount) : 'auto',
+  );
+  const [generateSummary, setGenerateSummary] = useState(config?.generateSummary ?? true);
+
+  useEffect(() => {
+    if (!config) return;
+    setModelValue(meetingModelValue(config.asrModelRef));
+    setDiarizationMode(config.diarizationMode);
+    setLocalModelId(config.localDiarizationModelId ?? '');
+    setSpeakerCount(config.expectedSpeakerCount ? String(config.expectedSpeakerCount) : 'auto');
+    setGenerateSummary(config.generateSummary);
+  }, [config]);
+
+  if (!state || !config) return null;
+  const selectedModel = models.find(model => meetingModelValue(model) === modelValue);
+  const selectedLocalModel = speakerModels.find(model => model.id === localModelId);
+  const summaryFailure = state.status === 'failed'
+    && state.errorCode?.startsWith('summary') === true;
+  const retryable = (state.status === 'failed' || state.status === 'cancelled')
+    && !summaryFailure;
+  const cancellable = ['selected', 'validating', 'importing', 'ready', 'transcribing', 'applying'].includes(state.status);
+  const busy = actionLoading === 'import';
+  const unsupportedCombination = selectedModel?.runtimeKind === 'local' && diarizationMode === 'cloud';
+  const localSpeakerUnavailable = diarizationMode === 'local'
+    && selectedLocalModel?.readiness !== 'ready';
+  const canRetry = Boolean(
+    retryable
+    && selectedModel?.readiness === 'ready'
+    && !unsupportedCombination
+    && !localSpeakerUnavailable
+    && !busy,
+  );
+  const progress = state.progress == null ? null : Math.round(state.progress * 100);
+  const processingError = meetingPostProcessingError(state.errorCode, state.errorMessage, t);
+
+  return (
+    <section style={{ padding: '12px 0', borderBottom: '0.5px solid var(--ol-line)', marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
+          {t('meetings.audioImport.processingTitle')}
+        </span>
+        <Pill size="sm" tone={importStatusTone(state.status)}>
+          {t(`meetings.audioImport.status.${state.status}`)}
+        </Pill>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, fontSize: 11.5, color: 'var(--ol-ink-4)' }}>
+        <span>{t('meetings.audioImport.sourceFile')}: {config.sourceFileName}</span>
+        <span>{t('meetings.audioImport.asrModel')}: {config.asrModelRef.modelId}</span>
+        <span>{t('meetings.audioImport.runtimeLabel')}: {t(`meetings.audioImport.runtime.${config.resolvedAsrRuntimeKind}`)}</span>
+        <span>{t('meetings.postProcessing.attempt')}: {state.attempt}</span>
+      </div>
+      {progress != null && !['completed', 'failed', 'cancelled'].includes(state.status) && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ height: 5, borderRadius: 3, background: 'var(--ol-control-muted)', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${progress}%`, background: 'var(--ol-blue)', transition: 'width .18s var(--ol-motion-quick)' }} />
+          </div>
+          <div style={{ marginTop: 4, fontSize: 10.5, color: 'var(--ol-ink-4)' }}>{progress}%</div>
+        </div>
+      )}
+      {processingError && (
+        <div style={{ marginTop: 10 }}><ErrorBanner tone="error">{processingError}</ErrorBanner></div>
+      )}
+      {summaryFailure && (
+        <div style={{ marginTop: 10 }}>
+          <ErrorBanner tone="warning">{t('meetings.audioImport.summaryRetryHint')}</ErrorBanner>
+        </div>
+      )}
+      {retryable && (
+        <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
+          <SelectLite
+            value={modelValue}
+            onChange={setModelValue}
+            options={models.map(model => ({
+              value: meetingModelValue(model),
+              label: `${model.displayName} · ${t(`meetings.audioImport.runtime.${model.runtimeKind}`)}`,
+              disabled: model.readiness !== 'ready',
+            }))}
+            ariaLabel={t('meetings.audioImport.asrModel')}
+            style={{ width: '100%' }}
+          />
+          <SelectLite
+            value={diarizationMode}
+            onChange={value => setDiarizationMode(value as 'off' | 'cloud' | 'local')}
+            options={[
+              { value: 'off', label: t('meetings.postProcessing.diarization.off') },
+              {
+                value: 'cloud',
+                label: t('meetings.postProcessing.diarization.cloud'),
+                disabled: selectedModel?.runtimeKind === 'local' || !selectedModel?.supportsDiarization,
+              },
+              { value: 'local', label: t('meetings.postProcessing.diarization.local') },
+            ]}
+            ariaLabel={t('meetings.audioImport.diarization')}
+            style={{ width: '100%' }}
+          />
+          {diarizationMode === 'local' && (
+            <SelectLite
+              value={localModelId}
+              onChange={setLocalModelId}
+              options={speakerModels.map(model => ({
+                value: model.id,
+                label: model.displayName,
+                disabled: model.readiness !== 'ready',
+              }))}
+              placeholder={t('meetings.audioImport.localSpeakerModelMissing')}
+              ariaLabel={t('meetings.audioImport.localSpeakerModel')}
+              style={{ width: '100%' }}
+            />
+          )}
+          {diarizationMode !== 'off' && (
+            <SelectLite
+              value={speakerCount}
+              onChange={setSpeakerCount}
+              options={speakerCountOptions(t)}
+              ariaLabel={t('meetings.startConfig.expectedSpeakers')}
+              style={{ width: '100%' }}
+            />
+          )}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 12, color: 'var(--ol-ink-2)' }}>
+            <input
+              type="checkbox"
+              checked={generateSummary}
+              onChange={event => setGenerateSummary(event.target.checked)}
+            />
+            {t('meetings.audioImport.generateSummary')}
+          </label>
+          {(unsupportedCombination || localSpeakerUnavailable) && (
+            <ErrorBanner tone="error">
+              {unsupportedCombination
+                ? t('meetings.audioImport.unsupportedLocalCloud')
+                : t('meetings.audioImport.localSpeakerModelMissing')}
+            </ErrorBanner>
+          )}
+        </div>
+      )}
+      {(retryable || cancellable) && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+          {retryable && selectedModel && (
+            <Btn
+              icon="refresh"
+              variant="blue"
+              size="sm"
+              disabled={!canRetry}
+              onClick={() => onRetry({
+                asrModelRef: {
+                  providerId: selectedModel.providerId,
+                  modelId: selectedModel.modelId,
+                },
+                diarizationMode,
+                localDiarizationModelId: diarizationMode === 'local' ? localModelId : null,
+                expectedSpeakerCount: speakerCount === 'auto'
+                  ? { mode: 'auto' }
+                  : { mode: 'fixed', count: Number(speakerCount) },
+                generateSummary,
+              })}
+            >
+              {t('meetings.audioImport.retry')}
+            </Btn>
+          )}
+          {cancellable && (
+            <Btn icon="x" variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
+              {state.status === 'cancelling'
+                ? t('meetings.audioImport.cancelling')
+                : t('meetings.audioImport.cancel')}
+            </Btn>
+          )}
+        </div>
+      )}
+      <SpeakerRenameSection
+        speakerProfiles={record.speakerProfiles}
+        disabled={busy}
+        onRename={onRenameSpeaker}
+      />
+    </section>
+  );
+}
+
+function PostProcessingSection({
+  record,
+  models,
+  actionLoading,
+  onRetry,
+  onCancel,
+  onUseRealtime,
+  onRenameSpeaker,
+}: {
+  record: MeetingRecord;
+  models: PostMeetingAsrModelDescriptor[];
+  actionLoading: ActionLoading;
+  onRetry: (modelRef: MeetingAsrModelRef, speakerCount: string) => void;
+  onCancel: () => void;
+  onUseRealtime: () => void;
+  onRenameSpeaker: (speakerId: string, displayName: string) => void;
+}) {
+  const { t } = useTranslation();
+  const state = record.postProcessing;
+  const config = record.postProcessingConfig;
+  const [modelValue, setModelValue] = useState(() => {
+    const modelRef = state?.modelRef ?? config?.postMeetingAsrModelRef;
+    return modelRef ? `${modelRef.providerId}/${modelRef.modelId}` : '';
+  });
+  const [speakerCount, setSpeakerCount] = useState(() => {
+    const count = state?.expectedSpeakerCount ?? config?.expectedSpeakerCount;
+    return count ? String(count) : 'auto';
+  });
+
+  useEffect(() => {
+    const modelRef = state?.modelRef ?? config?.postMeetingAsrModelRef;
+    if (modelRef) setModelValue(`${modelRef.providerId}/${modelRef.modelId}`);
+    const count = state?.expectedSpeakerCount ?? config?.expectedSpeakerCount;
+    setSpeakerCount(count ? String(count) : 'auto');
+  }, [config?.expectedSpeakerCount, config?.postMeetingAsrModelRef, state?.expectedSpeakerCount, state?.modelRef]);
+
+  if (!state || !config) return null;
+
+  const retryable = state.status === 'failed' || state.status === 'cancelled';
+  const cancellable = ['pending', 'preparing_audio', 'uploading', 'running', 'local_analyzing', 'applying', 'failed'].includes(state.status);
+  const selectedModel = models.find(model => `${model.providerId}/${model.modelId}` === modelValue);
+  const busy = actionLoading === 'postProcessing';
+  const detectedSpeakerCount = record.speakerProfiles?.length ?? 0;
+  const speakerCountMismatch = state.status === 'completed'
+    && state.diarizationMode !== 'off'
+    && state.expectedSpeakerCount != null
+    && detectedSpeakerCount > 0
+    && detectedSpeakerCount !== state.expectedSpeakerCount;
+  const processingError = meetingPostProcessingError(state.errorCode, state.errorMessage, t);
+
+  return (
+    <section style={{ padding: '12px 0', borderBottom: '0.5px solid var(--ol-line)', marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
+          {t('meetings.postProcessing.title')}
+        </span>
+        <Pill size="sm" tone={postProcessingTone(state.status)}>
+          {t(`meetings.postProcessing.status.${state.status}`)}
+        </Pill>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, fontSize: 11.5, color: 'var(--ol-ink-4)' }}>
+        <span>{t('meetings.postProcessing.model')}: {state.modelRef.modelId}</span>
+        <span>{t('meetings.postProcessing.attempt')}: {state.attempt}</span>
+        <span>{t('meetings.postProcessing.revision')}: {state.processingRevision}</span>
+        <span>{t('meetings.postProcessing.diarizationLabel')}: {t(`meetings.postProcessing.diarization.${state.diarizationMode}`)}</span>
+      </div>
+      {processingError && (
+        <div style={{ marginTop: 10 }}>
+          <ErrorBanner tone="error">{processingError}</ErrorBanner>
+        </div>
+      )}
+      {speakerCountMismatch && (
+        <div style={{ marginTop: 10 }}>
+          <ErrorBanner tone="warning">
+            {t('meetings.postProcessing.speakerCountMismatch', {
+              expected: state.expectedSpeakerCount,
+              detected: detectedSpeakerCount,
+            })}
+          </ErrorBanner>
+        </div>
+      )}
+      {retryable && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 8, marginTop: 10 }}>
+          <SelectLite
+            value={modelValue}
+            onChange={setModelValue}
+            options={models.map(model => ({
+              value: `${model.providerId}/${model.modelId}`,
+              label: model.displayName,
+            }))}
+            ariaLabel={t('meetings.postProcessing.retryModel')}
+            disabled={busy}
+            style={{ width: '100%' }}
+          />
+          <SelectLite
+            value={speakerCount}
+            onChange={setSpeakerCount}
+            options={speakerCountOptions(t)}
+            ariaLabel={t('meetings.startConfig.expectedSpeakers')}
+            disabled={busy}
+            style={{ width: '100%' }}
+          />
+        </div>
+      )}
+      {(retryable || cancellable) && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+          {retryable && selectedModel && (
+            <Btn icon="refresh" variant="blue" size="sm" disabled={busy} onClick={() => onRetry(selectedModel, speakerCount)}>
+              {t('meetings.postProcessing.retry')}
+            </Btn>
+          )}
+          {cancellable && (
+            <Btn icon="x" variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
+              {t('meetings.postProcessing.cancel')}
+            </Btn>
+          )}
+          {(state.status === 'failed' || state.status === 'cancelled') && (
+            <Btn icon="doc" variant="ghost" size="sm" disabled={busy} onClick={onUseRealtime}>
+              {t('meetings.postProcessing.useRealtime')}
+            </Btn>
+          )}
+        </div>
+      )}
+      <SpeakerRenameSection
+        speakerProfiles={record.speakerProfiles}
+        disabled={busy}
+        onRename={onRenameSpeaker}
+      />
+    </section>
+  );
+}
+
+function SpeakerRenameSection({
+  speakerProfiles,
+  disabled,
+  onRename,
+}: {
+  speakerProfiles: MeetingRecord['speakerProfiles'];
+  disabled: boolean;
+  onRename: (speakerId: string, displayName: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const contentId = useId();
+  if (!speakerProfiles?.length) return null;
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={contentId}
+        onClick={() => setExpanded(value => !value)}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+          minHeight: 28,
+          padding: '4px 2px',
+          border: 'none',
+          background: 'transparent',
+          color: 'var(--ol-ink-2)',
+          fontFamily: 'inherit',
+          fontSize: 12,
+          fontWeight: 500,
+          cursor: 'pointer',
+        }}
+      >
+        <Icon name="user" size={13} />
+        <span>{t('meetings.postProcessing.speakers')}</span>
+        <span style={{ color: 'var(--ol-ink-3)', fontVariantNumeric: 'tabular-nums' }}>
+          ({speakerProfiles.length})
+        </span>
+        <Icon name={expanded ? 'chevDown' : 'chevRight'} size={13} />
+      </button>
+      <div
+        id={contentId}
+        hidden={!expanded}
+        style={{ display: expanded ? 'grid' : 'none', gap: 8, marginTop: 6 }}
+      >
+        {speakerProfiles.map(profile => (
+          <SpeakerRenameRow
+            key={profile.id}
+            speakerId={profile.id}
+            displayName={profile.displayName}
+            disabled={disabled}
+            onRename={onRename}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SpeakerRenameRow({
+  speakerId,
+  displayName,
+  disabled,
+  onRename,
+}: {
+  speakerId: string;
+  displayName: string;
+  disabled: boolean;
+  onRename: (speakerId: string, displayName: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [draft, setDraft] = useState(displayName);
+  useEffect(() => setDraft(displayName), [displayName]);
+  const trimmed = draft.trim();
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <input
+        value={draft}
+        onChange={event => setDraft(event.target.value)}
+        aria-label={t('meetings.postProcessing.speakerName')}
+        disabled={disabled}
+        style={{ ...editorInputStyle, flex: 1, minWidth: 0 }}
+      />
+      <Btn icon="check" variant="ghost" size="sm" disabled={disabled || !trimmed || trimmed === displayName} onClick={() => onRename(speakerId, trimmed)}>
+        {t('common.save')}
+      </Btn>
+    </div>
+  );
+}
+
+function speakerCountOptions(t: ReturnType<typeof useTranslation>['t']) {
+  return [
+    { value: 'auto', label: t('meetings.startConfig.speakerCountAuto') },
+    ...Array.from({ length: 20 }, (_, index) => ({
+      value: String(index + 1),
+      label: t('meetings.startConfig.speakerCountFixed', { count: index + 1 }),
+    })),
+  ];
+}
+
+function postProcessingTone(status: NonNullable<MeetingRecord['postProcessing']>['status']): PillTone {
+  if (status === 'completed' || status === 'realtime_accepted') return 'ok';
+  if (status === 'failed') return 'outline';
+  if (status === 'cancelled') return 'outline';
+  return 'blue';
+}
+
+function importStatusTone(status: NonNullable<MeetingRecord['importState']>['status']): PillTone {
+  if (status === 'completed') return 'ok';
+  if (status === 'failed' || status === 'cancelled') return 'outline';
+  return 'blue';
 }
 
 function MeetingListHeader({
@@ -1097,47 +2324,248 @@ function MeetingDetailHeader({
   );
 }
 
+function MeetingContentTabs({
+  activeTab,
+  onChange,
+}: {
+  activeTab: MeetingContentTab;
+  onChange: (tab: MeetingContentTab) => void;
+}) {
+  const { t } = useTranslation();
+  const tabRefs = useRef<Partial<Record<MeetingContentTab, HTMLButtonElement | null>>>({});
+  const handleKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    tab: MeetingContentTab,
+  ) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = moveMeetingContentTab(tab, event.key as MeetingTabNavigationKey);
+    onChange(next);
+    tabRefs.current[next]?.focus();
+  };
+  return (
+    <div
+      role="tablist"
+      aria-label={t('meetings.tabs.label')}
+      style={{
+        display: 'flex',
+        gap: 18,
+        minHeight: 38,
+        borderBottom: '0.5px solid var(--ol-line-soft)',
+        flexShrink: 0,
+      }}
+    >
+      {MEETING_CONTENT_TABS.map(tab => {
+        const selected = activeTab === tab;
+        return (
+          <button
+            key={tab}
+            ref={node => { tabRefs.current[tab] = node; }}
+            id={`meeting-tab-${tab}`}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            aria-controls={`meeting-tabpanel-${tab}`}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onChange(tab)}
+            onKeyDown={event => handleKeyDown(event, tab)}
+            style={{
+              position: 'relative',
+              minWidth: 0,
+              padding: '0 2px 10px',
+              border: 0,
+              background: 'transparent',
+              color: selected ? 'var(--ol-ink)' : 'var(--ol-ink-4)',
+              fontFamily: 'inherit',
+              fontSize: 12.5,
+              fontWeight: selected ? 650 : 500,
+              cursor: 'default',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {t(`meetings.tabs.${tab}`)}
+            {selected && (
+              <span
+                aria-hidden="true"
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  right: 0,
+                  bottom: -1,
+                  height: 2,
+                  borderRadius: 2,
+                  background: 'var(--ol-blue)',
+                }}
+              />
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function OrganizedDraftSection({
+  record,
+  mobile,
+  actionLoading,
+  onGenerate,
+  onRetry,
+  onRegenerate,
+}: {
+  record: MeetingRecord;
+  mobile: boolean;
+  actionLoading: ActionLoading;
+  onGenerate: () => void;
+  onRetry: () => void;
+  onRegenerate: () => void;
+}) {
+  const { t } = useTranslation();
+  const view = organizedDraftView(record);
+  const draft = record.organizedDraft ?? null;
+  const busy = actionLoading === 'organized' || view.state === 'pending' || view.state === 'running';
+  const action = view.state === 'missing'
+    ? { label: t('meetings.organized.actions.generate'), onClick: onGenerate }
+    : view.state === 'failed'
+      ? { label: t('meetings.organized.actions.retry'), onClick: onRetry }
+      : ['completed', 'stale'].includes(view.state)
+        ? { label: t('meetings.organized.actions.regenerate'), onClick: onRegenerate }
+        : null;
+  const tone = view.state === 'failed'
+    ? 'error'
+    : view.state === 'stale'
+      ? 'warning'
+      : null;
+
+  return (
+    <section
+      id="meeting-tabpanel-organized"
+      role="tabpanel"
+      aria-labelledby="meeting-tab-organized"
+      style={{ minHeight: 220 }}
+    >
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 650, color: 'var(--ol-ink-2)' }}>
+            {t('meetings.organized.title')}
+          </div>
+          {draft && (
+            <div style={{ marginTop: 4, fontSize: 11, color: 'var(--ol-ink-4)' }}>
+              {t('meetings.organized.generatedAt', { time: formatDateTime(draft.generatedAt) })}
+            </div>
+          )}
+        </div>
+        {action && (
+          <Btn
+            icon="refresh"
+            variant={view.state === 'failed' || view.state === 'stale' ? 'blue' : 'ghost'}
+            size="sm"
+            disabled={actionLoading !== null || busy}
+            onClick={action.onClick}
+          >
+            {actionLoading === 'organized'
+              ? t('meetings.organized.actions.processing')
+              : action.label}
+          </Btn>
+        )}
+      </div>
+
+      {tone ? (
+        <ErrorBanner tone={tone}>
+          {t(`meetings.organized.state.${view.state}`)}
+          {record.organizedDraftState?.errorMessage
+            ? ` ${record.organizedDraftState.errorMessage}`
+            : ''}
+        </ErrorBanner>
+      ) : view.state !== 'completed' && (
+        <div style={{ marginBottom: 12, padding: '12px 14px', border: '0.5px solid var(--ol-line)', borderRadius: 8, background: 'var(--ol-surface-2)', color: 'var(--ol-ink-4)', fontSize: 12.5, lineHeight: 1.6 }}>
+          {t(`meetings.organized.state.${view.state}`)}
+        </div>
+      )}
+
+      {draft && ['pending', 'running', 'failed'].includes(view.state) && (
+        <div style={{ marginBottom: 10, fontSize: 11.5, color: 'var(--ol-ink-4)' }}>
+          {t('meetings.organized.showingPrevious')}
+        </div>
+      )}
+
+      {draft && (
+        <div style={{ borderTop: '0.5px solid var(--ol-line-soft)' }}>
+          {draft.items.map((item, index) => (
+            <MeetingTextRow
+              key={`${item.sourceSegmentIds.join('-')}-${index}`}
+              speakerLabel={item.speakerLabel}
+              startMs={item.startMs}
+              endMs={item.endMs}
+              text={item.text}
+              mobile={mobile}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function TranscriptList({
   record,
+  segments,
   draft,
+  mobile,
+  historical,
+  emptyMessage,
   scrollRef,
   onScroll,
   actionLoading,
   canRetranscribe,
+  retranscribing,
   onRetranscribe,
 }: {
   record: MeetingRecord;
+  segments: TranscriptSegment[];
   draft: MeetingTranscriptDraftEvent | null;
+  mobile: boolean;
+  historical: boolean;
+  emptyMessage: string;
   scrollRef: MutableRefObject<HTMLDivElement | null>;
   onScroll: () => void;
   actionLoading: ActionLoading;
   canRetranscribe: boolean;
+  retranscribing: boolean;
   onRetranscribe: () => void;
 }) {
   const { t } = useTranslation();
-  const hasTranscriptRows = record.transcriptSegments.length > 0;
-  const rowCount = record.transcriptSegments.length + (draft ? 1 : 0);
+  const hasTranscriptRows = segments.length > 0;
+  const rowCount = segments.length + (draft ? 1 : 0);
   const virtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 92,
-    getItemKey: index => record.transcriptSegments[index]?.id ?? 'draft',
+    getItemKey: index => segments[index]?.id ?? 'draft',
     overscan: 6,
   });
   const virtualRows = virtualizer.getVirtualItems();
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 260 }}>
+    <div
+      id="meeting-tabpanel-transcript"
+      role="tabpanel"
+      aria-labelledby="meeting-tab-transcript"
+      style={{ display: 'flex', flexDirection: 'column', minHeight: 260 }}
+    >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexShrink: 0 }}>
         <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
           {t('meetings.transcriptTitle')}
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {historical && (
+            <Pill size="sm" tone="outline">{t('meetings.transcript.historical')}</Pill>
+          )}
           <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
-            {t('meetings.segmentCount', { count: record.transcriptSegments.length })}
+            {t('meetings.segmentCount', { count: segments.length })}
           </span>
           {canRetranscribe && (
-            <Btn icon="refresh" variant="ghost" size="sm" disabled={actionLoading !== null} onClick={onRetranscribe}>
-              {actionLoading === 'retranscribe' ? t('meetings.actions.retranscribing') : t('meetings.actions.retranscribe')}
+            <Btn icon="refresh" variant="ghost" size="sm" disabled={actionLoading !== null || retranscribing} onClick={onRetranscribe}>
+              {actionLoading === 'retranscribe' || retranscribing ? t('meetings.actions.retranscribing') : t('meetings.actions.retranscribe')}
             </Btn>
           )}
         </div>
@@ -1150,12 +2578,16 @@ function TranscriptList({
       >
         {!hasTranscriptRows && !draft ? (
           <div style={{ padding: 18, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)', color: 'var(--ol-ink-4)', fontSize: 12.5, lineHeight: 1.55 }}>
-            {t('meetings.noTranscript')}
+            {emptyMessage}
           </div>
         ) : (
           <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
             {virtualRows.map(virtualRow => {
-              const segment = record.transcriptSegments[virtualRow.index];
+              const segment = segments[virtualRow.index];
+              const speakerLabel = segment?.speakerId
+                ? record.speakerProfiles?.find(profile => profile.id === segment.speakerId)?.displayName
+                  ?? segment.speakerLabel
+                : segment?.speakerLabel;
               return (
                 <div
                   key={virtualRow.key}
@@ -1170,7 +2602,13 @@ function TranscriptList({
                     paddingBottom: 8,
                   }}
                 >
-                  {segment ? <TranscriptRow segment={segment} /> : draft ? <TranscriptDraftRow draft={draft} /> : null}
+                  {segment ? (
+                    <TranscriptRow
+                      segment={segment}
+                      speakerLabel={speakerLabel}
+                      mobile={mobile}
+                    />
+                  ) : draft ? <TranscriptDraftRow draft={draft} /> : null}
                 </div>
               );
             })}
@@ -1478,24 +2916,79 @@ function TodoList({ todos }: { todos: MeetingRecord['summary']['todos'] }) {
   );
 }
 
-function TranscriptRow({ segment }: { segment: TranscriptSegment }) {
+function MeetingTextRow({
+  speakerLabel,
+  startMs,
+  endMs,
+  text,
+  mobile,
+  technicalMeta,
+}: {
+  speakerLabel: string;
+  startMs: number;
+  endMs: number | null;
+  text: string;
+  mobile: boolean;
+  technicalMeta?: ReactNode;
+}) {
   const { t } = useTranslation();
   return (
     <div style={{
-      padding: '11px 12px',
-      border: '0.5px solid var(--ol-line)',
-      borderRadius: 10,
-      background: 'var(--ol-surface-2)',
+      display: 'grid',
+      gridTemplateColumns: mobile ? '1fr' : '132px minmax(0, 1fr)',
+      gap: mobile ? 7 : 18,
+      padding: '14px 2px',
+      borderBottom: '0.5px solid var(--ol-line-soft)',
     }}>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 7 }}>
-        <Pill size="sm" tone="outline">{segment.speakerLabel || t('meetings.unknownSpeaker')}</Pill>
-        <Pill size="sm" tone="default">{formatTimestamp(segment.startMs)}</Pill>
-        <Pill size="sm" tone="outline">{sourceLabel(segment.source, t)}</Pill>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 12, fontWeight: 650, color: 'var(--ol-ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {speakerLabel || t('meetings.unknownSpeaker')}
+        </div>
+        <div style={{ marginTop: 4, fontSize: 10.5, color: 'var(--ol-ink-4)', fontFamily: 'var(--ol-font-mono)', whiteSpace: 'nowrap' }}>
+          {formatTimestamp(startMs)}{endMs != null ? ` - ${formatTimestamp(endMs)}` : ''}
+        </div>
+        {technicalMeta && (
+          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center', marginTop: 7 }}>
+            {technicalMeta}
+          </div>
+        )}
       </div>
-      <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink)', whiteSpace: 'pre-wrap' }}>
-        {segment.text}
+      <div style={{ minWidth: 0, fontSize: 13, lineHeight: 1.75, color: 'var(--ol-ink)', whiteSpace: 'pre-wrap' }}>
+        {text}
       </div>
     </div>
+  );
+}
+
+function TranscriptRow({
+  segment,
+  speakerLabel,
+  mobile,
+}: {
+  segment: TranscriptSegment;
+  speakerLabel?: string;
+  mobile: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <MeetingTextRow
+      speakerLabel={speakerLabel || t('meetings.unknownSpeaker')}
+      startMs={segment.startMs}
+      endMs={segment.endMs}
+      text={segment.text}
+      mobile={mobile}
+      technicalMeta={(
+        <>
+          <Pill size="sm" tone="outline">{sourceLabel(segment.source, t)}</Pill>
+          {segment.metadata?.needsReview && (
+            <Pill size="sm" tone="outline">{t('meetings.postProcessing.needsReview')}</Pill>
+          )}
+          {segment.metadata?.overlapping && (
+            <Pill size="sm" tone="outline">{t('meetings.postProcessing.overlappingSpeech')}</Pill>
+          )}
+        </>
+      )}
+    />
   );
 }
 
@@ -1522,15 +3015,24 @@ function TranscriptDraftRow({ draft }: { draft: MeetingTranscriptDraftEvent }) {
   );
 }
 
-function ErrorBanner({ children, tone }: { children: ReactNode; tone: 'error' | 'warning' }) {
+function ErrorBanner({ children, tone }: { children: ReactNode; tone: 'error' | 'warning' | 'success' }) {
   const warning = tone === 'warning';
+  const success = tone === 'success';
   return (
     <div style={{
       marginBottom: 12,
       padding: '9px 10px',
       borderRadius: 8,
-      background: warning ? 'rgba(245,158,11,0.10)' : 'rgba(239,68,68,0.08)',
-      color: warning ? 'var(--ol-warn, #b45309)' : 'var(--ol-red, #ef4444)',
+      background: success
+        ? 'rgba(22,163,74,0.09)'
+        : warning
+          ? 'rgba(245,158,11,0.10)'
+          : 'rgba(239,68,68,0.08)',
+      color: success
+        ? 'var(--ol-green, #15803d)'
+        : warning
+          ? 'var(--ol-warn, #b45309)'
+          : 'var(--ol-red, #ef4444)',
       fontSize: 12,
       lineHeight: 1.45,
       flexShrink: 0,
@@ -1542,13 +3044,19 @@ function ErrorBanner({ children, tone }: { children: ReactNode; tone: 'error' | 
 
 function MeetingAudioPlayer({
   meetingId,
+  mobile,
+  scrollRootRef,
   onMissing,
 }: {
   meetingId: string;
+  mobile: boolean;
+  scrollRootRef: MutableRefObject<HTMLDivElement | null>;
   onMissing: () => void;
 }) {
   const { t } = useTranslation();
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const fullPlayerRef = useRef<HTMLDivElement | null>(null);
+  const volumeMenuRef = useRef<HTMLDivElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
@@ -1562,6 +3070,8 @@ function MeetingAudioPlayer({
   const [currentTime, setCurrentTime] = useState(0);
   const [speed, setSpeed] = useState<PlaybackSpeed>(1);
   const [volume, setVolume] = useState(1);
+  const [fullPlayerVisible, setFullPlayerVisible] = useState(true);
+  const [volumeMenuOpen, setVolumeMenuOpen] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -1589,6 +3099,29 @@ function MeetingAudioPlayer({
     setDuration(0);
     setCurrentTime(0);
   }, [meetingId]);
+
+  useEffect(() => {
+    const target = fullPlayerRef.current;
+    const root = scrollRootRef.current;
+    if (!target || !root || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      entries => setFullPlayerVisible(entries[0]?.isIntersecting ?? true),
+      { root, threshold: 0.15 },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [meetingId, scrollRootRef]);
+
+  useEffect(() => {
+    if (!volumeMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && volumeMenuRef.current?.contains(target)) return;
+      setVolumeMenuOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [volumeMenuOpen]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.playbackRate = speed;
@@ -1723,18 +3256,66 @@ function MeetingAudioPlayer({
     setVolume(Math.min(2, Math.max(0, next)));
   };
 
+  const speedOptions = PLAYBACK_SPEEDS.map(value => ({
+    value: String(value),
+    label: formatPlaybackSpeed(value),
+  }));
+  const timeLabel = `${formatPlaybackTime(currentTime)} / ${formatPlaybackTime(duration)}`;
+  const playLabel = status === 'loading'
+    ? t('meetings.audioPlayback.loading')
+    : isPlaying
+      ? t('meetings.audioPlayback.pause')
+      : t('meetings.audioPlayback.play');
+  const progress = (compact: boolean, gridColumn?: string) => (
+    <input
+      type="range"
+      min={0}
+      max={duration > 0 ? duration : 0}
+      step={0.1}
+      value={duration > 0 ? Math.min(currentTime, duration) : 0}
+      onChange={event => seekTo(event.target.value)}
+      disabled={status !== 'ready' || duration <= 0}
+      aria-label={t('meetings.audioPlayback.progress')}
+      style={{
+        width: '100%',
+        minWidth: compact ? 84 : 120,
+        height: 20,
+        accentColor: 'var(--ol-blue)',
+        gridColumn,
+      }}
+    />
+  );
+  const playButton = (compact: boolean) => (
+    <button
+      type="button"
+      onClick={togglePlayback}
+      disabled={status === 'loading'}
+      aria-label={playLabel}
+      title={playLabel}
+      style={{
+        width: compact ? 32 : 36,
+        height: compact ? 32 : 36,
+        display: 'inline-grid',
+        placeItems: 'center',
+        flexShrink: 0,
+        border: '0.5px solid var(--ol-line-strong)',
+        borderRadius: '50%',
+        background: isPlaying ? 'var(--ol-blue)' : 'var(--ol-surface)',
+        color: isPlaying ? '#fff' : 'var(--ol-ink-2)',
+        cursor: status === 'loading' ? 'not-allowed' : 'default',
+      }}
+    >
+      <Icon name={isPlaying ? 'pause' : 'play'} size={compact ? 13 : 14} />
+    </button>
+  );
+
   return (
-    <div style={{
-      marginBottom: 14,
-      padding: 12,
-      border: '0.5px solid var(--ol-line)',
-      borderRadius: 8,
-      background: 'var(--ol-surface-2)',
-    }}>
+    <>
       <audio
         ref={audioRef}
         crossOrigin="anonymous"
         preload="metadata"
+        style={{ display: 'none' }}
         onLoadedMetadata={syncTiming}
         onDurationChange={syncTiming}
         onTimeUpdate={syncTiming}
@@ -1742,95 +3323,144 @@ function MeetingAudioPlayer({
         onPause={() => setIsPlaying(false)}
         onEnded={() => setIsPlaying(false)}
       />
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
+      <div
+        ref={fullPlayerRef}
+        style={{
+          marginBottom: 14,
+          padding: mobile ? 11 : 12,
+          border: '0.5px solid var(--ol-line)',
+          borderRadius: 8,
+          background: 'var(--ol-surface-2)',
+        }}
+      >
+        <div style={{ marginBottom: 9, fontSize: 11.5, fontWeight: 650, color: 'var(--ol-ink-2)' }}>
           {t('meetings.audioPlayback.title')}
-        </span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('meetings.audioPlayback.speed')}</span>
-          <div style={{ display: 'flex', border: '0.5px solid var(--ol-line)', borderRadius: 8, overflow: 'hidden', background: 'var(--ol-surface)' }}>
-            {PLAYBACK_SPEEDS.map(value => (
-              <button
-                key={value}
-                type="button"
-                aria-pressed={speed === value}
-                onClick={() => setSpeed(value)}
-                style={{
-                  minWidth: 44,
-                  height: 28,
-                  padding: '0 8px',
-                  border: 0,
-                  borderLeft: value === PLAYBACK_SPEEDS[0] ? 0 : '0.5px solid var(--ol-line-soft)',
-                  background: speed === value ? 'rgba(37,99,235,0.10)' : 'transparent',
-                  color: speed === value ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
-                  fontSize: 11,
-                  fontFamily: 'var(--ol-font-mono)',
-                  cursor: 'default',
-                }}
-              >
-                {formatPlaybackSpeed(value)}
-              </button>
-            ))}
+        </div>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: mobile
+            ? 'auto minmax(0, 1fr) auto'
+            : 'auto minmax(140px, 1fr) auto auto auto',
+          gap: mobile ? '9px 10px' : 10,
+          alignItems: 'center',
+        }}>
+          {playButton(false)}
+          {progress(false, mobile ? '2 / 4' : undefined)}
+          <span style={{ gridColumn: mobile ? '1 / 2' : undefined, fontSize: 10.5, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)', whiteSpace: 'nowrap' }}>
+            {timeLabel}
+          </span>
+          <SelectLite
+            value={String(speed)}
+            onChange={value => setSpeed(Number(value) as PlaybackSpeed)}
+            options={speedOptions}
+            ariaLabel={t('meetings.audioPlayback.speed')}
+            style={{ minWidth: 72, width: 72, height: 30, padding: '0 8px', fontSize: 11 }}
+          />
+          <div ref={volumeMenuRef} style={{ position: 'relative', justifySelf: 'end' }}>
+            <button
+              type="button"
+              aria-label={t('meetings.audioPlayback.volume')}
+              aria-expanded={volumeMenuOpen}
+              title={t('meetings.audioPlayback.volume')}
+              onClick={() => setVolumeMenuOpen(open => !open)}
+              style={{
+                width: 32,
+                height: 30,
+                display: 'inline-grid',
+                placeItems: 'center',
+                borderRadius: 7,
+                border: '0.5px solid var(--ol-line-strong)',
+                background: 'var(--ol-surface)',
+                color: 'var(--ol-ink-3)',
+                cursor: 'default',
+              }}
+            >
+              {volume === 0 ? <VolumeX size={15} /> : <Volume2 size={15} />}
+            </button>
+            {volumeMenuOpen && (
+              <div style={{
+                position: 'absolute',
+                right: 0,
+                top: 34,
+                zIndex: 30,
+                width: 184,
+                padding: 10,
+                display: 'grid',
+                gridTemplateColumns: '1fr auto',
+                gap: 8,
+                alignItems: 'center',
+                border: '0.5px solid var(--ol-line-strong)',
+                borderRadius: 8,
+                background: 'var(--ol-surface)',
+                boxShadow: 'var(--ol-shadow-2)',
+              }}>
+                <input
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={volume}
+                  onChange={event => changeVolume(event.target.value)}
+                  aria-label={t('meetings.audioPlayback.volume')}
+                  style={{ width: '100%', accentColor: 'var(--ol-blue)' }}
+                />
+                <span style={{ width: 38, textAlign: 'right', fontSize: 10.5, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)' }}>
+                  {Math.round(volume * 100)}%
+                </span>
+              </div>
+            )}
           </div>
         </div>
+        {status === 'missing' && (
+          <div style={{ marginTop: 8, fontSize: 11, color: 'var(--ol-ink-4)' }}>
+            {t('meetings.audioPlayback.missing')}
+          </div>
+        )}
+        {status === 'error' && (
+          <div style={{ marginTop: 8, fontSize: 11, color: 'var(--ol-red, #ef4444)' }}>
+            {t('meetings.audioPlayback.loadFailed', { err: errorText ?? '-' })}
+          </div>
+        )}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'auto minmax(120px, 1fr) auto', alignItems: 'center', gap: 10 }}>
-        <Btn
-          icon={isPlaying ? 'pause' : 'play'}
-          variant={isPlaying ? 'blue' : 'ghost'}
-          size="sm"
-          onClick={togglePlayback}
-          disabled={status === 'loading'}
+      {!fullPlayerVisible && status !== 'missing' && createPortal(
+        <div
+          aria-label={t('meetings.audioPlayback.miniPlayer')}
+          style={{
+            position: 'fixed',
+            left: mobile ? 10 : undefined,
+            right: mobile ? 10 : 20,
+            bottom: mobile
+              ? 'calc(68px + env(safe-area-inset-bottom, 0px))'
+              : 'max(12px, env(safe-area-inset-bottom, 0px))',
+            zIndex: 2400,
+            width: mobile ? 'auto' : 'min(520px, calc(100vw - 40px))',
+            display: 'grid',
+            gridTemplateColumns: 'auto minmax(90px, 1fr) auto auto',
+            gap: 9,
+            alignItems: 'center',
+            padding: '9px 10px',
+            border: '0.5px solid var(--ol-line-strong)',
+            borderRadius: 8,
+            background: 'var(--ol-surface)',
+            boxShadow: 'var(--ol-shadow-3)',
+          }}
         >
-          {status === 'loading'
-            ? t('meetings.audioPlayback.loading')
-            : isPlaying
-              ? t('meetings.audioPlayback.pause')
-              : t('meetings.audioPlayback.play')}
-        </Btn>
-        <input
-          type="range"
-          min={0}
-          max={duration > 0 ? duration : 0}
-          step={0.1}
-          value={duration > 0 ? Math.min(currentTime, duration) : 0}
-          onChange={event => seekTo(event.target.value)}
-          disabled={status !== 'ready' || duration <= 0}
-          aria-label={t('meetings.audioPlayback.progress')}
-          style={{ width: '100%', accentColor: 'var(--ol-blue)' }}
-        />
-        <span style={{ fontSize: 11, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)', whiteSpace: 'nowrap' }}>
-          {formatPlaybackTime(currentTime)} / {formatPlaybackTime(duration)}
-        </span>
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 8 }}>
-        <Volume2 size={14} aria-hidden="true" style={{ color: 'var(--ol-ink-4)', flexShrink: 0 }} />
-        <input
-          type="range"
-          min={0}
-          max={2}
-          step={0.1}
-          value={volume}
-          onChange={event => changeVolume(event.target.value)}
-          aria-label={t('meetings.audioPlayback.volume')}
-          title={t('meetings.audioPlayback.volume')}
-          style={{ width: 112, accentColor: 'var(--ol-blue)' }}
-        />
-        <span style={{ width: 36, textAlign: 'right', fontSize: 11, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)' }}>
-          {Math.round(volume * 100)}%
-        </span>
-      </div>
-      {status === 'missing' && (
-        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--ol-ink-4)' }}>
-          {t('meetings.audioPlayback.missing')}
-        </div>
+          {playButton(true)}
+          {progress(true)}
+          <span style={{ fontSize: 10.5, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-4)', whiteSpace: 'nowrap' }}>
+            {timeLabel}
+          </span>
+          <SelectLite
+            value={String(speed)}
+            onChange={value => setSpeed(Number(value) as PlaybackSpeed)}
+            options={speedOptions}
+            ariaLabel={t('meetings.audioPlayback.speed')}
+            style={{ minWidth: 66, width: 66, height: 30, padding: '0 7px', fontSize: 10.5 }}
+          />
+        </div>,
+        document.body,
       )}
-      {status === 'error' && (
-        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--ol-red, #ef4444)' }}>
-          {t('meetings.audioPlayback.loadFailed', { err: errorText ?? '-' })}
-        </div>
-      )}
-    </div>
+    </>
   );
 }
 
@@ -1920,10 +3550,60 @@ function canDeleteMeeting(record: MeetingRecord, snapshot: MeetingRecordingSnaps
 
 function canRetranscribeMeeting(record: MeetingRecord, snapshot: MeetingRecordingSnapshot | null): boolean {
   if (snapshot) return false;
-  return record.audio.state === 'retained'
+  return !record.importConfig
+    && record.audio.state === 'retained'
     && record.status !== 'recording'
     && record.status !== 'paused'
     && record.status !== 'summarizing';
+}
+
+function isMeetingPostProcessingActive(record: MeetingRecord): boolean {
+  return Boolean(record.postProcessing && isPostProcessingStatusActive(record.postProcessing.status));
+}
+
+function isPostProcessingStatusActive(
+  status: NonNullable<MeetingRecord['postProcessing']>['status'],
+): boolean {
+  return [
+    'pending',
+    'preparing_audio',
+    'uploading',
+    'running',
+    'local_analyzing',
+    'applying',
+  ].includes(status);
+}
+
+function meetingPostProcessingError(
+  errorCode: string | null | undefined,
+  errorMessage: string | null | undefined,
+  t: TFunction,
+): string | null {
+  if (errorCode === 'meetingAudioNoSpeech') {
+    return t('meetings.postProcessing.noSpeech');
+  }
+  return errorMessage ?? null;
+}
+
+function retranscribeFeedback(
+  state: NonNullable<MeetingRecord['postProcessing']>,
+  t: TFunction,
+): { tone: 'error' | 'warning' | 'success'; message: string } | null {
+  if (isPostProcessingStatusActive(state.status)) {
+    return { tone: 'warning', message: t('meetings.retranscribeStarted') };
+  }
+  if (state.status === 'completed') {
+    return { tone: 'success', message: t('meetings.retranscribeSuccess') };
+  }
+  if (state.status === 'failed') {
+    return {
+      tone: 'error',
+      message: t('meetings.retranscribeFailed', {
+        err: meetingPostProcessingError(state.errorCode, state.errorMessage, t) ?? '-',
+      }),
+    };
+  }
+  return null;
 }
 
 function canPlayMeetingAudio(record: MeetingRecord, snapshot: MeetingRecordingSnapshot | null): boolean {
@@ -2099,6 +3779,19 @@ function formatDuration(ms: number | null, t: ReturnType<typeof useTranslation>[
   const sec = ms / 1000;
   if (sec < 60) return t('common.durationSeconds', { value: sec.toFixed(1) });
   return t('common.durationMinutes', { value: (sec / 60).toFixed(1) });
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(kb >= 100 ? 0 : 1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(mb >= 100 ? 0 : 1)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+
+function meetingModelValue(model: MeetingAsrModelRef): string {
+  return `${model.providerId}/${model.modelId}`;
 }
 
 function dateMs(iso: string): number {

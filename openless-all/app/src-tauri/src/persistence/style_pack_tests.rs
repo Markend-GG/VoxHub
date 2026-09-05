@@ -498,6 +498,24 @@ fn style_pack_archive_round_trip_preserves_valid_pack_and_png_icon() {
 }
 
 #[test]
+fn style_pack_archive_bytes_can_be_imported_from_a_document_provider() {
+    let root = TestDir::new("bytes-import");
+    let zip_path = root.path().join("document-provider.zip");
+    valid_archive(&zip_path, None);
+    let bytes = fs::read(&zip_path).expect("read archive bytes");
+    let destination = test_store(&root.path().join("destination"), Vec::new());
+
+    let imported = destination
+        .import_from_zip_bytes(&bytes, "document provider")
+        .expect("import valid archive bytes");
+
+    assert_eq!(imported.id, "test-pack");
+    assert_eq!(imported.name, "Test Pack");
+    assert_eq!(imported.prompt, "Write clearly and concisely.");
+    assert_eq!(imported.examples.len(), 1);
+}
+
+#[test]
 fn migration_fills_empty_selection_prompts_with_style_defaults() {
     let mut packs = builtin_style_packs();
     let builtin_count = packs.len();
@@ -604,7 +622,10 @@ fn reconcile_builtin_packs_upgrades_prompt_only_and_preserves_user_fields() {
         .find(|p| p.id == "builtin.structured")
         .expect("builtin structured pack");
     assert_eq!(upgraded.version, "3.0.0", "版本应推进到官方 3.0.0");
-    assert!(upgraded.prompt.contains("# 场景优先级"), "prompt 应推进为 v3.0 Beta");
+    assert!(
+        upgraded.prompt.contains("# 场景优先级"),
+        "prompt 应推进为 v3.0 Beta"
+    );
     assert_eq!(upgraded.name, "我的清晰结构", "用户改名必须保留");
     assert!(!upgraded.enabled, "用户 enabled 状态必须保留");
 }
@@ -619,5 +640,7 @@ fn reconcile_builtin_packs_skips_equal_version_and_adds_missing() {
     let mut empty: Vec<StylePack> = Vec::new();
     assert!(super::reconcile_builtin_packs(&mut empty));
     assert_eq!(empty.len(), builtin_style_packs().len());
-    assert!(empty.iter().all(|p| p.kind == crate::types::StylePackKind::Builtin));
+    assert!(empty
+        .iter()
+        .all(|p| p.kind == crate::types::StylePackKind::Builtin));
 }

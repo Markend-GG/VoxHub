@@ -69,8 +69,8 @@ import type {
   UserPreferences,
 } from '../lib/types';
 
-const MEETING_COMPANION_WIDTH = 320;
-const MEETING_COMPANION_HEIGHT = 64;
+const MEETING_COMPANION_WIDTH = 288;
+const MEETING_COMPANION_HEIGHT = 82;
 
 export interface MeetingCompanionProps {
   visualState?: MeetingCompanionVisualState;
@@ -762,6 +762,7 @@ function VisibleMeetingCompanion({
           overflow: 'hidden',
           display: 'flex',
           alignItems: 'center',
+          boxSizing: 'border-box',
           border: '1px solid rgba(255, 255, 255, 0.13)',
           borderRadius: 18,
           background: 'rgba(16, 18, 18, 0.97)',
@@ -776,9 +777,10 @@ function VisibleMeetingCompanion({
               width: '100%',
               height: '100%',
               display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              padding: '0 8px 0 10px',
+              flexDirection: 'column',
+              alignItems: 'stretch',
+              gap: 2,
+              padding: '4px 8px',
               boxSizing: 'border-box',
             }}
           >
@@ -790,11 +792,12 @@ function VisibleMeetingCompanion({
               onPointerCancel={cancelDrag}
               style={{
                 minWidth: 0,
-                flex: '1 1 auto',
-                height: 42,
+                width: '100%',
+                height: 34,
+                flex: '0 0 34px',
                 display: 'flex',
                 alignItems: 'center',
-                gap: 7,
+                gap: 6,
                 cursor: interaction?.positionLocked ? 'default' : 'grab',
                 touchAction: 'none',
               }}
@@ -803,12 +806,12 @@ function VisibleMeetingCompanion({
                 <div
                   data-meeting-companion-status
                   style={{
-                    height: 14,
+                    height: 12,
                     overflow: 'hidden',
                     color: errorKind ? '#ffaaa5' : '#a9b1ad',
                     fontSize: 9,
                     fontWeight: 650,
-                    lineHeight: '14px',
+                    lineHeight: '12px',
                     letterSpacing: 0,
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap',
@@ -822,7 +825,7 @@ function VisibleMeetingCompanion({
                   errorKind={errorKind}
                   reducedMotion={reducedMotion}
                   frozen={animationPaused}
-                  style={{ width: '100%', height: 24 }}
+                  style={{ width: '100%', height: 22 }}
                 />
               </div>
               {errorOverlay && (
@@ -841,56 +844,68 @@ function VisibleMeetingCompanion({
             </div>
 
             <div
-              data-meeting-companion-timer
+              data-meeting-companion-footer
               style={{
-                width: 54,
-                flex: '0 0 54px',
-                color: '#f3f6f4',
-                fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
-                fontSize: elapsedText.length > 5 ? 10 : 11,
-                fontWeight: 650,
-                fontVariantNumeric: 'tabular-nums',
-                letterSpacing: 0,
-                textAlign: 'center',
-                whiteSpace: 'nowrap',
+                width: '100%',
+                height: 30,
+                flex: '0 0 30px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
               }}
             >
-              {elapsedText}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: '0 0 auto' }}>
-              {controlActions.map(action => {
-                const disabled = Boolean(interaction?.busyAction);
-                const label = t(action.labelKey);
-                return (
+              <div
+                data-meeting-companion-timer
+                style={{
+                  width: 48,
+                  flex: '0 0 48px',
+                  color: '#f3f6f4',
+                  fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+                  fontSize: elapsedText.length > 5 ? 10 : 11,
+                  fontWeight: 650,
+                  fontVariantNumeric: 'tabular-nums',
+                  letterSpacing: 0,
+                  textAlign: 'center',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {elapsedText}
+              </div>
+              <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5 }}>
+                {controlActions.map(action => {
+                  const disabled = Boolean(interaction?.busyAction);
+                  const label = t(action.labelKey);
+                  return (
+                    <button
+                      key={action.action}
+                      type="button"
+                      className="ol-focus-ring"
+                      data-meeting-companion-control={action.action}
+                      title={label}
+                      aria-label={label}
+                      disabled={disabled}
+                      onPointerDown={event => event.stopPropagation()}
+                      onClick={() => runControlAction(action.action)}
+                      style={compactActionButtonStyle(Boolean(action.danger), disabled)}
+                    >
+                      {meetingCompanionActionIcon(action.action, 15)}
+                    </button>
+                  );
+                })}
+                {interaction && (
                   <button
-                    key={action.action}
                     type="button"
                     className="ol-focus-ring"
-                    data-meeting-companion-control={action.action}
-                    title={label}
-                    aria-label={label}
-                    disabled={disabled}
-                    onPointerDown={event => event.stopPropagation()}
-                    onClick={() => runControlAction(action.action)}
-                    style={compactActionButtonStyle(Boolean(action.danger), disabled)}
+                    data-meeting-companion-more
+                    title={t('meetingCompanion.more')}
+                    aria-label={t('meetingCompanion.more')}
+                    onClick={() => setContextMenuOpen(true)}
+                    style={compactActionButtonStyle(false, false)}
                   >
-                    {meetingCompanionActionIcon(action.action, 15)}
+                    <MoreHorizontal size={16} strokeWidth={2.1} />
                   </button>
-                );
-              })}
-              {interaction && (
-                <button
-                  type="button"
-                  className="ol-focus-ring"
-                  data-meeting-companion-more
-                  title={t('meetingCompanion.more')}
-                  aria-label={t('meetingCompanion.more')}
-                  onClick={() => setContextMenuOpen(true)}
-                  style={compactActionButtonStyle(false, false)}
-                >
-                  <MoreHorizontal size={16} strokeWidth={2.1} />
-                </button>
-              )}
+                )}
+              </div>
             </div>
           </div>
         )}

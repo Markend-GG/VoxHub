@@ -18,9 +18,11 @@
  *    SetTranslationHotkeyRaw(uu: sym, states) — 直接设翻译模式触发 sym+states
  *    SetAuxDown(s: text)                 — 在候选词列表下方显示状态文本
  *    ClearAuxDown()                      — 清除候选词列表下方文本
+ *    GetSelectionText() -> s             — 读取当前 PRIMARY 选区文本（由 clipboard addon 维护）
  *  信号:
  *    DictationKeyEvent(uub: sym, states, isPress) — 听写热键按下/抬起
  *    QaShortcutEvent(uub: sym, states, isPress)   — QA 快捷键按下/抬起
+ *    SelectionPolishEvent(uub: sym, states, isPress) — 选区润色快捷键按下/抬起
  *    TranslationModifierEvent(uub: sym, states, isPress) — 翻译修饰键按下/抬起
  */
 
@@ -45,6 +47,7 @@
 #include <fcitx/inputcontextmanager.h>
 #include <fcitx/inputpanel.h>
 #include <fcitx/instance.h>
+#include <fcitx-module/clipboard/clipboard_public.h>
 #include <fcitx-module/dbus/dbus_public.h>
 
 FCITX_DEFINE_LOG_CATEGORY(openless, "openless");
@@ -68,6 +71,8 @@ public:
           triggerRawStates_(0),
           qaRawSym_(0),
           qaRawStates_(0),
+          selectionPolishRawSym_(0),
+          selectionPolishRawStates_(0),
           translationRawSym_(0),
           translationRawStates_(0),
           hasCustomDictationKey_(false),
@@ -177,6 +182,16 @@ public:
                         FCITX_LOGC(openless, Debug)
                             << "QA shortcut";
                         qaShortcutEvent(qaRawSym_, qaRawStates_, isPress);
+                        keyEvent.filterAndAccept();
+                        return;
+                    }
+                    if (selectionPolishRawSym_ != 0 &&
+                        sym == selectionPolishRawSym_ &&
+                        states == selectionPolishRawStates_) {
+                        FCITX_LOGC(openless, Debug)
+                            << "Selection polish shortcut";
+                        selectionPolishEvent(selectionPolishRawSym_,
+                                             selectionPolishRawStates_, isPress);
                         keyEvent.filterAndAccept();
                         return;
                     }
@@ -417,6 +432,18 @@ public:
             << "SetQaHotkeyRaw: sym=" << sym << " states=" << states;
     }
 
+    void setSelectionPolishHotkeyRaw(uint32_t sym, uint32_t states) {
+        selectionPolishRawSym_ = sym;
+        selectionPolishRawStates_ = states;
+        RawConfig raw;
+        readAsIni(raw, configFile());
+        raw.setValueByPath("SelectionPolishRawSym", std::to_string(sym));
+        raw.setValueByPath("SelectionPolishRawStates", std::to_string(states));
+        safeSaveAsIni(raw, configFile());
+        FCITX_LOGC(openless, Info)
+            << "SetSelectionPolishHotkeyRaw: sym=" << sym << " states=" << states;
+    }
+
     void setTranslationHotkeyRaw(uint32_t sym, uint32_t states) {
         translationRawSym_ = sym;
         translationRawStates_ = states;
@@ -429,6 +456,22 @@ public:
             << "SetTranslationHotkeyRaw: sym=" << sym << " states=" << states;
     }
 
+    /// 读取当前 PRIMARY 选区文本。空字符串表示无选区或 clipboard addon 不可用。
+    std::string getSelectionText() {
+        auto *clipboard = instance_->addonManager().addon("clipboard");
+        if (!clipboard) {
+            FCITX_LOGC(openless, Debug)
+                << "GetSelectionText: clipboard addon not loaded";
+            return std::string();
+        }
+        // primary() 签名接收 const InputContext*，clipboard 模块实现中未使用该参数
+        // （读的是全局 primary_ 缓存），这里传 nullptr 即可。
+        std::string text = clipboard->call<IClipboard::primary>(nullptr);
+        FCITX_LOGC(openless, Debug)
+            << "GetSelectionText: " << text.size() << " chars";
+        return text;
+    }
+
     FCITX_OBJECT_VTABLE_METHOD(commitText, "CommitText", "s", "");
     FCITX_OBJECT_VTABLE_METHOD(setAuxDown, "SetAuxDown", "s", "");
     FCITX_OBJECT_VTABLE_METHOD(clearAuxDown, "ClearAuxDown", "", "");
@@ -436,10 +479,13 @@ public:
     FCITX_OBJECT_VTABLE_METHOD(setHotkeyRaw, "SetHotkeyRaw", "uu", "");
     FCITX_OBJECT_VTABLE_METHOD(setCustomDictationTrigger, "SetCustomDictationTrigger", "s", "");
     FCITX_OBJECT_VTABLE_METHOD(setQaHotkeyRaw, "SetQaHotkeyRaw", "uu", "");
+    FCITX_OBJECT_VTABLE_METHOD(setSelectionPolishHotkeyRaw, "SetSelectionPolishHotkeyRaw", "uu", "");
     FCITX_OBJECT_VTABLE_METHOD(setTranslationHotkeyRaw, "SetTranslationHotkeyRaw", "uu", "");
+    FCITX_OBJECT_VTABLE_METHOD(getSelectionText, "GetSelectionText", "", "s");
     FCITX_OBJECT_VTABLE_SIGNAL(dictationKeyEvent, "DictationKeyEvent", "uub");
     FCITX_OBJECT_VTABLE_SIGNAL(dictationKeyCombined, "DictationKeyCombined", "uub");
     FCITX_OBJECT_VTABLE_SIGNAL(qaShortcutEvent, "QaShortcutEvent", "uub");
+    FCITX_OBJECT_VTABLE_SIGNAL(selectionPolishEvent, "SelectionPolishEvent", "uub");
     FCITX_OBJECT_VTABLE_SIGNAL(translationModifierEvent, "TranslationModifierEvent", "uub");
 
     Instance *instance() { return instance_; }
@@ -465,6 +511,14 @@ public:
         {
             auto *v = raw.valueByPath("QaRawStates");
             qaRawStates_ = v ? std::stoul(*v, nullptr, 0) : 0;
+        }
+        {
+            auto *v = raw.valueByPath("SelectionPolishRawSym");
+            selectionPolishRawSym_ = v ? std::stoul(*v, nullptr, 0) : 0;
+        }
+        {
+            auto *v = raw.valueByPath("SelectionPolishRawStates");
+            selectionPolishRawStates_ = v ? std::stoul(*v, nullptr, 0) : 0;
         }
         {
             auto *v = raw.valueByPath("TranslationRawSym");
@@ -515,6 +569,8 @@ private:
     uint32_t triggerRawStates_;
     uint32_t qaRawSym_;
     uint32_t qaRawStates_;
+    uint32_t selectionPolishRawSym_;
+    uint32_t selectionPolishRawStates_;
     uint32_t translationRawSym_;
     uint32_t translationRawStates_;
     Key customDictationKey_;

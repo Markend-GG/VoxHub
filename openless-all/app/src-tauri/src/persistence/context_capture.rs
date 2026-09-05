@@ -270,6 +270,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             source: crate::types::HistorySource::Voice,
             raw_transcript: "raw".into(),
+            asr_transcript: None,
             final_text: "final".into(),
             mode: crate::types::PolishMode::Structured,
             style_pack_id: None,
@@ -289,6 +290,7 @@ mod tests {
             asr_model: None,
             llm_provider: None,
             llm_model: None,
+            pipeline_mode: None,
             asr_ms: None,
             polish_ms: None,
         }];

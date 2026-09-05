@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::style_pack_archive::{
     cleanup_style_pack_asset_dir, persist_style_pack_icon, read_style_pack_archive,
-    StylePackArchiveManifest,
+    read_style_pack_archive_bytes, ParsedStylePackArchive, StylePackArchiveManifest,
 };
 use super::{atomic_write, data_dir, ensure_dir, read_or_default, PreferencesStore};
 use crate::types::{
@@ -308,6 +308,19 @@ impl StylePackStore {
 
     pub fn import_from_zip(&self, zip_path: &Path) -> Result<StylePack> {
         let parsed = read_style_pack_archive(zip_path)?;
+        self.import_parsed_archive(parsed, &zip_path.display().to_string())
+    }
+
+    pub fn import_from_zip_bytes(&self, bytes: &[u8], source: &str) -> Result<StylePack> {
+        let parsed = read_style_pack_archive_bytes(bytes)?;
+        self.import_parsed_archive(parsed, source)
+    }
+
+    fn import_parsed_archive(
+        &self,
+        parsed: ParsedStylePackArchive,
+        source: &str,
+    ) -> Result<StylePack> {
         let manifest = parsed.manifest;
         let manifest_id = manifest.id.clone();
 
@@ -359,7 +372,7 @@ impl StylePackStore {
         *packs = next_packs;
         log::info!(
             "[style-pack] imported source={} installed_id={} manifest_id={} base_mode={:?} prompt_chars={} examples={} tags={} icon={}",
-            zip_path.display(),
+            source,
             pack.id,
             manifest_id,
             pack.base_mode,
@@ -397,7 +410,8 @@ impl StylePackStore {
             author: pack.author.clone(),
             version: pack.version.clone(),
             base_mode: pack.base_mode,
-            selection_prompt: (!pack.selection_prompt.trim().is_empty()).then(|| pack.selection_prompt.clone()),
+            selection_prompt: (!pack.selection_prompt.trim().is_empty())
+                .then(|| pack.selection_prompt.clone()),
             tags: pack.tags.clone(),
             prompt_file: "prompt.md".into(),
             examples_file: "examples.json".into(),
@@ -653,7 +667,10 @@ pub fn sync_style_pack_preferences(prefs: &mut UserPreferences, packs: &[StylePa
         prefs.default_mode = active_pack.base_mode;
         changed = true;
     }
-    if !packs.iter().any(|pack| pack.id == prefs.selection_polish_style_pack_id && pack.enabled) {
+    if !packs
+        .iter()
+        .any(|pack| pack.id == prefs.selection_polish_style_pack_id && pack.enabled)
+    {
         prefs.selection_polish_style_pack_id = active_pack.id.clone();
         changed = true;
     }

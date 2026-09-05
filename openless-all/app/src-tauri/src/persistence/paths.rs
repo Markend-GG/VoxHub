@@ -254,6 +254,16 @@ pub fn meeting_recordings_root() -> Result<PathBuf> {
     Ok(dir)
 }
 
+pub fn meeting_import_staging_root() -> Result<PathBuf> {
+    let dir = data_dir()?.join("meeting-import-staging");
+    ensure_dir(&dir)?;
+    Ok(dir)
+}
+
+pub fn meeting_import_partial_path(import_job_id: &str) -> Result<PathBuf> {
+    Ok(meeting_import_staging_root()?.join(format!("{import_job_id}.partial")))
+}
+
 pub fn meeting_recording_path_for_id(meeting_id: &str) -> Result<PathBuf> {
     Ok(meeting_recordings_root()?.join(format!("{meeting_id}.wav")))
 }
@@ -312,6 +322,13 @@ pub fn foundry_native_runtime_root() -> Result<PathBuf> {
 #[cfg(target_os = "windows")]
 pub fn sherpa_onnx_models_root() -> Result<PathBuf> {
     let dir = models_root()?.join("sherpa-onnx");
+    ensure_dir(&dir)?;
+    Ok(dir)
+}
+
+#[cfg(target_os = "windows")]
+pub fn speaker_diarization_models_root() -> Result<PathBuf> {
+    let dir = models_root()?.join("speaker-diarization");
     ensure_dir(&dir)?;
     Ok(dir)
 }

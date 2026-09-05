@@ -26,12 +26,12 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 mod activity;
-mod context_analysis;
-mod context_capture;
 #[cfg(any(target_os = "android", test))]
 mod android_credentials;
 #[cfg(any(target_os = "android", test))]
 mod android_storage;
+mod context_analysis;
+mod context_capture;
 mod correction;
 mod credentials;
 mod dictionary;
@@ -63,14 +63,16 @@ pub use rewrite_history::*;
 pub use screenshot_aggregation::*;
 pub use screenshot_record::*;
 pub use style_pack::*;
-pub(crate) use style_pack_archive::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES;
+pub(crate) use style_pack_archive::{
+    validate_style_pack_archive_bytes, STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES,
+};
 
 #[cfg(target_os = "android")]
 pub use android_storage::init_android_storage_roots;
-#[cfg(target_os = "android")]
-pub(crate) use android_storage::{android_log_dir, android_openless_log_candidates};
 #[cfg(any(target_os = "android", test))]
 use android_storage::is_memory_only_path;
+#[cfg(target_os = "android")]
+pub(crate) use android_storage::{android_log_dir, android_openless_log_candidates};
 
 /// 硬上限：所有历史存储的绝对上限。
 /// 配合 HISTORY_MAX_ENTRIES_UPPER(10000) 和 HISTORY_MAX_ENTRIES_DEFAULT(2000) 使用。

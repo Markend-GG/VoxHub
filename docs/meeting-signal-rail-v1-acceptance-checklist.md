@@ -4,6 +4,8 @@
 
 日期：2026-08-07
 
+更新：2026-08-14 胶囊调整为 `288 x 82` 上下两层布局，时长与操作移到音量条下方。
+
 ## 状态定义
 
 - `done`：实现与匹配风险的验证均完成。
@@ -16,7 +18,7 @@
 | ID | Requirement（需求） | Status（状态） | Evidence（证据） | Verification（验证） |
 | --- | --- | --- | --- | --- |
 | MSR-V1-001 | 旧桌宠规格明确被信号条规格替代，现有媒体资源不删除。 | done | 新 spec / plan / checklist；旧文档标记 superseded | 文档与资源路径检查 |
-| MSR-V1-002 | 独立窗口调整为 `320 x 64`，位置计算适配 DPI 与多屏。 | partial | Rust 窗口常量和 DPI / 负坐标 / 分辨率 / 吸附测试已更新 | 19 个会议相关 Rust 测试通过；仍缺真实胶囊窗口多屏观察 |
+| MSR-V1-002 | 独立窗口调整为 `288 x 82`，时长与操作位于音量条下方，位置计算适配 DPI 与多屏。 | partial | 前端两层布局；Rust 窗口常量和 DPI / 负坐标 / 分辨率 / 吸附测试已更新 | 会议相关 Rust 测试与 controls 契约通过；仍缺真实胶囊窗口多屏观察 |
 | MSR-V1-003 | WebGL 信号条由真实会议音量驱动，最多约 30fps。 | partial | `MeetingSignalRail` 接入现有 `meeting:audio-level`，30fps 上限和低渲染倍率 | 信号映射测试通过；Playwright 确认 WebGL 画布非空，仍缺真机音量变化 |
 | MSR-V1-004 | idle / recording / quiet / paused / processing / completed 状态视觉完整。 | partial | 状态映射覆盖六态；暂停冻结、整理汇聚和完成扫光写入 Shader | 状态 / 信号测试通过，idle 浏览器截图通过；其余状态待真机观察 |
 | MSR-V1-005 | 暂停 / 继续 / 停止、停止确认、时长和命令错误恢复保留。 | partial | 原命令门禁、计时器与恢复逻辑保留；停止确认改为内联 dialog | controls / runtime / sync 测试通过；待真实会议操作 |

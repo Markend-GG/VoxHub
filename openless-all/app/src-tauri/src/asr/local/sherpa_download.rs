@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 
 use super::download::{
-    build_client, download_one, partial_actual_size, DownloadPhase, DownloadProgress, Mirror,
+    build_client, download_one, now_millis, partial_actual_size, DownloadPhase, DownloadProgress,
+    Mirror, PROGRESS_EMIT_MIN_INTERVAL_MS,
 };
 use super::sherpa;
 
@@ -111,6 +112,54 @@ impl SherpaDownloadManager {
     pub fn is_active(&self, model_alias: &str) -> bool {
         self.cancel_flags.lock().contains_key(model_alias)
     }
+
+    pub fn start_speaker_diarization(self: &Arc<Self>, app: AppHandle, package_id: String) {
+        let key = speaker_download_key(&package_id);
+        let flag = {
+            let mut flags = self.cancel_flags.lock();
+            if flags.contains_key(&key) {
+                log::info!("[speaker-diarization] 模型下载已在进行中: {package_id}");
+                return;
+            }
+            let flag = Arc::new(AtomicBool::new(false));
+            flags.insert(key.clone(), Arc::clone(&flag));
+            flag
+        };
+        let manager = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            let result = super::speaker_diarization::run_package_download(
+                &app,
+                &package_id,
+                Arc::clone(&flag),
+            )
+            .await;
+            manager.cancel_flags.lock().remove(&key);
+            match result {
+                Ok(()) => log::info!("[speaker-diarization] 模型下载完成: {package_id}"),
+                Err(error) => {
+                    super::speaker_diarization::emit_failed(&app, &package_id, &error);
+                    log::error!("[speaker-diarization] 模型下载失败: {package_id}: {error:#}");
+                }
+            }
+        });
+    }
+
+    pub fn cancel_speaker_diarization(&self, package_id: &str) {
+        let key = speaker_download_key(package_id);
+        if let Some(flag) = self.cancel_flags.lock().get(&key) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub fn speaker_diarization_is_active(&self, package_id: &str) -> bool {
+        self.cancel_flags
+            .lock()
+            .contains_key(&speaker_download_key(package_id))
+    }
+}
+
+fn speaker_download_key(package_id: &str) -> String {
+    format!("speaker-diarization:{package_id}")
 }
 
 pub async fn fetch_remote_info(model_alias: &str, mirror: Mirror) -> Result<SherpaRemoteInfo> {
@@ -417,8 +466,16 @@ async fn run_download(
             }
             let app_emit = app.clone();
             let in_flight_for_cb = Arc::clone(&in_flight_bytes);
+            let last_emit = Arc::new(AtomicU64::new(0));
             let on_progress: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |bytes_in_file| {
                 in_flight_for_cb[idx].store(bytes_in_file, Ordering::Relaxed);
+                // 节流（同 download.rs）：每 HTTP chunk 回调一次，全量转发会
+                // 高频刷前端进度条；in_flight 照常累计，只按 ≥150ms 转发最新值。
+                let now = now_millis();
+                if now - last_emit.load(Ordering::Relaxed) < PROGRESS_EMIT_MIN_INTERVAL_MS {
+                    return;
+                }
+                last_emit.store(now, Ordering::Relaxed);
                 let total_in_flight: u64 = in_flight_for_cb
                     .iter()
                     .map(|bytes| bytes.load(Ordering::Relaxed))
@@ -479,6 +536,10 @@ async fn run_download(
     }
 
     if cancel.load(Ordering::SeqCst) && !self_aborted {
+        // 用户主动取消 = 放弃该模型：清掉 .partial/.partial.idx（同 qwen3 路径，
+        // 避免稀疏大文件占满磁盘），不留续传点。
+        let dest_paths: Vec<String> = info.files.iter().map(|f| f.local_path.clone()).collect();
+        super::download::remove_partial_artifacts(&dir, &dest_paths);
         emit_cancelled(app, model_alias, file_count, total_bytes);
         return Ok(());
     }
@@ -553,7 +614,14 @@ async fn run_release_archive_download(
     let app_emit = app.clone();
     let model_alias_emit = model_alias.to_string();
     let file_name_emit = archive.file_name.to_string();
+    let last_emit = Arc::new(AtomicU64::new(0));
     let on_progress: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |bytes_downloaded| {
+        // 节流（同 download.rs）：release 包下载同样按 ≥150ms 转发进度。
+        let now = now_millis();
+        if now - last_emit.load(Ordering::Relaxed) < PROGRESS_EMIT_MIN_INTERVAL_MS {
+            return;
+        }
+        last_emit.store(now, Ordering::Relaxed);
         let _ = app_emit.emit(
             "sherpa-onnx-asr-download-progress",
             DownloadProgress {
@@ -589,6 +657,9 @@ async fn run_release_archive_download(
         .await
     };
     if cancel.load(Ordering::SeqCst) {
+        // 用户取消：release 包同样清理 .partial/.partial.idx（与多文件路径一致）。
+        let _ = std::fs::remove_file(archive_path.with_extension("partial"));
+        let _ = std::fs::remove_file(archive_path.with_extension("partial.idx"));
         emit_cancelled(app, model_alias, file_count, total_bytes);
         return Ok(());
     }
@@ -1055,6 +1126,25 @@ mod tests {
         manager.cancel("sense-voice-small-zh");
 
         assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn speaker_diarization_cancel_only_sets_namespaced_active_flag() {
+        let manager = SherpaDownloadManager::new();
+        let package_id = crate::asr::local::speaker_diarization::DEFAULT_PACKAGE_ID;
+        let asr_flag = Arc::new(AtomicBool::new(false));
+        let speaker_flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut flags = manager.cancel_flags.lock();
+            flags.insert(package_id.to_string(), Arc::clone(&asr_flag));
+            flags.insert(speaker_download_key(package_id), Arc::clone(&speaker_flag));
+        }
+
+        assert!(manager.speaker_diarization_is_active(package_id));
+        manager.cancel_speaker_diarization(package_id);
+
+        assert!(speaker_flag.load(Ordering::SeqCst));
+        assert!(!asr_flag.load(Ordering::SeqCst));
     }
 
     #[test]

@@ -17,17 +17,22 @@ use crate::persistence::{
 use crate::recorder::{Recorder, RecorderError};
 use crate::types::{
     MeetingAsrMode, MeetingAudioLevelEvent, MeetingAudioMeta, MeetingAudioState, MeetingErrorEvent,
-    MeetingRecord, MeetingRecordingPhase, MeetingRecordingSnapshot, MeetingStatus, MeetingSummary,
-    MeetingTranscriptDraftEvent, MeetingTranscriptSegmentEvent, MeetingVadSilencePreset,
-    TranscriptSegment, TranscriptSegmentMetadata, TranscriptSegmentSource,
+    MeetingRealtimeAsrSnapshot, MeetingRecord, MeetingRecordingPhase, MeetingRecordingSnapshot,
+    MeetingStatus, MeetingSummary, MeetingTranscriptDraftEvent, MeetingTranscriptSegmentEvent,
+    MeetingVadSilencePreset, StartMeetingRecordingOptions, TranscriptSegment,
+    TranscriptSegmentMetadata, TranscriptSegmentSource,
 };
 
+use super::meeting_post_processing::{
+    lock_realtime_model_in_post_processing_config, prepare_post_processing_after_stop,
+    resolve_initial_post_processing_config, spawn_post_processing_job,
+};
 use super::{
     acquire_recording_mute, asr_transcribe_uses_global_timeout,
     build_meeting_asr_start_with_options, cancel_active_asr, ensure_asr_credentials_for_provider,
-    ensure_microphone_permission, prepare_and_spawn_auto_meeting_summary, release_recording_mute,
-    selected_microphone_device_name, stop_microphone_preview_monitor, ActiveAsr, Inner,
-    MeetingAsrStartOptions, QaAsrStart, COORDINATOR_GLOBAL_TIMEOUT_SECS,
+    ensure_microphone_permission, release_recording_mute, selected_microphone_device_name,
+    stop_microphone_preview_monitor, ActiveAsr, AsrCallLabel, Inner, MeetingAsrStartOptions,
+    QaAsrStart, COORDINATOR_GLOBAL_TIMEOUT_SECS,
 };
 
 const MEETING_AUDIO_LEVEL_INTERVAL: Duration = Duration::from_millis(100);
@@ -148,11 +153,23 @@ impl MeetingSession {
                 duration_ms: None,
                 transcript_segments: Vec::new(),
                 summary: MeetingSummary::default(),
+                organized_draft: None,
+                organized_draft_state: None,
                 audio: MeetingAudioMeta {
                     state: MeetingAudioState::Temporary,
                     retained: false,
                     path: None,
                 },
+                realtime_asr: None,
+                post_processing_config: None,
+                post_processing: None,
+                import_config: None,
+                import_state: None,
+                transcript_revisions: Vec::new(),
+                active_transcript_revision: None,
+                speaker_profiles: Vec::new(),
+                speaker_turns: Vec::new(),
+                processing_hold: None,
                 created_at: timestamp.clone(),
                 updated_at: timestamp,
             },
@@ -210,6 +227,22 @@ impl MeetingSession {
 
     pub(super) fn model_override(&self) -> Option<String> {
         self.model_override.clone()
+    }
+
+    fn lock_realtime_asr_label(&mut self, label: &AsrCallLabel, now: DateTime<Utc>) {
+        self.model_override = label.model.clone();
+        self.record.realtime_asr = Some(MeetingRealtimeAsrSnapshot {
+            provider_id: self.active_provider.clone(),
+            resolved_provider_id: label.provider.clone(),
+            model_id: label.model.clone(),
+            silence_preset: self.silence_preset.clone(),
+        });
+        lock_realtime_model_in_post_processing_config(
+            &mut self.record,
+            &label.provider,
+            label.model.clone(),
+        );
+        self.record.updated_at = now.to_rfc3339();
     }
 
     pub(super) fn set_active_asr_session(
@@ -312,6 +345,7 @@ impl MeetingSession {
         let end_ms = end_ms.or(Some(fallback_end_ms));
         let segment = TranscriptSegment {
             id: format!("seg-{:06}", self.next_segment_index),
+            speaker_id: None,
             speaker_label: "未区分".to_string(),
             start_ms: start_ms.unwrap_or_else(|| {
                 self.record
@@ -433,6 +467,7 @@ fn next_meeting_audio_part_index(inner: &Arc<Inner>) -> u32 {
 
 pub(super) async fn start_meeting_recording(
     inner: &Arc<Inner>,
+    options: Option<StartMeetingRecordingOptions>,
 ) -> Result<MeetingRecordingSnapshot, String> {
     if inner.meeting_session.lock().is_some() {
         return Err("meeting recording already active".to_string());
@@ -441,6 +476,12 @@ pub(super) async fn start_meeting_recording(
         return Err("dictation is active".to_string());
     }
     let effective_asr = resolve_effective_meeting_asr(inner);
+    let post_processing_config = resolve_initial_post_processing_config(
+        &inner.prefs.get(),
+        options.as_ref(),
+        &effective_asr.provider_id,
+        effective_asr.model_override.clone(),
+    )?;
     ensure_asr_credentials_for_provider(&effective_asr.provider_id, true)?;
     ensure_microphone_permission(inner)?;
 
@@ -455,6 +496,7 @@ pub(super) async fn start_meeting_recording(
         effective_asr.silence_preset.clone(),
         effective_asr.model_override.clone(),
     );
+    session.record_mut().post_processing_config = Some(post_processing_config);
     session.set_active_asr_session(provider_session_id.clone(), audio_part_index, 0);
     MeetingStore::new()
         .map_err(|e| e.to_string())?
@@ -475,7 +517,7 @@ pub(super) async fn start_meeting_recording(
         effective_asr.provider_id.clone(),
         Some(provider_session_id.clone()),
     );
-    let asr_start = match build_meeting_asr_start(
+    let (asr_start, asr_label) = match build_meeting_asr_start(
         inner,
         MeetingAsrStartOptions {
             provider_id: effective_asr.provider_id.clone(),
@@ -504,6 +546,19 @@ pub(super) async fn start_meeting_recording(
             return Err(error);
         }
     };
+
+    let label_persist_result = {
+        let mut session_guard = inner.meeting_session.lock();
+        let session = session_guard
+            .as_mut()
+            .ok_or_else(|| "meeting recording not active".to_string())?;
+        commit_meeting_realtime_asr_label(session, &asr_label, Utc::now(), persist_meeting_record)
+    };
+    if let Err(error) = label_persist_result {
+        cleanup_unstored_meeting_asr_start(inner, &asr_start, asr_release_token.clone());
+        mark_start_failed_record(inner, &meeting_id, &error)?;
+        return Err(error);
+    }
     let (asr_start, asr_interruption) = match asr_start.open_streaming_session().await {
         Ok(()) => (Some(asr_start), None),
         Err(error) => {
@@ -637,7 +692,7 @@ pub(super) async fn resume_meeting_recording(
         active_provider.clone(),
         Some(provider_session_id.clone()),
     );
-    let asr_start = match build_meeting_asr_start(
+    let (asr_start, _asr_label) = match build_meeting_asr_start(
         inner,
         MeetingAsrStartOptions {
             provider_id: active_provider.clone(),
@@ -754,7 +809,7 @@ pub(super) async fn stop_meeting_recording(
     emit_meeting_transcript_draft_clear(inner, meeting_id);
 
     let now = Utc::now();
-    let (mut record, completed_provider) = {
+    let (record, completed_provider, post_processing_started) = {
         let mut session_guard = inner.meeting_session.lock();
         let session = session_guard
             .as_mut()
@@ -792,6 +847,8 @@ pub(super) async fn stop_meeting_recording(
 
         session.finish(now, interrupted);
         session.clear_active_asr_session();
+        let post_processing_started =
+            prepare_post_processing_after_stop(session.record_mut(), &now.to_rfc3339())?;
         if let Some(error) = apply_meeting_audio_retention_state(inner, session.record_mut()) {
             emit_meeting_error(
                 inner,
@@ -800,7 +857,11 @@ pub(super) async fn stop_meeting_recording(
                 &error,
             );
         }
-        (session.record().clone(), completed_provider)
+        (
+            session.record().clone(),
+            completed_provider,
+            post_processing_started,
+        )
     };
     persist_meeting_record(&record)?;
     if let Err(error) = prune_meeting_audio_retention_with_current_preference() {
@@ -814,15 +875,13 @@ pub(super) async fn stop_meeting_recording(
     }
 
     clear_active_meeting_runtime(inner);
-    if record.status == MeetingStatus::Completed {
-        if let Err(error) = prepare_and_spawn_auto_meeting_summary(inner, &mut record) {
-            emit_meeting_error(
-                inner,
-                Some(meeting_id.to_string()),
-                "summaryPrepareFailed",
-                &error,
-            );
-            log::warn!("[meeting] summary prepare failed: {error}");
+    if post_processing_started {
+        if let Some(job_id) = record
+            .post_processing
+            .as_ref()
+            .map(|state| state.job_id.clone())
+        {
+            spawn_post_processing_job(inner, meeting_id.to_string(), job_id);
         }
     }
     emit_meeting_state(
@@ -867,7 +926,7 @@ fn duration_ms_between(start: DateTime<Utc>, end: DateTime<Utc>) -> u64 {
 async fn build_meeting_asr_start(
     inner: &Arc<Inner>,
     options: MeetingAsrStartOptions,
-) -> Result<QaAsrStart, String> {
+) -> Result<(QaAsrStart, AsrCallLabel), String> {
     build_meeting_asr_start_with_options(inner, options).await
 }
 
@@ -1125,6 +1184,7 @@ fn schedule_meeting_local_asr_release_for(
         ActiveAsr::FoundryLocalWhisper(_) => super::schedule_foundry_local_asr_release(
             inner,
             super::AsrReleaseSession::Meeting(token),
+            None,
         ),
         #[cfg(target_os = "windows")]
         ActiveAsr::SherpaOnnxLocal(_) => {
@@ -1148,6 +1208,7 @@ fn schedule_meeting_local_asr_release_for_provider(
             super::schedule_foundry_local_asr_release(
                 inner,
                 super::AsrReleaseSession::Meeting(token),
+                None,
             );
         } else if crate::asr::local::sherpa::is_sherpa_onnx_local(provider_id) {
             super::schedule_sherpa_onnx_release(inner, super::AsrReleaseSession::Meeting(token));
@@ -1160,9 +1221,16 @@ fn schedule_meeting_local_asr_release_for_provider(
 }
 
 #[cfg(target_os = "windows")]
-fn schedule_foundry_meeting_release(inner: &Arc<Inner>) {
+fn schedule_foundry_meeting_release(
+    inner: &Arc<Inner>,
+    primary_recovery: Option<crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken>,
+) {
     let token = current_or_new_meeting_asr_release_token(inner);
-    super::schedule_foundry_local_asr_release(inner, super::AsrReleaseSession::Meeting(token));
+    super::schedule_foundry_local_asr_release(
+        inner,
+        super::AsrReleaseSession::Meeting(token),
+        primary_recovery,
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -1279,13 +1347,22 @@ async fn flush_meeting_asr(
         ActiveAsr::FoundryLocalWhisper(local) => {
             debug_assert!(!uses_global_timeout);
             let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
-            let result = local
-                .transcribe(super::windows_local_asr_transcribe_timeout(audio_secs))
+            match local
+                .transcribe_with_fallback_notice(
+                    super::windows_local_asr_transcribe_timeout(audio_secs),
+                    Arc::new(|_| {}),
+                )
                 .await
-                .map(MeetingAsrFlushOutcome::Raw)
-                .map_err(|e| e.to_string());
-            schedule_foundry_meeting_release(inner);
-            result
+            {
+                Ok(outcome) => {
+                    schedule_foundry_meeting_release(inner, outcome.primary_recovery);
+                    Ok(MeetingAsrFlushOutcome::Raw(outcome.raw))
+                }
+                Err(error) => {
+                    schedule_foundry_meeting_release(inner, None);
+                    Err(error.to_string())
+                }
+            }
         }
         #[cfg(target_os = "windows")]
         ActiveAsr::SherpaOnnxLocal(local) => {
@@ -1611,6 +1688,8 @@ fn metadata_from_asr_segment(
         provider_start_ms,
         provider_end_ms,
         token_timestamps: segment.token_timestamps.clone(),
+        needs_review: false,
+        overlapping: false,
     }
 }
 
@@ -1714,6 +1793,21 @@ fn persist_meeting_record(record: &MeetingRecord) -> Result<(), String> {
     Ok(())
 }
 
+fn commit_meeting_realtime_asr_label(
+    session: &mut MeetingSession,
+    label: &AsrCallLabel,
+    now: DateTime<Utc>,
+    persist: impl FnOnce(&MeetingRecord) -> Result<(), String>,
+) -> Result<(), String> {
+    let original = session.clone();
+    session.lock_realtime_asr_label(label, now);
+    if let Err(error) = persist(session.record()) {
+        *session = original;
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn prune_meeting_audio_retention_with_current_preference() -> Result<(), String> {
     MeetingStore::new()
         .map_err(|e| e.to_string())?
@@ -1796,6 +1890,12 @@ fn apply_meeting_audio_retention_state_with(
     if !archive_active {
         record.audio.state = MeetingAudioState::Unavailable;
         record.audio.retained = false;
+        record.audio.path = None;
+        return None;
+    }
+    if record.processing_hold.is_some() {
+        record.audio.state = MeetingAudioState::Retained;
+        record.audio.retained = true;
         record.audio.path = None;
         return None;
     }
@@ -1946,7 +2046,7 @@ fn emit_meeting_error(inner: &Arc<Inner>, meeting_id: Option<String>, code: &str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TranscriptSegmentSource;
+    use crate::types::{ProcessingHold, TranscriptSegmentSource};
     use chrono::{TimeZone, Utc};
 
     #[test]
@@ -2377,20 +2477,60 @@ mod tests {
     }
 
     #[test]
-    fn meeting_session_locks_model_override_for_resume() {
+    fn meeting_session_locks_actual_asr_label_for_resume_and_audit() {
         let started = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 0).unwrap();
-        let session = MeetingSession::new_with_asr_settings(
+        let observed = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 1).unwrap();
+        let mut session = MeetingSession::new_with_asr_settings(
             "550e8400-e29b-41d4-a716-446655440000".to_string(),
             started,
             "bailian".to_string(),
-            MeetingVadSilencePreset::Standard,
-            Some("fun-asr-realtime".to_string()),
+            MeetingVadSilencePreset::Long,
+            None,
+        );
+        session.lock_realtime_asr_label(
+            &AsrCallLabel::new("bailian", Some("fun-asr-realtime".to_string())),
+            observed,
         );
 
         assert_eq!(
             session.model_override().as_deref(),
             Some("fun-asr-realtime")
         );
+        assert_eq!(
+            session.record().realtime_asr,
+            Some(MeetingRealtimeAsrSnapshot {
+                provider_id: "bailian".to_string(),
+                resolved_provider_id: "bailian".to_string(),
+                model_id: Some("fun-asr-realtime".to_string()),
+                silence_preset: MeetingVadSilencePreset::Long,
+            })
+        );
+        assert_eq!(session.record().updated_at, observed.to_rfc3339());
+    }
+
+    #[test]
+    fn meeting_realtime_asr_label_rolls_back_when_persist_fails() {
+        let started = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 0).unwrap();
+        let observed = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 1).unwrap();
+        let mut session = MeetingSession::new_with_asr_settings(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            started,
+            "bailian".to_string(),
+            MeetingVadSilencePreset::Standard,
+            None,
+        );
+        let original = session.clone();
+
+        let result = commit_meeting_realtime_asr_label(
+            &mut session,
+            &AsrCallLabel::new("bailian", Some("fun-asr-realtime".to_string())),
+            observed,
+            |_record| Err("persist failed".to_string()),
+        );
+
+        assert_eq!(result, Err("persist failed".to_string()));
+        assert_eq!(session.model_override(), original.model_override());
+        assert_eq!(session.record(), original.record());
     }
 
     #[test]
@@ -2616,6 +2756,30 @@ mod tests {
         assert_eq!(record.transcript_segments.len(), 1);
     }
 
+    #[test]
+    fn apply_meeting_audio_retention_state_keeps_audio_while_processing_hold_exists() {
+        let started = Utc.with_ymd_and_hms(2026, 7, 4, 9, 30, 0).unwrap();
+        let mut record = MeetingSession::new(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            started,
+            "bailian".to_string(),
+        )
+        .record()
+        .clone();
+        record.processing_hold = Some(ProcessingHold {
+            job_id: "job-1".to_string(),
+            acquired_at: "2026-07-04T09:31:00Z".to_string(),
+        });
+
+        let error = apply_meeting_audio_retention_state_with(&mut record, true, 0, |_id| {
+            panic!("processing hold must prevent audio deletion")
+        });
+
+        assert_eq!(error, None);
+        assert_eq!(record.audio.state, MeetingAudioState::Retained);
+        assert!(record.audio.retained);
+    }
+
     trait MeetingRecordTestExt {
         fn append_transcript_segment_for_test(&mut self, text: &str, observed_at: DateTime<Utc>);
     }
@@ -2624,6 +2788,7 @@ mod tests {
         fn append_transcript_segment_for_test(&mut self, text: &str, observed_at: DateTime<Utc>) {
             self.transcript_segments.push(TranscriptSegment {
                 id: "seg-000001".into(),
+                speaker_id: None,
                 speaker_label: "未区分".into(),
                 start_ms: 0,
                 end_ms: Some(duration_ms_between(

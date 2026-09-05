@@ -894,9 +894,13 @@ mod tests {
         let asr = create_test_asr();
         let (tx, mut rx) = oneshot::channel();
         asr.state.lock().final_tx = Some(tx);
-        asr.finish_error(Qwen3ASRError::SendFailed("websocket write timed out".to_string()));
+        asr.finish_error(Qwen3ASRError::SendFailed(
+            "websocket write timed out".to_string(),
+        ));
         let err = rx.try_recv().unwrap().unwrap_err();
-        assert!(matches!(err, Qwen3ASRError::SendFailed(message) if message == "websocket write timed out"));
+        assert!(
+            matches!(err, Qwen3ASRError::SendFailed(message) if message == "websocket write timed out")
+        );
     }
 
     #[test]

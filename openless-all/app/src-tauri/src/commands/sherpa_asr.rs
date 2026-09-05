@@ -1,5 +1,11 @@
 use super::*;
 
+use crate::asr::local::speaker_diarization::{
+    self, SpeakerDiarizationModelDescriptor, DEFAULT_PACKAGE_ID,
+};
+use crate::persistence::MeetingStore;
+use crate::types::{MeetingDiarizationMode, MeetingPostProcessingStatus, MeetingStatus};
+
 pub(crate) fn active_sherpa_model_from_prefs(prefs: &UserPreferences) -> String {
     if sherpa_model_alias_is_known(&prefs.sherpa_onnx_model) {
         prefs.sherpa_onnx_model.clone()
@@ -183,6 +189,105 @@ pub fn sherpa_onnx_asr_reveal_model_dir(model_alias: String) -> Result<(), Strin
     let dir = SherpaOnnxRuntime::model_dir_for_alias(&model_alias).map_err(|e| format!("{e:#}"))?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {} failed: {e}", dir.display()))?;
     open_path_in_file_manager(&dir)
+}
+
+#[tauri::command]
+pub fn list_speaker_diarization_models(
+    manager: State<'_, Arc<SherpaDownloadManager>>,
+) -> Result<Vec<SpeakerDiarizationModelDescriptor>, String> {
+    let descriptor = speaker_diarization::package_descriptor(
+        DEFAULT_PACKAGE_ID,
+        manager.speaker_diarization_is_active(DEFAULT_PACKAGE_ID),
+    )
+    .map_err(|error| format!("{error:#}"))?;
+    Ok(vec![descriptor])
+}
+
+#[tauri::command]
+pub fn download_speaker_diarization_model(
+    app: AppHandle,
+    manager: State<'_, Arc<SherpaDownloadManager>>,
+    model_id: String,
+) -> Result<(), String> {
+    speaker_diarization::validate_package_id(&model_id).map_err(|error| format!("{error:#}"))?;
+    manager.start_speaker_diarization(app, model_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cancel_speaker_diarization_model_download(
+    manager: State<'_, Arc<SherpaDownloadManager>>,
+    model_id: String,
+) -> Result<(), String> {
+    speaker_diarization::validate_package_id(&model_id).map_err(|error| format!("{error:#}"))?;
+    manager.cancel_speaker_diarization(&model_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_speaker_diarization_model(
+    coord: CoordinatorState<'_>,
+    manager: State<'_, Arc<SherpaDownloadManager>>,
+    model_id: String,
+) -> Result<(), String> {
+    speaker_diarization::validate_package_id(&model_id).map_err(|error| format!("{error:#}"))?;
+    if manager.speaker_diarization_is_active(&model_id) {
+        return Err("speakerDiarizationModelDownloadActive: 请先取消模型下载".to_string());
+    }
+    if crate::asr::local::speaker_diarization_runtime::model_is_active(&model_id) {
+        return Err("speakerDiarizationModelInUse: 模型正在执行本地说话人分析".to_string());
+    }
+    ensure_speaker_model_not_in_use(&model_id)?;
+    speaker_diarization::delete_package(&model_id).map_err(|error| format!("{error:#}"))?;
+
+    let mut prefs = coord.prefs().get();
+    if prefs.post_meeting_asr.diarization.local_model_id.as_deref() == Some(model_id.as_str()) {
+        prefs.post_meeting_asr.diarization.local_model_id = None;
+        coord
+            .prefs()
+            .set(prefs)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn ensure_speaker_model_not_in_use(model_id: &str) -> Result<(), String> {
+    let records = MeetingStore::new()
+        .map_err(|error| error.to_string())?
+        .list()
+        .map_err(|error| error.to_string())?;
+    let in_use = records.iter().any(|record| {
+        let configured = record
+            .post_processing_config
+            .as_ref()
+            .filter(|config| config.diarization_mode == MeetingDiarizationMode::Local)
+            .and_then(|config| config.local_diarization_model_id.as_deref())
+            == Some(model_id);
+        if !configured {
+            return false;
+        }
+        matches!(
+            record.status,
+            MeetingStatus::Recording
+                | MeetingStatus::Paused
+                | MeetingStatus::TranscribingInterrupted
+        ) || record.post_processing.as_ref().is_some_and(|state| {
+            matches!(
+                state.status,
+                MeetingPostProcessingStatus::Pending
+                    | MeetingPostProcessingStatus::PreparingAudio
+                    | MeetingPostProcessingStatus::Uploading
+                    | MeetingPostProcessingStatus::Running
+                    | MeetingPostProcessingStatus::LocalAnalyzing
+                    | MeetingPostProcessingStatus::Applying
+            )
+        })
+    });
+    if in_use {
+        Err("speakerDiarizationModelInUse: 模型正在被会议使用，暂时不能删除".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 fn emit_sherpa_prepare_progress(app: &AppHandle, payload: SherpaPrepareProgressPayload) {

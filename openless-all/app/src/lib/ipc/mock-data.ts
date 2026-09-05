@@ -59,7 +59,18 @@ export let mockSettings: UserPreferences = {
         modelProviderId: null,
         silencePreset: "standard",
     },
+    postMeetingAsr: {
+        providerId: "bailian",
+        modelId: "fun-asr",
+        diarization: {
+            mode: "off",
+            localModelId: null,
+        },
+    },
     activeLlmProvider: "ark",
+    pipelineMode: "traditional",
+    multimodalPipelineEnabled: false,
+    activeOmniProvider: "custom",
     llmThinkingEnabled: false,
     useSystemProxy: true,
     restoreClipboardAfterPaste: true,
@@ -67,6 +78,7 @@ export let mockSettings: UserPreferences = {
     allowNonTsfInsertionFallback: true,
     windowsInsertionMode: "tsf",
     windowsSendInputNewlineMode: "enter",
+    macosNewlineMode: "shiftReturn",
     windowsSendInputInsertionOnly: false,
     windowsShowOpenlessInKeyboardList: true,
     workingLanguages: ["简体中文"],
@@ -98,6 +110,7 @@ export let mockSettings: UserPreferences = {
     selectedWeeklyReportTemplateId: "builtin.weekly.default",
     selectedMonthlyReportTemplateId: "builtin.monthly.default",
     rewriteSaveHistory: true,
+    stylePackHotkeys: [],
     codingAgentEnabled: false,
     codingAgentProvider: "claude-code-cli",
     codingAgentModel: null,
@@ -108,6 +121,7 @@ export let mockSettings: UserPreferences = {
     codingAgentPanelHotkey: { primary: "Enter", modifiers: ["cmd", "shift"] },
     codingAgentQuickHotkey: null,
     localAsrActiveModel: "qwen3-asr-0.6b",
+    localWhisperActiveModel: "whisper-large-v3-turbo",
     localAsrMirror: "huggingface",
     localAsrKeepLoadedSecs: 300,
     foundryLocalAsrModel: "whisper-small",
@@ -129,6 +143,7 @@ export let mockSettings: UserPreferences = {
     streamingInsert: true,
     streamingInsertDefaultMigrated: true,
     streamingInsertSaveClipboard: true,
+    cursorContextEnabled: false,
     showOverviewActivityHeatmap: true,
     autoUpdateCheck: true,
     historyMaxEntries: null,
@@ -568,8 +583,10 @@ export const mockHotkeyCapability: HotkeyCapability = {
 export const mockCredentialsStatus: CredentialsStatus = {
     activeAsrProvider: "foundry-local-whisper",
     activeLlmProvider: "ark",
+    pipelineMode: "traditional",
     asrConfigured: true,
     llmConfigured: true,
+    omniConfigured: false,
     volcengineConfigured: true,
     arkConfigured: true,
 }
@@ -641,6 +658,7 @@ export const mockHistory: DictationSession[] = OL_DATA.history.map((h, i) => ({
     id: `mock-${i}`,
     createdAt: new Date().toISOString(),
     rawTranscript: h.preview,
+    asrTranscript: null,
     finalText: h.preview,
     mode: "structured",
     stylePackId: "builtin.structured",
@@ -686,25 +704,179 @@ export const mockMeetings: MeetingRecord[] = [
         durationMs: 30 * 60 * 1000,
         transcriptSegments: [
             {
-                id: "seg-1",
-                speakerLabel: "未区分",
+                id: "post-1",
+                speakerId: "speaker-0",
+                speakerLabel: "发言人 1",
                 startMs: 0,
                 endMs: 8000,
-                text: "我们先确认 V1 只做会议录音、原文和总结。",
-                source: "realtime_asr",
+                text: "我们先确认 V1 包含会议录音、会议总结、整理稿和实时原文。",
+                source: "retranscribed_asr",
+            },
+            {
+                id: "post-2",
+                speakerId: "speaker-1",
+                speakerLabel: "发言人 2",
+                startMs: 9000,
+                endMs: 16000,
+                text: "整理稿只做保真的去口语化处理，不总结，也不增加原文没有的信息。",
+                source: "retranscribed_asr",
             },
         ],
         summary: {
-            overview: "",
-            keyDecisions: [],
-            todos: [],
-            risksAndOpenQuestions: [],
+            overview: "会议确认了会议记录页的三类内容及整理稿的保真边界。",
+            keyDecisions: ["页面使用会议总结、整理稿、会议原文三个 Tab。"],
+            todos: [{
+                id: "todo-1",
+                content: "完成整理稿任务的失败重试和过期重新生成。",
+                owner: "发言人 1",
+                dueDate: null,
+                sourceSegmentIds: ["post-1"],
+                sourceQuote: null,
+            }],
+            risksAndOpenQuestions: ["长会议分块后必须严格校验 segment ID 映射。"],
+        },
+        organizedDraft: {
+            sourceTranscriptRevision: 1,
+            providerId: "ark",
+            modelId: "deepseek-v3-2",
+            generatedAt: new Date(Date.now() - 27 * 60 * 1000).toISOString(),
+            items: [
+                {
+                    sourceSegmentIds: ["post-1"],
+                    speakerId: "speaker-0",
+                    speakerLabel: "发言人 1",
+                    startMs: 0,
+                    endMs: 8000,
+                    text: "我们先确认，V1 包含会议录音、会议总结、整理稿和实时原文。",
+                },
+                {
+                    sourceSegmentIds: ["post-2"],
+                    speakerId: "speaker-1",
+                    speakerLabel: "发言人 2",
+                    startMs: 9000,
+                    endMs: 16000,
+                    text: "整理稿只做保真的去口语化处理，不总结，也不增加原文中没有的信息。",
+                },
+            ],
+        },
+        organizedDraftState: {
+            status: "completed",
+            jobId: "mock-organized-draft-job",
+            processingRevision: 1,
+            sourceTranscriptRevision: 1,
+            attempt: 1,
+            errorCode: null,
+            errorMessage: null,
+            createdAt: new Date(Date.now() - 28 * 60 * 1000).toISOString(),
+            updatedAt: new Date(Date.now() - 27 * 60 * 1000).toISOString(),
+            startedAt: new Date(Date.now() - 28 * 60 * 1000).toISOString(),
+            completedAt: new Date(Date.now() - 27 * 60 * 1000).toISOString(),
         },
         audio: {
             state: "retained",
             retained: true,
             path: null,
         },
+        realtimeAsr: {
+            providerId: "bailian",
+            resolvedProviderId: "bailian",
+            modelId: "fun-asr-realtime",
+            silencePreset: "standard",
+        },
+        postProcessingConfig: {
+            diarizationMode: "cloud",
+            realtimeProviderId: "bailian",
+            realtimeModelId: "fun-asr-realtime",
+            postMeetingAsrModelRef: {
+                providerId: "bailian",
+                modelId: "fun-asr",
+            },
+            resolvedAsrRuntimeKind: "cloud",
+            localDiarizationModelId: null,
+            expectedSpeakerCount: 1,
+            modelVersion: null,
+            processingRevision: 1,
+        },
+        postProcessing: {
+            status: "completed",
+            jobId: "mock-post-processing-job",
+            modelRef: {
+                providerId: "bailian",
+                modelId: "fun-asr",
+            },
+            resolvedRuntimeKind: "cloud",
+            diarizationMode: "cloud",
+            expectedSpeakerCount: 1,
+            processingRevision: 1,
+            providerTaskId: "mock-provider-task",
+            progress: 1,
+            attempt: 1,
+            errorCode: null,
+            errorMessage: null,
+            createdAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+            updatedAt: new Date().toISOString(),
+            startedAt: new Date(Date.now() - 29 * 60 * 1000).toISOString(),
+            completedAt: new Date(Date.now() - 28 * 60 * 1000).toISOString(),
+        },
+        transcriptRevisions: [
+            {
+                revision: 0,
+                source: "realtime",
+                status: "rejected",
+                createdAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+                segments: [
+                    {
+                        id: "realtime-1",
+                        speakerId: "speaker-0",
+                        speakerLabel: "发言人 1",
+                        startMs: 0,
+                        endMs: 8000,
+                        text: "嗯我们先确认一下，V1 就是会议录音、总结、整理稿还有那个实时原文。",
+                        source: "realtime_asr",
+                    },
+                    {
+                        id: "realtime-2",
+                        speakerId: "speaker-1",
+                        speakerLabel: "发言人 2",
+                        startMs: 9000,
+                        endMs: 16000,
+                        text: "那个，整理稿就只做去口语化，不要总结，也不要自己加信息。",
+                        source: "realtime_asr",
+                    },
+                ],
+            },
+            {
+                revision: 1,
+                source: "cloud_postprocess",
+                status: "active",
+                createdAt: new Date(Date.now() - 28 * 60 * 1000).toISOString(),
+                segments: [],
+            },
+        ],
+        activeTranscriptRevision: 1,
+        speakerProfiles: [
+            {
+                id: "speaker-0",
+                providerSpeakerId: "0",
+                displayName: "发言人 1",
+                manuallyNamed: false,
+            },
+            {
+                id: "speaker-1",
+                providerSpeakerId: "1",
+                displayName: "发言人 2",
+                manuallyNamed: false,
+            },
+        ],
+        speakerTurns: [
+            {
+                speakerId: "speaker-0",
+                startMs: 0,
+                endMs: 8000,
+                confidence: 0.98,
+                overlapping: false,
+            },
+        ],
         createdAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
         updatedAt: new Date().toISOString(),
     },
@@ -726,6 +898,15 @@ export const mockCorrectionRules: CorrectionRule[] = [
         replacement: "{num}例",
         enabled: true,
         createdAt: new Date().toISOString(),
+        source: "manual",
+    },
+    {
+        id: "rule-learned-codex",
+        pattern: "扣德克斯",
+        replacement: "Codex",
+        enabled: true,
+        createdAt: new Date().toISOString(),
+        source: "learned",
     },
 ]
 
@@ -902,7 +1083,20 @@ export const mockActivityDays: ActivityDay[] = (() => {
         if (seed < 0.55) continue
         const count = Math.max(1, Math.round(seed * 22) - 8)
         const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
-        days.push({ date: iso, count })
+        // 字数 / 时长按每条 ~120 字、~9 秒的量级派生，让周期指标卡在浏览器 dev 下
+        // 也有可看的数据。最早的 30 天故意只给 count（不给 chars/durationMs），
+        // 模拟升级前写入的老数据，验证「老日期在字数/时长指标里显示 0」不会崩。
+        const legacy = i > 334
+        days.push(
+            legacy
+                ? { date: iso, count }
+                : {
+                      date: iso,
+                      count,
+                      chars: count * (90 + Math.round(seed * 70)),
+                      durationMs: count * (6000 + Math.round(seed * 7000)),
+                  },
+        )
     }
     return days
 })()
